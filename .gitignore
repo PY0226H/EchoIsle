@@ -42,3 +42,9 @@ test-results/
 # local automation/cache artifacts
 .fastembed*
 .codex/
+
+# docs
+docs/
+
+# skills
+skills/
