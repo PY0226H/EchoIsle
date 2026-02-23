@@ -11,3 +11,12 @@ auth:
     -----BEGIN PUBLIC KEY-----
     MCowBQYDK2VwAyEAfM+lwNHj6TRJ3EGP38lIJcOo9Dlt2u2JzcwWMbu7jQY=
     -----END PUBLIC KEY-----
+kafka:
+  enabled: false
+  brokers: 127.0.0.1:9092
+  topic_prefix: aicomm
+  client_id: chat-server
+  group_id: chat-server-bootstrap
+  consume_enabled: false
+  consume_topics: []
+  producer_timeout_ms: 1500

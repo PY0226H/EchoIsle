@@ -1,6 +1,7 @@
 mod agent;
 mod config;
 mod error;
+mod event_bus;
 mod handlers;
 mod middlewares;
 mod models;
@@ -20,6 +21,7 @@ use tokio::fs;
 use tower_http::cors::{self, CorsLayer};
 
 pub use error::{AppError, ErrorOutput};
+pub(crate) use event_bus::{DebateParticipantJoinedEvent, EventBus};
 pub use models::*;
 
 use axum::{
@@ -42,6 +44,7 @@ pub struct AppStateInner {
     pub(crate) dk: DecodingKey,
     pub(crate) ek: EncodingKey,
     pub(crate) pool: PgPool,
+    pub(crate) event_bus: EventBus,
 }
 
 pub async fn get_router(state: AppState) -> Result<Router, AppError> {
@@ -135,12 +138,17 @@ impl AppState {
         let pool = PgPool::connect(&config.server.db_url)
             .await
             .context("connect to db failed")?;
+        let event_bus = EventBus::from_config(&config.kafka).context("init event bus failed")?;
+        event_bus
+            .maybe_spawn_bootstrap_consumer()
+            .context("start bootstrap kafka consumer failed")?;
         Ok(Self {
             inner: Arc::new(AppStateInner {
                 config,
                 ek,
                 dk,
                 pool,
+                event_bus,
             }),
         })
     }
@@ -154,12 +162,14 @@ impl AppState {
         let pool = PgPoolOptions::new()
             .connect_lazy(&config.server.db_url)
             .context("create lazy db pool failed")?;
+        let event_bus = EventBus::from_config(&config.kafka).context("init event bus failed")?;
         Ok(Self {
             inner: Arc::new(AppStateInner {
                 config,
                 ek,
                 dk,
                 pool,
+                event_bus,
             }),
         })
     }
@@ -192,6 +202,7 @@ mod test_util {
                     ek,
                     dk,
                     pool,
+                    event_bus: EventBus::Disabled,
                 }),
             };
             Ok((tdb, state))

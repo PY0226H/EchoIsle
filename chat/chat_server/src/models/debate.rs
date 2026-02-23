@@ -1,8 +1,9 @@
-use crate::{AppError, AppState};
+use crate::{AppError, AppState, DebateParticipantJoinedEvent};
 use chat_core::User;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use sqlx::FromRow;
+use tracing::warn;
 use utoipa::{IntoParams, ToSchema};
 
 const DEFAULT_LIMIT: u64 = 20;
@@ -294,6 +295,26 @@ impl AppState {
         };
 
         tx.commit().await?;
+
+        if let Err(err) = self
+            .event_bus
+            .publish_debate_participant_joined(DebateParticipantJoinedEvent {
+                ws_id: user.ws_id as u64,
+                session_id,
+                user_id: user.id as u64,
+                side: input.side.clone(),
+                pro_count,
+                con_count,
+            })
+            .await
+        {
+            warn!(
+                session_id,
+                user_id = user.id,
+                "publish kafka debate participant joined failed: {}",
+                err
+            );
+        }
 
         Ok(JoinDebateSessionOutput {
             session_id,
