@@ -17,6 +17,7 @@ use crate::config::KafkaConfig;
 
 pub const TOPIC_DEBATE_PARTICIPANT_JOINED: &str = "debate.participant.joined.v1";
 pub const TOPIC_DEBATE_SESSION_STATUS_CHANGED: &str = "debate.session.status.changed.v1";
+pub const TOPIC_DEBATE_MESSAGE_PINNED: &str = "debate.message.pinned.v1";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -65,6 +66,20 @@ pub struct DebateSessionStatusChangedEvent {
     pub from_status: String,
     pub to_status: String,
     pub changed_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DebateMessagePinnedEvent {
+    pub ws_id: u64,
+    pub session_id: u64,
+    pub message_id: u64,
+    pub user_id: u64,
+    pub ledger_id: u64,
+    pub cost_coins: i64,
+    pub pin_seconds: i32,
+    pub pinned_at: DateTime<Utc>,
+    pub expires_at: DateTime<Utc>,
 }
 
 #[derive(Clone)]
@@ -137,6 +152,23 @@ impl EventBus {
             .await
     }
 
+    pub async fn publish_debate_message_pinned(
+        &self,
+        event: DebateMessagePinnedEvent,
+    ) -> anyhow::Result<()> {
+        let aggregate_id = format!("session:{}", event.session_id);
+        let payload = serde_json::to_value(event)?;
+        let envelope = EventEnvelope::new(
+            "debate.message.pinned",
+            "chat-server",
+            aggregate_id,
+            payload,
+        );
+        let key = envelope.aggregate_id.clone();
+        self.publish(TOPIC_DEBATE_MESSAGE_PINNED, &key, &envelope)
+            .await
+    }
+
     pub async fn publish(
         &self,
         base_topic: &str,
@@ -177,6 +209,7 @@ impl EventBus {
             vec![
                 bus.config.topic_name(TOPIC_DEBATE_PARTICIPANT_JOINED),
                 bus.config.topic_name(TOPIC_DEBATE_SESSION_STATUS_CHANGED),
+                bus.config.topic_name(TOPIC_DEBATE_MESSAGE_PINNED),
             ]
         } else {
             bus.config
@@ -256,6 +289,10 @@ mod tests {
         assert_eq!(
             cfg.topic_name(TOPIC_DEBATE_SESSION_STATUS_CHANGED),
             "aicomm.debate.session.status.changed.v1"
+        );
+        assert_eq!(
+            cfg.topic_name(TOPIC_DEBATE_MESSAGE_PINNED),
+            "aicomm.debate.message.pinned.v1"
         );
     }
 

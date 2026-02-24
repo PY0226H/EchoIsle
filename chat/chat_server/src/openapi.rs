@@ -1,8 +1,9 @@
 use crate::handlers::*;
 use crate::{
-    AppState, CreateChat, CreateMessage, CreateUser, DebateSessionSummary, DebateTopic,
-    ErrorOutput, IapProduct, JoinDebateSessionInput, JoinDebateSessionOutput, ListDebateSessions,
-    ListDebateTopics, ListIapProducts, ListMessages, ListWalletLedger, SigninUser,
+    AppState, CreateChat, CreateDebateMessageInput, CreateMessage, CreateUser, DebateMessage,
+    DebateSessionSummary, DebateTopic, ErrorOutput, IapProduct, JoinDebateSessionInput,
+    JoinDebateSessionOutput, ListDebateSessions, ListDebateTopics, ListIapProducts, ListMessages,
+    ListWalletLedger, PinDebateMessageInput, PinDebateMessageOutput, SigninUser,
     VerifyIapOrderInput, VerifyIapOrderOutput, WalletBalanceOutput, WalletLedgerItem,
 };
 use axum::Router;
@@ -28,6 +29,8 @@ pub(crate) trait OpenApiRouter {
             list_debate_topics_handler,
             list_debate_sessions_handler,
             join_debate_session_handler,
+            create_debate_message_handler,
+            pin_debate_message_handler,
             list_iap_products_handler,
             verify_iap_order_handler,
             get_wallet_balance_handler,
@@ -47,6 +50,7 @@ pub(crate) trait OpenApiRouter {
                 User, Chat, ChatType, ChatAgent, AgentType, ChatUser, Message, Workspace,
                 DebateTopic, DebateSessionSummary, ListDebateTopics, ListDebateSessions,
                 JoinDebateSessionInput, JoinDebateSessionOutput,
+                DebateMessage, CreateDebateMessageInput, PinDebateMessageInput, PinDebateMessageOutput,
                 IapProduct, ListIapProducts, VerifyIapOrderInput, VerifyIapOrderOutput,
                 WalletBalanceOutput, ListWalletLedger, WalletLedgerItem,
                 SigninUser, CreateUser, CreateChat, CreateMessage, ListMessages, AuthOutput, AccessTicketsOutput, ErrorOutput

@@ -2,6 +2,7 @@ use std::{collections::HashSet, sync::Arc};
 
 use crate::AppState;
 use chat_core::{Chat, Message};
+use chrono::{DateTime, Utc};
 use futures::StreamExt;
 use serde::{Deserialize, Serialize};
 use sqlx::postgres::PgListener;
@@ -16,6 +17,8 @@ pub enum AppEvent {
     NewMessage(Message),
     DebateParticipantJoined(DebateParticipantJoined),
     DebateSessionStatusChanged(DebateSessionStatusChanged),
+    DebateMessageCreated(DebateMessageCreated),
+    DebateMessagePinned(DebateMessagePinned),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -34,6 +37,29 @@ pub struct DebateSessionStatusChanged {
     pub session_id: i64,
     pub from_status: String,
     pub to_status: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DebateMessageCreated {
+    pub message_id: i64,
+    pub session_id: i64,
+    pub user_id: i64,
+    pub side: String,
+    pub content: String,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DebateMessagePinned {
+    pub pin_id: i64,
+    pub session_id: i64,
+    pub message_id: i64,
+    pub user_id: i64,
+    pub cost_coins: i64,
+    pub pin_seconds: i32,
+    pub expires_at: DateTime<Utc>,
 }
 
 #[derive(Debug)]
@@ -76,12 +102,37 @@ struct DebateSessionStatusChangedPayload {
     user_ids: Vec<i64>,
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+struct DebateMessageCreatedPayload {
+    message_id: i64,
+    session_id: i64,
+    user_id: i64,
+    side: String,
+    content: String,
+    created_at: DateTime<Utc>,
+    user_ids: Vec<i64>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct DebateMessagePinnedPayload {
+    pin_id: i64,
+    session_id: i64,
+    message_id: i64,
+    user_id: i64,
+    cost_coins: i64,
+    pin_seconds: i32,
+    expires_at: DateTime<Utc>,
+    user_ids: Vec<i64>,
+}
+
 pub async fn setup_pg_listener(state: AppState) -> anyhow::Result<()> {
     let mut listener = PgListener::connect(&state.config.server.db_url).await?;
     listener.listen("chat_updated").await?;
     listener.listen("chat_message_created").await?;
     listener.listen("debate_participant_joined").await?;
     listener.listen("debate_session_status_changed").await?;
+    listener.listen("debate_message_created").await?;
+    listener.listen("debate_message_pinned").await?;
 
     let mut stream = listener.into_stream();
 
@@ -160,6 +211,39 @@ impl Notification {
                     event: Arc::new(AppEvent::DebateSessionStatusChanged(event)),
                 })
             }
+            "debate_message_created" => {
+                let payload: DebateMessageCreatedPayload = serde_json::from_str(payload)?;
+                let event = DebateMessageCreated {
+                    message_id: payload.message_id,
+                    session_id: payload.session_id,
+                    user_id: payload.user_id,
+                    side: payload.side,
+                    content: payload.content,
+                    created_at: payload.created_at,
+                };
+                let user_ids = payload.user_ids.iter().map(|v| *v as u64).collect();
+                Ok(Self {
+                    user_ids,
+                    event: Arc::new(AppEvent::DebateMessageCreated(event)),
+                })
+            }
+            "debate_message_pinned" => {
+                let payload: DebateMessagePinnedPayload = serde_json::from_str(payload)?;
+                let event = DebateMessagePinned {
+                    pin_id: payload.pin_id,
+                    session_id: payload.session_id,
+                    message_id: payload.message_id,
+                    user_id: payload.user_id,
+                    cost_coins: payload.cost_coins,
+                    pin_seconds: payload.pin_seconds,
+                    expires_at: payload.expires_at,
+                };
+                let user_ids = payload.user_ids.iter().map(|v| *v as u64).collect();
+                Ok(Self {
+                    user_ids,
+                    event: Arc::new(AppEvent::DebateMessagePinned(event)),
+                })
+            }
             _ => Err(anyhow::anyhow!("Invalid notification type")),
         }
     }
@@ -174,6 +258,8 @@ impl AppEvent {
             AppEvent::NewMessage(_) => "NewMessage",
             AppEvent::DebateParticipantJoined(_) => "DebateParticipantJoined",
             AppEvent::DebateSessionStatusChanged(_) => "DebateSessionStatusChanged",
+            AppEvent::DebateMessageCreated(_) => "DebateMessageCreated",
+            AppEvent::DebateMessagePinned(_) => "DebateMessagePinned",
         }
     }
 
@@ -181,6 +267,8 @@ impl AppEvent {
         match self {
             AppEvent::DebateParticipantJoined(v) => Some(v.session_id),
             AppEvent::DebateSessionStatusChanged(v) => Some(v.session_id),
+            AppEvent::DebateMessageCreated(v) => Some(v.session_id),
+            AppEvent::DebateMessagePinned(v) => Some(v.session_id),
             _ => None,
         }
     }
@@ -249,6 +337,55 @@ mod tests {
                 assert_eq!(v.to_status, "judging");
             }
             _ => panic!("expected DebateSessionStatusChanged event"),
+        }
+    }
+
+    #[test]
+    fn notification_load_should_parse_debate_message_created() {
+        let payload = r#"{
+            "message_id": 100,
+            "session_id": 15,
+            "user_id": 7,
+            "side": "pro",
+            "content": "hello",
+            "created_at": "2026-02-23T12:00:00Z",
+            "user_ids": [7, 8, 9]
+        }"#;
+        let notif = Notification::load("debate_message_created", payload).unwrap();
+        assert_eq!(notif.user_ids, HashSet::from([7_u64, 8_u64, 9_u64]));
+        match notif.event.as_ref() {
+            AppEvent::DebateMessageCreated(v) => {
+                assert_eq!(v.message_id, 100);
+                assert_eq!(v.session_id, 15);
+                assert_eq!(v.user_id, 7);
+                assert_eq!(v.side, "pro");
+            }
+            _ => panic!("expected DebateMessageCreated event"),
+        }
+    }
+
+    #[test]
+    fn notification_load_should_parse_debate_message_pinned() {
+        let payload = r#"{
+            "pin_id": 21,
+            "session_id": 15,
+            "message_id": 100,
+            "user_id": 7,
+            "cost_coins": 20,
+            "pin_seconds": 45,
+            "expires_at": "2026-02-23T12:10:00Z",
+            "user_ids": [7, 8, 9]
+        }"#;
+        let notif = Notification::load("debate_message_pinned", payload).unwrap();
+        assert_eq!(notif.user_ids, HashSet::from([7_u64, 8_u64, 9_u64]));
+        match notif.event.as_ref() {
+            AppEvent::DebateMessagePinned(v) => {
+                assert_eq!(v.pin_id, 21);
+                assert_eq!(v.session_id, 15);
+                assert_eq!(v.message_id, 100);
+                assert_eq!(v.cost_coins, 20);
+            }
+            _ => panic!("expected DebateMessagePinned event"),
         }
     }
 }

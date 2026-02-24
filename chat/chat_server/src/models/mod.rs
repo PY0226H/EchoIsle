@@ -10,8 +10,9 @@ mod workspace;
 pub use agent::{CreateAgent, UpdateAgent};
 pub use chat::CreateChat;
 pub use debate::{
-    DebateSessionSummary, DebateTopic, JoinDebateSessionInput, JoinDebateSessionOutput,
-    ListDebateSessions, ListDebateTopics,
+    CreateDebateMessageInput, DebateMessage, DebateSessionSummary, DebateTopic,
+    JoinDebateSessionInput, JoinDebateSessionOutput, ListDebateSessions, ListDebateTopics,
+    PinDebateMessageInput, PinDebateMessageOutput,
 };
 pub use messages::{CreateMessage, ListMessages};
 pub use payment::{

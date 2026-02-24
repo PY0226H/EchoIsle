@@ -1,4 +1,7 @@
-use crate::{AppError, AppState, JoinDebateSessionInput, ListDebateSessions, ListDebateTopics};
+use crate::{
+    AppError, AppState, CreateDebateMessageInput, JoinDebateSessionInput, ListDebateSessions,
+    ListDebateTopics, PinDebateMessageInput,
+};
 use axum::{
     extract::{Path, Query, State},
     http::StatusCode,
@@ -79,4 +82,60 @@ pub(crate) async fn join_debate_session_handler(
 ) -> Result<impl IntoResponse, AppError> {
     let result = state.join_debate_session(id, &user, input).await?;
     Ok((StatusCode::OK, Json(result)))
+}
+
+/// Send a message in a debate session.
+#[utoipa::path(
+    post,
+    path = "/api/debate/sessions/{id}/messages",
+    params(
+        ("id" = u64, Path, description = "Debate session id")
+    ),
+    request_body = CreateDebateMessageInput,
+    responses(
+        (status = 201, description = "Created message", body = crate::DebateMessage),
+        (status = 400, description = "Invalid input", body = ErrorOutput),
+        (status = 404, description = "Debate session not found", body = ErrorOutput),
+        (status = 409, description = "Session conflict", body = ErrorOutput),
+    ),
+    security(
+        ("token" = [])
+    )
+)]
+pub(crate) async fn create_debate_message_handler(
+    Extension(user): Extension<User>,
+    State(state): State<AppState>,
+    Path(id): Path<u64>,
+    Json(input): Json<CreateDebateMessageInput>,
+) -> Result<impl IntoResponse, AppError> {
+    let msg = state.create_debate_message(id, &user, input).await?;
+    Ok((StatusCode::CREATED, Json(msg)))
+}
+
+/// Pin an existing debate message with wallet consume.
+#[utoipa::path(
+    post,
+    path = "/api/debate/messages/{id}/pin",
+    params(
+        ("id" = u64, Path, description = "Debate message id")
+    ),
+    request_body = PinDebateMessageInput,
+    responses(
+        (status = 200, description = "Pin result", body = crate::PinDebateMessageOutput),
+        (status = 400, description = "Invalid input", body = ErrorOutput),
+        (status = 404, description = "Debate message not found", body = ErrorOutput),
+        (status = 409, description = "Pin conflict", body = ErrorOutput),
+    ),
+    security(
+        ("token" = [])
+    )
+)]
+pub(crate) async fn pin_debate_message_handler(
+    Extension(user): Extension<User>,
+    State(state): State<AppState>,
+    Path(id): Path<u64>,
+    Json(input): Json<PinDebateMessageInput>,
+) -> Result<impl IntoResponse, AppError> {
+    let ret = state.pin_debate_message(id, &user, input).await?;
+    Ok((StatusCode::OK, Json(ret)))
 }

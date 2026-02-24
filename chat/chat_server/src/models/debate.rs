@@ -1,13 +1,22 @@
-use crate::{AppError, AppState, DebateParticipantJoinedEvent, DebateSessionStatusChangedEvent};
+use crate::{
+    AppError, AppState, DebateMessagePinnedEvent, DebateParticipantJoinedEvent,
+    DebateSessionStatusChangedEvent,
+};
 use chat_core::User;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use sqlx::FromRow;
+use serde_json::json;
+use sqlx::{FromRow, Postgres, Transaction};
 use tracing::warn;
 use utoipa::{IntoParams, ToSchema};
 
 const DEFAULT_LIMIT: u64 = 20;
 const MAX_LIMIT: u64 = 100;
+const DEBATE_MESSAGE_MAX_LEN: usize = 1000;
+const PIN_MIN_SECONDS: i32 = 30;
+const PIN_MAX_SECONDS: i32 = 600;
+const PIN_BILLING_UNIT_SECONDS: i32 = 30;
+const PIN_COST_PER_UNIT_COINS: i64 = 10;
 
 #[derive(Debug, Clone, FromRow, ToSchema, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -80,6 +89,45 @@ pub struct JoinDebateSessionOutput {
     pub con_count: i32,
 }
 
+#[derive(Debug, Clone, FromRow, ToSchema, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DebateMessage {
+    pub id: i64,
+    pub ws_id: i64,
+    pub session_id: i64,
+    pub user_id: i64,
+    pub side: String,
+    pub content: String,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, ToSchema, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CreateDebateMessageInput {
+    pub content: String,
+}
+
+#[derive(Debug, Clone, ToSchema, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PinDebateMessageInput {
+    pub pin_seconds: i32,
+    pub idempotency_key: String,
+}
+
+#[derive(Debug, Clone, ToSchema, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PinDebateMessageOutput {
+    pub pin_id: u64,
+    pub session_id: u64,
+    pub message_id: u64,
+    pub ledger_id: u64,
+    pub debited_coins: i64,
+    pub wallet_balance: i64,
+    pub pin_seconds: i32,
+    pub expires_at: DateTime<Utc>,
+    pub newly_pinned: bool,
+}
+
 #[derive(Debug, FromRow)]
 struct DebateSessionForJoin {
     ws_id: i64,
@@ -88,6 +136,39 @@ struct DebateSessionForJoin {
     max_participants_per_side: i32,
     pro_count: i32,
     con_count: i32,
+}
+
+#[derive(Debug, FromRow)]
+struct DebateSessionForAction {
+    ws_id: i64,
+    status: String,
+    end_at: DateTime<Utc>,
+}
+
+#[derive(Debug, FromRow)]
+struct DebateMessageForPin {
+    id: i64,
+    ws_id: i64,
+    session_id: i64,
+    user_id: i64,
+}
+
+#[derive(Debug, FromRow)]
+struct ExistingPinByIdempotency {
+    ledger_id: i64,
+    balance_after: i64,
+    ws_id: i64,
+    user_id: i64,
+}
+
+#[derive(Debug, FromRow)]
+struct PinRecord {
+    id: i64,
+    session_id: i64,
+    message_id: i64,
+    pin_seconds: i32,
+    expires_at: DateTime<Utc>,
+    cost_coins: i64,
 }
 
 fn default_true() -> bool {
@@ -105,6 +186,37 @@ fn valid_join_side(side: &str) -> bool {
 
 fn can_join_status(status: &str) -> bool {
     matches!(status, "open" | "running")
+}
+
+fn normalize_message_content(content: &str) -> Result<String, AppError> {
+    let content = content.trim();
+    if content.is_empty() {
+        return Err(AppError::DebateError(
+            "message content cannot be empty".to_string(),
+        ));
+    }
+    if content.len() > DEBATE_MESSAGE_MAX_LEN {
+        return Err(AppError::DebateError(format!(
+            "message content too long, max {} chars",
+            DEBATE_MESSAGE_MAX_LEN
+        )));
+    }
+    Ok(content.to_string())
+}
+
+fn normalize_pin_seconds(pin_seconds: i32) -> Result<i32, AppError> {
+    if !(PIN_MIN_SECONDS..=PIN_MAX_SECONDS).contains(&pin_seconds) {
+        return Err(AppError::PaymentError(format!(
+            "pin_seconds must be between {} and {}",
+            PIN_MIN_SECONDS, PIN_MAX_SECONDS
+        )));
+    }
+    Ok(pin_seconds)
+}
+
+fn pin_cost_coins(pin_seconds: i32) -> i64 {
+    let units = (pin_seconds + PIN_BILLING_UNIT_SECONDS - 1) / PIN_BILLING_UNIT_SECONDS;
+    units as i64 * PIN_COST_PER_UNIT_COINS
 }
 
 const JUDGING_CLOSE_GRACE_SECONDS: i64 = 30;
@@ -336,6 +448,378 @@ impl AppState {
         })
     }
 
+    pub async fn create_debate_message(
+        &self,
+        session_id: u64,
+        user: &User,
+        input: CreateDebateMessageInput,
+    ) -> Result<DebateMessage, AppError> {
+        let content = normalize_message_content(&input.content)?;
+        let mut tx = self.pool.begin().await?;
+
+        let session = self
+            .load_session_for_action(&mut tx, session_id as i64)
+            .await?
+            .ok_or_else(|| AppError::NotFound(format!("debate session id {session_id}")))?;
+        if session.ws_id != user.ws_id {
+            return Err(AppError::NotFound(format!(
+                "debate session id {session_id}"
+            )));
+        }
+        if !can_join_status(&session.status) || session.end_at <= Utc::now() {
+            return Err(AppError::DebateConflict(format!(
+                "session {} is not accepting messages now",
+                session_id
+            )));
+        }
+
+        let participant_side: Option<(String,)> = sqlx::query_as(
+            r#"
+            SELECT side
+            FROM session_participants
+            WHERE session_id = $1 AND user_id = $2
+            "#,
+        )
+        .bind(session_id as i64)
+        .bind(user.id)
+        .fetch_optional(&mut *tx)
+        .await?;
+        let Some((side,)) = participant_side else {
+            return Err(AppError::DebateConflict(format!(
+                "user {} has not joined session {}",
+                user.id, session_id
+            )));
+        };
+
+        let msg: DebateMessage = sqlx::query_as(
+            r#"
+            INSERT INTO session_messages(ws_id, session_id, user_id, side, content)
+            VALUES ($1, $2, $3, $4, $5)
+            RETURNING id, ws_id, session_id, user_id, side, content, created_at
+            "#,
+        )
+        .bind(user.ws_id)
+        .bind(session_id as i64)
+        .bind(user.id)
+        .bind(side)
+        .bind(content)
+        .fetch_one(&mut *tx)
+        .await?;
+
+        sqlx::query(
+            r#"
+            UPDATE debate_sessions
+            SET hot_score = hot_score + 1, updated_at = NOW()
+            WHERE id = $1
+            "#,
+        )
+        .bind(session_id as i64)
+        .execute(&mut *tx)
+        .await?;
+
+        tx.commit().await?;
+        Ok(msg)
+    }
+
+    pub async fn pin_debate_message(
+        &self,
+        message_id: u64,
+        user: &User,
+        input: PinDebateMessageInput,
+    ) -> Result<PinDebateMessageOutput, AppError> {
+        let pin_seconds = normalize_pin_seconds(input.pin_seconds)?;
+        let idempotency_key = input.idempotency_key.trim().to_string();
+        if idempotency_key.is_empty() {
+            return Err(AppError::PaymentError(
+                "idempotency_key cannot be empty".to_string(),
+            ));
+        }
+        if idempotency_key.len() > 160 {
+            return Err(AppError::PaymentError(
+                "idempotency_key too long, max 160".to_string(),
+            ));
+        }
+
+        let mut tx = self.pool.begin().await?;
+        let existing_pin = self
+            .load_existing_pin_by_idempotency(&mut tx, user, &idempotency_key)
+            .await?;
+        if let Some(pin) = existing_pin {
+            tx.commit().await?;
+            return Ok(pin);
+        }
+
+        let msg = sqlx::query_as::<_, DebateMessageForPin>(
+            r#"
+            SELECT id, ws_id, session_id, user_id
+            FROM session_messages
+            WHERE id = $1
+            "#,
+        )
+        .bind(message_id as i64)
+        .fetch_optional(&mut *tx)
+        .await?
+        .ok_or_else(|| AppError::NotFound(format!("debate message id {message_id}")))?;
+        if msg.ws_id != user.ws_id {
+            return Err(AppError::NotFound(format!(
+                "debate message id {message_id}"
+            )));
+        }
+        if msg.user_id != user.id {
+            return Err(AppError::DebateConflict(format!(
+                "only message sender can pin message {}",
+                message_id
+            )));
+        }
+
+        let session = self
+            .load_session_for_action(&mut tx, msg.session_id)
+            .await?
+            .ok_or_else(|| AppError::NotFound(format!("debate session id {}", msg.session_id)))?;
+        if !can_join_status(&session.status) || session.end_at <= Utc::now() {
+            return Err(AppError::DebateConflict(format!(
+                "session {} is not accepting pin now",
+                msg.session_id
+            )));
+        }
+
+        let active_pin: Option<(i64,)> = sqlx::query_as(
+            r#"
+            SELECT id
+            FROM session_pinned_messages
+            WHERE message_id = $1
+              AND status = 'active'
+              AND expires_at > NOW()
+            LIMIT 1
+            "#,
+        )
+        .bind(msg.id)
+        .fetch_optional(&mut *tx)
+        .await?;
+        if active_pin.is_some() {
+            return Err(AppError::DebateConflict(format!(
+                "message {} already has an active pin",
+                msg.id
+            )));
+        }
+
+        let cost_coins = pin_cost_coins(pin_seconds);
+        let now = Utc::now();
+        let expires_at = now + chrono::Duration::seconds(pin_seconds as i64);
+
+        sqlx::query(
+            r#"
+            INSERT INTO user_wallets(ws_id, user_id, balance)
+            VALUES ($1, $2, 0)
+            ON CONFLICT (ws_id, user_id) DO NOTHING
+            "#,
+        )
+        .bind(user.ws_id)
+        .bind(user.id)
+        .execute(&mut *tx)
+        .await?;
+
+        let current_balance: (i64,) = sqlx::query_as(
+            r#"
+            SELECT balance
+            FROM user_wallets
+            WHERE ws_id = $1 AND user_id = $2
+            FOR UPDATE
+            "#,
+        )
+        .bind(user.ws_id)
+        .bind(user.id)
+        .fetch_one(&mut *tx)
+        .await?;
+        if current_balance.0 < cost_coins {
+            return Err(AppError::PaymentConflict(format!(
+                "insufficient balance, need {}, current {}",
+                cost_coins, current_balance.0
+            )));
+        }
+        let next_balance = current_balance.0 - cost_coins;
+
+        sqlx::query(
+            r#"
+            UPDATE user_wallets
+            SET balance = $3, updated_at = NOW()
+            WHERE ws_id = $1 AND user_id = $2
+            "#,
+        )
+        .bind(user.ws_id)
+        .bind(user.id)
+        .bind(next_balance)
+        .execute(&mut *tx)
+        .await?;
+
+        let metadata = json!({
+            "sessionId": msg.session_id,
+            "messageId": msg.id,
+            "pinSeconds": pin_seconds,
+        });
+        let ledger_id: (i64,) = sqlx::query_as(
+            r#"
+            INSERT INTO wallet_ledger(
+                ws_id, user_id, entry_type, amount_delta, balance_after, idempotency_key, metadata
+            )
+            VALUES ($1, $2, 'pin_debit', $3, $4, $5, $6)
+            RETURNING id
+            "#,
+        )
+        .bind(user.ws_id)
+        .bind(user.id)
+        .bind(-cost_coins)
+        .bind(next_balance)
+        .bind(&idempotency_key)
+        .bind(metadata)
+        .fetch_one(&mut *tx)
+        .await?;
+
+        let pin: PinRecord = sqlx::query_as(
+            r#"
+            INSERT INTO session_pinned_messages(
+                ws_id, session_id, message_id, user_id, ledger_id,
+                cost_coins, pin_seconds, pinned_at, expires_at, status
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'active')
+            RETURNING id, session_id, message_id, pin_seconds, expires_at, cost_coins
+            "#,
+        )
+        .bind(user.ws_id)
+        .bind(msg.session_id)
+        .bind(msg.id)
+        .bind(user.id)
+        .bind(ledger_id.0)
+        .bind(cost_coins)
+        .bind(pin_seconds)
+        .bind(now)
+        .bind(expires_at)
+        .fetch_one(&mut *tx)
+        .await?;
+
+        sqlx::query(
+            r#"
+            UPDATE debate_sessions
+            SET hot_score = hot_score + $2::integer, updated_at = NOW()
+            WHERE id = $1
+            "#,
+        )
+        .bind(msg.session_id)
+        .bind((cost_coins.min(i32::MAX as i64)) as i32)
+        .execute(&mut *tx)
+        .await?;
+
+        tx.commit().await?;
+
+        if let Err(err) = self
+            .event_bus
+            .publish_debate_message_pinned(DebateMessagePinnedEvent {
+                ws_id: user.ws_id as u64,
+                session_id: pin.session_id as u64,
+                message_id: pin.message_id as u64,
+                user_id: user.id as u64,
+                ledger_id: ledger_id.0 as u64,
+                cost_coins: pin.cost_coins,
+                pin_seconds: pin.pin_seconds,
+                pinned_at: now,
+                expires_at: pin.expires_at,
+            })
+            .await
+        {
+            warn!(
+                message_id,
+                user_id = user.id,
+                "publish kafka debate message pinned failed: {}",
+                err
+            );
+        }
+
+        Ok(PinDebateMessageOutput {
+            pin_id: pin.id as u64,
+            session_id: pin.session_id as u64,
+            message_id: pin.message_id as u64,
+            ledger_id: ledger_id.0 as u64,
+            debited_coins: pin.cost_coins,
+            wallet_balance: next_balance,
+            pin_seconds: pin.pin_seconds,
+            expires_at: pin.expires_at,
+            newly_pinned: true,
+        })
+    }
+
+    async fn load_session_for_action(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        session_id: i64,
+    ) -> Result<Option<DebateSessionForAction>, AppError> {
+        let row = sqlx::query_as(
+            r#"
+            SELECT ws_id, status, end_at
+            FROM debate_sessions
+            WHERE id = $1
+            "#,
+        )
+        .bind(session_id)
+        .fetch_optional(&mut **tx)
+        .await?;
+        Ok(row)
+    }
+
+    async fn load_existing_pin_by_idempotency(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        user: &User,
+        idempotency_key: &str,
+    ) -> Result<Option<PinDebateMessageOutput>, AppError> {
+        let row: Option<ExistingPinByIdempotency> = sqlx::query_as(
+            r#"
+            SELECT id AS ledger_id, balance_after, ws_id, user_id
+            FROM wallet_ledger
+            WHERE idempotency_key = $1
+              AND entry_type = 'pin_debit'
+            "#,
+        )
+        .bind(idempotency_key)
+        .fetch_optional(&mut **tx)
+        .await?;
+        let Some(row) = row else {
+            return Ok(None);
+        };
+        if row.ws_id != user.ws_id || row.user_id != user.id {
+            return Err(AppError::PaymentConflict(
+                "idempotency_key already used by another user".to_string(),
+            ));
+        }
+
+        let pin: Option<PinRecord> = sqlx::query_as(
+            r#"
+            SELECT id, session_id, message_id, pin_seconds, expires_at, cost_coins
+            FROM session_pinned_messages
+            WHERE ledger_id = $1
+            "#,
+        )
+        .bind(row.ledger_id)
+        .fetch_optional(&mut **tx)
+        .await?;
+        let Some(pin) = pin else {
+            return Err(AppError::PaymentConflict(
+                "idempotency_key already used for non-pin ledger entry".to_string(),
+            ));
+        };
+
+        Ok(Some(PinDebateMessageOutput {
+            pin_id: pin.id as u64,
+            session_id: pin.session_id as u64,
+            message_id: pin.message_id as u64,
+            ledger_id: row.ledger_id as u64,
+            debited_coins: pin.cost_coins,
+            wallet_balance: row.balance_after,
+            pin_seconds: pin.pin_seconds,
+            expires_at: pin.expires_at,
+            newly_pinned: false,
+        }))
+    }
+
     pub async fn advance_debate_sessions(
         &self,
         batch_size: i64,
@@ -542,6 +1026,28 @@ mod tests {
         Ok(row.0)
     }
 
+    async fn set_wallet_balance(
+        state: &AppState,
+        ws_id: i64,
+        user_id: i64,
+        balance: i64,
+    ) -> Result<()> {
+        sqlx::query(
+            r#"
+            INSERT INTO user_wallets(ws_id, user_id, balance)
+            VALUES ($1, $2, $3)
+            ON CONFLICT (ws_id, user_id)
+            DO UPDATE SET balance = EXCLUDED.balance, updated_at = NOW()
+            "#,
+        )
+        .bind(ws_id)
+        .bind(user_id)
+        .bind(balance)
+        .execute(&state.pool)
+        .await?;
+        Ok(())
+    }
+
     #[tokio::test]
     async fn list_debate_topics_should_filter_by_category() -> Result<()> {
         let (_tdb, state) = AppState::new_for_test().await?;
@@ -686,6 +1192,193 @@ mod tests {
             .await
             .expect_err("side switch should fail");
         assert!(matches!(err, AppError::DebateConflict(_)));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn create_debate_message_should_require_join_and_write_side() -> Result<()> {
+        let (_tdb, state) = AppState::new_for_test().await?;
+        let (_topic_id, session_id) = seed_topic_and_session(&state, 1, "open", 10).await?;
+        let user = state
+            .find_user_by_id(1)
+            .await?
+            .expect("user id 1 should exist");
+
+        let err = state
+            .create_debate_message(
+                session_id as u64,
+                &user,
+                CreateDebateMessageInput {
+                    content: "hello".to_string(),
+                },
+            )
+            .await
+            .expect_err("not joined should fail");
+        assert!(matches!(err, AppError::DebateConflict(_)));
+
+        state
+            .join_debate_session(
+                session_id as u64,
+                &user,
+                JoinDebateSessionInput {
+                    side: "pro".to_string(),
+                },
+            )
+            .await?;
+
+        let msg = state
+            .create_debate_message(
+                session_id as u64,
+                &user,
+                CreateDebateMessageInput {
+                    content: "pro says hi".to_string(),
+                },
+            )
+            .await?;
+        assert_eq!(msg.session_id, session_id);
+        assert_eq!(msg.side, "pro");
+        assert_eq!(msg.user_id, 1);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn pin_debate_message_should_debit_wallet_and_be_idempotent() -> Result<()> {
+        let (_tdb, state) = AppState::new_for_test().await?;
+        let (_topic_id, session_id) = seed_topic_and_session(&state, 1, "open", 10).await?;
+        let user = state
+            .find_user_by_id(1)
+            .await?
+            .expect("user id 1 should exist");
+
+        state
+            .join_debate_session(
+                session_id as u64,
+                &user,
+                JoinDebateSessionInput {
+                    side: "pro".to_string(),
+                },
+            )
+            .await?;
+        set_wallet_balance(&state, 1, 1, 200).await?;
+        let msg = state
+            .create_debate_message(
+                session_id as u64,
+                &user,
+                CreateDebateMessageInput {
+                    content: "pin this message".to_string(),
+                },
+            )
+            .await?;
+
+        let first = state
+            .pin_debate_message(
+                msg.id as u64,
+                &user,
+                PinDebateMessageInput {
+                    pin_seconds: 45,
+                    idempotency_key: "pin-key-1".to_string(),
+                },
+            )
+            .await?;
+        assert!(first.newly_pinned);
+        assert_eq!(first.debited_coins, 20);
+        assert_eq!(first.wallet_balance, 180);
+
+        let second = state
+            .pin_debate_message(
+                msg.id as u64,
+                &user,
+                PinDebateMessageInput {
+                    pin_seconds: 45,
+                    idempotency_key: "pin-key-1".to_string(),
+                },
+            )
+            .await?;
+        assert!(!second.newly_pinned);
+        assert_eq!(second.pin_id, first.pin_id);
+        assert_eq!(second.wallet_balance, 180);
+
+        let row: (i64,) = sqlx::query_as(
+            r#"
+            SELECT balance
+            FROM user_wallets
+            WHERE ws_id = 1 AND user_id = 1
+            "#,
+        )
+        .fetch_one(&state.pool)
+        .await?;
+        assert_eq!(row.0, 180);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn pin_debate_message_should_reject_insufficient_balance_and_non_owner() -> Result<()> {
+        let (_tdb, state) = AppState::new_for_test().await?;
+        let (_topic_id, session_id) = seed_topic_and_session(&state, 1, "open", 10).await?;
+        let user1 = state
+            .find_user_by_id(1)
+            .await?
+            .expect("user id 1 should exist");
+        let user2 = state
+            .find_user_by_id(2)
+            .await?
+            .expect("user id 2 should exist");
+
+        state
+            .join_debate_session(
+                session_id as u64,
+                &user1,
+                JoinDebateSessionInput {
+                    side: "pro".to_string(),
+                },
+            )
+            .await?;
+        state
+            .join_debate_session(
+                session_id as u64,
+                &user2,
+                JoinDebateSessionInput {
+                    side: "con".to_string(),
+                },
+            )
+            .await?;
+
+        let msg = state
+            .create_debate_message(
+                session_id as u64,
+                &user1,
+                CreateDebateMessageInput {
+                    content: "owner message".to_string(),
+                },
+            )
+            .await?;
+
+        let non_owner_err = state
+            .pin_debate_message(
+                msg.id as u64,
+                &user2,
+                PinDebateMessageInput {
+                    pin_seconds: 30,
+                    idempotency_key: "pin-non-owner".to_string(),
+                },
+            )
+            .await
+            .expect_err("non owner pin should fail");
+        assert!(matches!(non_owner_err, AppError::DebateConflict(_)));
+
+        set_wallet_balance(&state, 1, 1, 5).await?;
+        let no_balance_err = state
+            .pin_debate_message(
+                msg.id as u64,
+                &user1,
+                PinDebateMessageInput {
+                    pin_seconds: 30,
+                    idempotency_key: "pin-low-balance".to_string(),
+                },
+            )
+            .await
+            .expect_err("insufficient balance should fail");
+        assert!(matches!(no_balance_err, AppError::PaymentConflict(_)));
         Ok(())
     }
 
