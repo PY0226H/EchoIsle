@@ -2,6 +2,7 @@ mod agent;
 mod chat;
 mod debate;
 mod file;
+mod judge;
 mod messages;
 mod payment;
 mod user;
@@ -13,6 +14,10 @@ pub use debate::{
     CreateDebateMessageInput, DebateMessage, DebateSessionSummary, DebateTopic,
     JoinDebateSessionInput, JoinDebateSessionOutput, ListDebateSessions, ListDebateTopics,
     PinDebateMessageInput, PinDebateMessageOutput,
+};
+pub use judge::{
+    GetJudgeReportOutput, JudgeJobSnapshot, JudgeReportDetail, RequestJudgeJobInput,
+    RequestJudgeJobOutput,
 };
 pub use messages::{CreateMessage, ListMessages};
 pub use payment::{

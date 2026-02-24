@@ -1,6 +1,6 @@
 use crate::{
     AppError, AppState, CreateDebateMessageInput, JoinDebateSessionInput, ListDebateSessions,
-    ListDebateTopics, PinDebateMessageInput,
+    ListDebateTopics, PinDebateMessageInput, RequestJudgeJobInput,
 };
 use axum::{
     extract::{Path, Query, State},
@@ -137,5 +137,57 @@ pub(crate) async fn pin_debate_message_handler(
     Json(input): Json<PinDebateMessageInput>,
 ) -> Result<impl IntoResponse, AppError> {
     let ret = state.pin_debate_message(id, &user, input).await?;
+    Ok((StatusCode::OK, Json(ret)))
+}
+
+/// Request an AI judge job for a debate session.
+#[utoipa::path(
+    post,
+    path = "/api/debate/sessions/{id}/judge/jobs",
+    params(
+        ("id" = u64, Path, description = "Debate session id")
+    ),
+    request_body = RequestJudgeJobInput,
+    responses(
+        (status = 202, description = "Judge job accepted", body = crate::RequestJudgeJobOutput),
+        (status = 400, description = "Invalid input", body = ErrorOutput),
+        (status = 404, description = "Debate session not found", body = ErrorOutput),
+        (status = 409, description = "Request conflict", body = ErrorOutput),
+    ),
+    security(
+        ("token" = [])
+    )
+)]
+pub(crate) async fn request_judge_job_handler(
+    Extension(user): Extension<User>,
+    State(state): State<AppState>,
+    Path(id): Path<u64>,
+    Json(input): Json<RequestJudgeJobInput>,
+) -> Result<impl IntoResponse, AppError> {
+    let ret = state.request_judge_job(id, &user, input).await?;
+    Ok((StatusCode::ACCEPTED, Json(ret)))
+}
+
+/// Get latest AI judge report for a debate session.
+#[utoipa::path(
+    get,
+    path = "/api/debate/sessions/{id}/judge-report",
+    params(
+        ("id" = u64, Path, description = "Debate session id")
+    ),
+    responses(
+        (status = 200, description = "Judge report query result", body = crate::GetJudgeReportOutput),
+        (status = 404, description = "Debate session not found", body = ErrorOutput),
+    ),
+    security(
+        ("token" = [])
+    )
+)]
+pub(crate) async fn get_latest_judge_report_handler(
+    Extension(user): Extension<User>,
+    State(state): State<AppState>,
+    Path(id): Path<u64>,
+) -> Result<impl IntoResponse, AppError> {
+    let ret = state.get_latest_judge_report(id, &user).await?;
     Ok((StatusCode::OK, Json(ret)))
 }

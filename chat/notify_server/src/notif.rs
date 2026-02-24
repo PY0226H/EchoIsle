@@ -19,6 +19,7 @@ pub enum AppEvent {
     DebateSessionStatusChanged(DebateSessionStatusChanged),
     DebateMessageCreated(DebateMessageCreated),
     DebateMessagePinned(DebateMessagePinned),
+    DebateJudgeReportReady(DebateJudgeReportReady),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -60,6 +61,18 @@ pub struct DebateMessagePinned {
     pub cost_coins: i64,
     pub pin_seconds: i32,
     pub expires_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DebateJudgeReportReady {
+    pub report_id: i64,
+    pub session_id: i64,
+    pub job_id: i64,
+    pub winner: String,
+    pub pro_score: i32,
+    pub con_score: i32,
+    pub needs_draw_vote: bool,
 }
 
 #[derive(Debug)]
@@ -125,6 +138,18 @@ struct DebateMessagePinnedPayload {
     user_ids: Vec<i64>,
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+struct DebateJudgeReportReadyPayload {
+    report_id: i64,
+    session_id: i64,
+    job_id: i64,
+    winner: String,
+    pro_score: i32,
+    con_score: i32,
+    needs_draw_vote: bool,
+    user_ids: Vec<i64>,
+}
+
 pub async fn setup_pg_listener(state: AppState) -> anyhow::Result<()> {
     let mut listener = PgListener::connect(&state.config.server.db_url).await?;
     listener.listen("chat_updated").await?;
@@ -133,6 +158,7 @@ pub async fn setup_pg_listener(state: AppState) -> anyhow::Result<()> {
     listener.listen("debate_session_status_changed").await?;
     listener.listen("debate_message_created").await?;
     listener.listen("debate_message_pinned").await?;
+    listener.listen("debate_judge_report_ready").await?;
 
     let mut stream = listener.into_stream();
 
@@ -244,6 +270,23 @@ impl Notification {
                     event: Arc::new(AppEvent::DebateMessagePinned(event)),
                 })
             }
+            "debate_judge_report_ready" => {
+                let payload: DebateJudgeReportReadyPayload = serde_json::from_str(payload)?;
+                let event = DebateJudgeReportReady {
+                    report_id: payload.report_id,
+                    session_id: payload.session_id,
+                    job_id: payload.job_id,
+                    winner: payload.winner,
+                    pro_score: payload.pro_score,
+                    con_score: payload.con_score,
+                    needs_draw_vote: payload.needs_draw_vote,
+                };
+                let user_ids = payload.user_ids.iter().map(|v| *v as u64).collect();
+                Ok(Self {
+                    user_ids,
+                    event: Arc::new(AppEvent::DebateJudgeReportReady(event)),
+                })
+            }
             _ => Err(anyhow::anyhow!("Invalid notification type")),
         }
     }
@@ -260,6 +303,7 @@ impl AppEvent {
             AppEvent::DebateSessionStatusChanged(_) => "DebateSessionStatusChanged",
             AppEvent::DebateMessageCreated(_) => "DebateMessageCreated",
             AppEvent::DebateMessagePinned(_) => "DebateMessagePinned",
+            AppEvent::DebateJudgeReportReady(_) => "DebateJudgeReportReady",
         }
     }
 
@@ -269,6 +313,7 @@ impl AppEvent {
             AppEvent::DebateSessionStatusChanged(v) => Some(v.session_id),
             AppEvent::DebateMessageCreated(v) => Some(v.session_id),
             AppEvent::DebateMessagePinned(v) => Some(v.session_id),
+            AppEvent::DebateJudgeReportReady(v) => Some(v.session_id),
             _ => None,
         }
     }
@@ -386,6 +431,32 @@ mod tests {
                 assert_eq!(v.cost_coins, 20);
             }
             _ => panic!("expected DebateMessagePinned event"),
+        }
+    }
+
+    #[test]
+    fn notification_load_should_parse_debate_judge_report_ready() {
+        let payload = r#"{
+            "report_id": 31,
+            "session_id": 15,
+            "job_id": 77,
+            "winner": "pro",
+            "pro_score": 81,
+            "con_score": 76,
+            "needs_draw_vote": false,
+            "user_ids": [7, 8, 9]
+        }"#;
+        let notif = Notification::load("debate_judge_report_ready", payload).unwrap();
+        assert_eq!(notif.user_ids, HashSet::from([7_u64, 8_u64, 9_u64]));
+        match notif.event.as_ref() {
+            AppEvent::DebateJudgeReportReady(v) => {
+                assert_eq!(v.report_id, 31);
+                assert_eq!(v.session_id, 15);
+                assert_eq!(v.job_id, 77);
+                assert_eq!(v.winner, "pro");
+                assert!(!v.needs_draw_vote);
+            }
+            _ => panic!("expected DebateJudgeReportReady event"),
         }
     }
 }

@@ -18,6 +18,7 @@ use crate::config::KafkaConfig;
 pub const TOPIC_DEBATE_PARTICIPANT_JOINED: &str = "debate.participant.joined.v1";
 pub const TOPIC_DEBATE_SESSION_STATUS_CHANGED: &str = "debate.session.status.changed.v1";
 pub const TOPIC_DEBATE_MESSAGE_PINNED: &str = "debate.message.pinned.v1";
+pub const TOPIC_AI_JUDGE_JOB_CREATED: &str = "ai.judge.job.created.v1";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -80,6 +81,18 @@ pub struct DebateMessagePinnedEvent {
     pub pin_seconds: i32,
     pub pinned_at: DateTime<Utc>,
     pub expires_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AiJudgeJobCreatedEvent {
+    pub ws_id: u64,
+    pub session_id: u64,
+    pub job_id: u64,
+    pub requested_by: u64,
+    pub style_mode: String,
+    pub rejudge_triggered: bool,
+    pub requested_at: DateTime<Utc>,
 }
 
 #[derive(Clone)]
@@ -169,6 +182,19 @@ impl EventBus {
             .await
     }
 
+    pub async fn publish_ai_judge_job_created(
+        &self,
+        event: AiJudgeJobCreatedEvent,
+    ) -> anyhow::Result<()> {
+        let aggregate_id = format!("session:{}", event.session_id);
+        let payload = serde_json::to_value(event)?;
+        let envelope =
+            EventEnvelope::new("ai.judge.job.created", "chat-server", aggregate_id, payload);
+        let key = envelope.aggregate_id.clone();
+        self.publish(TOPIC_AI_JUDGE_JOB_CREATED, &key, &envelope)
+            .await
+    }
+
     pub async fn publish(
         &self,
         base_topic: &str,
@@ -210,6 +236,7 @@ impl EventBus {
                 bus.config.topic_name(TOPIC_DEBATE_PARTICIPANT_JOINED),
                 bus.config.topic_name(TOPIC_DEBATE_SESSION_STATUS_CHANGED),
                 bus.config.topic_name(TOPIC_DEBATE_MESSAGE_PINNED),
+                bus.config.topic_name(TOPIC_AI_JUDGE_JOB_CREATED),
             ]
         } else {
             bus.config
@@ -293,6 +320,10 @@ mod tests {
         assert_eq!(
             cfg.topic_name(TOPIC_DEBATE_MESSAGE_PINNED),
             "aicomm.debate.message.pinned.v1"
+        );
+        assert_eq!(
+            cfg.topic_name(TOPIC_AI_JUDGE_JOB_CREATED),
+            "aicomm.ai.judge.job.created.v1"
         );
     }
 

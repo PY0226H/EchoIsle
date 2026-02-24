@@ -23,8 +23,8 @@ use tracing::{debug, warn};
 
 pub use error::{AppError, ErrorOutput};
 pub(crate) use event_bus::{
-    DebateMessagePinnedEvent, DebateParticipantJoinedEvent, DebateSessionStatusChangedEvent,
-    EventBus,
+    AiJudgeJobCreatedEvent, DebateMessagePinnedEvent, DebateParticipantJoinedEvent,
+    DebateSessionStatusChangedEvent, EventBus,
 };
 pub use models::*;
 
@@ -89,7 +89,12 @@ pub async fn get_router(state: AppState) -> Result<Router, AppError> {
             "/sessions/:id/messages",
             post(create_debate_message_handler),
         )
-        .route("/messages/:id/pin", post(pin_debate_message_handler));
+        .route("/messages/:id/pin", post(pin_debate_message_handler))
+        .route("/sessions/:id/judge/jobs", post(request_judge_job_handler))
+        .route(
+            "/sessions/:id/judge-report",
+            get(get_latest_judge_report_handler),
+        );
     let pay = Router::new()
         .route("/iap/products", get(list_iap_products_handler))
         .route("/iap/verify", post(verify_iap_order_handler))
