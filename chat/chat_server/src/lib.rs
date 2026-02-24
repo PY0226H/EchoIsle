@@ -94,6 +94,11 @@ pub async fn get_router(state: AppState) -> Result<Router, AppError> {
         .route(
             "/sessions/:id/judge-report",
             get(get_latest_judge_report_handler),
+        )
+        .route("/sessions/:id/draw-vote", get(get_draw_vote_status_handler))
+        .route(
+            "/sessions/:id/draw-vote/ballots",
+            post(submit_draw_vote_handler),
         );
     let pay = Router::new()
         .route("/iap/products", get(list_iap_products_handler))

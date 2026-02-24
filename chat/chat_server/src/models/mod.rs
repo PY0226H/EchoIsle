@@ -17,8 +17,9 @@ pub use debate::{
     PinDebateMessageInput, PinDebateMessageOutput,
 };
 pub use judge::{
-    GetJudgeReportOutput, JudgeJobSnapshot, JudgeReportDetail, JudgeStageSummaryInput,
-    MarkJudgeJobFailedInput, MarkJudgeJobFailedOutput, RequestJudgeJobInput, RequestJudgeJobOutput,
+    DrawVoteDetail, GetDrawVoteOutput, GetJudgeReportOutput, JudgeJobSnapshot, JudgeReportDetail,
+    JudgeStageSummaryInput, MarkJudgeJobFailedInput, MarkJudgeJobFailedOutput,
+    RequestJudgeJobInput, RequestJudgeJobOutput, SubmitDrawVoteInput, SubmitDrawVoteOutput,
     SubmitJudgeReportInput, SubmitJudgeReportOutput,
 };
 pub use messages::{CreateMessage, ListMessages};

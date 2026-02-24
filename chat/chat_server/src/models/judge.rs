@@ -3,7 +3,7 @@ use chat_core::User;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use sqlx::FromRow;
+use sqlx::{FromRow, Postgres, Transaction};
 use std::collections::HashSet;
 use tracing::warn;
 use utoipa::ToSchema;
@@ -11,6 +11,8 @@ use utoipa::ToSchema;
 const STYLE_RATIONAL: &str = "rational";
 const STYLE_ENTERTAINING: &str = "entertaining";
 const STYLE_MIXED: &str = "mixed";
+const DRAW_VOTE_THRESHOLD_PERCENT: i32 = 70;
+const DRAW_VOTE_WINDOW_SECS: i64 = 300;
 
 #[derive(Debug, Clone, ToSchema, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -75,6 +77,47 @@ pub struct GetJudgeReportOutput {
     pub status: String,
     pub latest_job: Option<JudgeJobSnapshot>,
     pub report: Option<JudgeReportDetail>,
+}
+
+#[derive(Debug, Clone, ToSchema, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DrawVoteDetail {
+    pub vote_id: u64,
+    pub report_id: u64,
+    pub status: String,
+    pub resolution: String,
+    pub threshold_percent: i32,
+    pub eligible_voters: i32,
+    pub required_voters: i32,
+    pub participated_voters: i32,
+    pub agree_votes: i32,
+    pub disagree_votes: i32,
+    pub voting_ends_at: DateTime<Utc>,
+    pub decided_at: Option<DateTime<Utc>>,
+    pub my_vote: Option<bool>,
+}
+
+#[derive(Debug, Clone, ToSchema, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GetDrawVoteOutput {
+    pub session_id: u64,
+    pub status: String,
+    pub vote: Option<DrawVoteDetail>,
+}
+
+#[derive(Debug, Clone, ToSchema, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SubmitDrawVoteInput {
+    pub agree_draw: bool,
+}
+
+#[derive(Debug, Clone, ToSchema, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SubmitDrawVoteOutput {
+    pub session_id: u64,
+    pub status: String,
+    pub vote: DrawVoteDetail,
+    pub newly_submitted: bool,
 }
 
 #[derive(Debug, Clone, ToSchema, Serialize, Deserialize)]
@@ -162,6 +205,7 @@ struct JudgeJobRow {
 #[derive(Debug, Clone, FromRow)]
 struct JudgeJobForUpdate {
     id: i64,
+    ws_id: i64,
     session_id: i64,
     status: String,
     rejudge_triggered: bool,
@@ -191,6 +235,28 @@ struct JudgeReportRow {
     rejudge_triggered: bool,
     payload: Value,
     created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, FromRow)]
+struct DrawVoteRow {
+    id: i64,
+    ws_id: i64,
+    session_id: i64,
+    report_id: i64,
+    threshold_percent: i32,
+    eligible_voters: i32,
+    required_voters: i32,
+    voting_ends_at: DateTime<Utc>,
+    status: String,
+    resolution: String,
+    decided_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, FromRow)]
+struct DrawVoteStatsRow {
+    participated_voters: i32,
+    agree_votes: i32,
+    disagree_votes: i32,
 }
 
 fn normalize_style_mode(style_mode: Option<String>) -> Result<String, AppError> {
@@ -273,6 +339,45 @@ fn map_report_detail(v: JudgeReportRow) -> JudgeReportDetail {
         rejudge_triggered: v.rejudge_triggered,
         payload: v.payload,
         created_at: v.created_at,
+    }
+}
+
+fn calc_required_voters(eligible_voters: i32, threshold_percent: i32) -> i32 {
+    if eligible_voters <= 0 {
+        return 1;
+    }
+    let threshold = threshold_percent.clamp(1, 100) as i64;
+    let eligible = eligible_voters as i64;
+    ((eligible * threshold + 99) / 100) as i32
+}
+
+fn majority_resolution(agree_votes: i32, disagree_votes: i32) -> &'static str {
+    if agree_votes > disagree_votes {
+        "accept_draw"
+    } else {
+        "open_rematch"
+    }
+}
+
+fn map_draw_vote_detail(
+    vote: DrawVoteRow,
+    stats: DrawVoteStatsRow,
+    my_vote: Option<bool>,
+) -> DrawVoteDetail {
+    DrawVoteDetail {
+        vote_id: vote.id as u64,
+        report_id: vote.report_id as u64,
+        status: vote.status,
+        resolution: vote.resolution,
+        threshold_percent: vote.threshold_percent,
+        eligible_voters: vote.eligible_voters,
+        required_voters: vote.required_voters,
+        participated_voters: stats.participated_voters,
+        agree_votes: stats.agree_votes,
+        disagree_votes: stats.disagree_votes,
+        voting_ends_at: vote.voting_ends_at,
+        decided_at: vote.decided_at,
+        my_vote,
     }
 }
 
@@ -514,6 +619,339 @@ impl AppState {
         })
     }
 
+    async fn load_draw_vote_stats(
+        tx: &mut Transaction<'_, Postgres>,
+        vote_id: i64,
+    ) -> Result<DrawVoteStatsRow, AppError> {
+        let stats = sqlx::query_as(
+            r#"
+            SELECT
+                COUNT(*)::integer AS participated_voters,
+                COUNT(*) FILTER (WHERE agree_draw)::integer AS agree_votes,
+                COUNT(*) FILTER (WHERE NOT agree_draw)::integer AS disagree_votes
+            FROM judge_draw_vote_ballots
+            WHERE vote_id = $1
+            "#,
+        )
+        .bind(vote_id)
+        .fetch_one(&mut **tx)
+        .await?;
+        Ok(stats)
+    }
+
+    async fn maybe_finalize_draw_vote(
+        tx: &mut Transaction<'_, Postgres>,
+        vote: DrawVoteRow,
+        stats: &DrawVoteStatsRow,
+    ) -> Result<DrawVoteRow, AppError> {
+        if vote.status != "open" {
+            return Ok(vote);
+        }
+        let now = Utc::now();
+        let decision = if stats.participated_voters >= vote.required_voters {
+            Some((
+                "decided",
+                majority_resolution(stats.agree_votes, stats.disagree_votes),
+            ))
+        } else if vote.voting_ends_at <= now {
+            Some(("expired", "open_rematch"))
+        } else {
+            None
+        };
+        let Some((status, resolution)) = decision else {
+            return Ok(vote);
+        };
+        let updated: DrawVoteRow = sqlx::query_as(
+            r#"
+            UPDATE judge_draw_votes
+            SET status = $2,
+                resolution = $3,
+                decided_at = $4,
+                updated_at = NOW()
+            WHERE id = $1
+            RETURNING
+                id, ws_id, session_id, report_id, threshold_percent, eligible_voters, required_voters,
+                voting_ends_at, status, resolution, decided_at
+            "#,
+        )
+        .bind(vote.id)
+        .bind(status)
+        .bind(resolution)
+        .bind(Some(now))
+        .fetch_one(&mut **tx)
+        .await?;
+        Ok(updated)
+    }
+
+    async fn create_draw_vote_for_report(
+        tx: &mut Transaction<'_, Postgres>,
+        ws_id: i64,
+        session_id: i64,
+        report_id: i64,
+    ) -> Result<(), AppError> {
+        let eligible_voters: i32 = sqlx::query_scalar(
+            r#"
+            SELECT COUNT(*)::integer
+            FROM session_participants
+            WHERE session_id = $1
+            "#,
+        )
+        .bind(session_id)
+        .fetch_one(&mut **tx)
+        .await?;
+        let required_voters = calc_required_voters(eligible_voters, DRAW_VOTE_THRESHOLD_PERCENT);
+        sqlx::query(
+            r#"
+            INSERT INTO judge_draw_votes(
+                ws_id, session_id, report_id, threshold_percent, eligible_voters, required_voters,
+                voting_ends_at, status, resolution, created_at, updated_at
+            )
+            VALUES (
+                $1, $2, $3, $4, $5, $6,
+                NOW() + ($7::bigint * INTERVAL '1 second'),
+                'open', 'pending', NOW(), NOW()
+            )
+            ON CONFLICT (report_id) DO NOTHING
+            "#,
+        )
+        .bind(ws_id)
+        .bind(session_id)
+        .bind(report_id)
+        .bind(DRAW_VOTE_THRESHOLD_PERCENT)
+        .bind(eligible_voters)
+        .bind(required_voters)
+        .bind(DRAW_VOTE_WINDOW_SECS)
+        .execute(&mut **tx)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn get_draw_vote_status(
+        &self,
+        session_id: u64,
+        user: &User,
+    ) -> Result<GetDrawVoteOutput, AppError> {
+        let mut tx = self.pool.begin().await?;
+
+        let session_ws_id: Option<(i64,)> = sqlx::query_as(
+            r#"
+            SELECT ws_id
+            FROM debate_sessions
+            WHERE id = $1
+            "#,
+        )
+        .bind(session_id as i64)
+        .fetch_optional(&mut *tx)
+        .await?;
+        let Some((session_ws_id,)) = session_ws_id else {
+            return Err(AppError::NotFound(format!(
+                "debate session id {session_id}"
+            )));
+        };
+        if session_ws_id != user.ws_id {
+            return Err(AppError::NotFound(format!(
+                "debate session id {session_id}"
+            )));
+        }
+
+        let joined = sqlx::query_scalar::<_, i32>(
+            r#"
+            SELECT 1
+            FROM session_participants
+            WHERE session_id = $1 AND user_id = $2
+            LIMIT 1
+            "#,
+        )
+        .bind(session_id as i64)
+        .bind(user.id)
+        .fetch_optional(&mut *tx)
+        .await?;
+        if joined.is_none() {
+            return Err(AppError::DebateConflict(format!(
+                "user {} has not joined session {}",
+                user.id, session_id
+            )));
+        }
+
+        let vote: Option<DrawVoteRow> = sqlx::query_as(
+            r#"
+            SELECT
+                id, ws_id, session_id, report_id, threshold_percent, eligible_voters, required_voters,
+                voting_ends_at, status, resolution, decided_at
+            FROM judge_draw_votes
+            WHERE session_id = $1
+            ORDER BY created_at DESC
+            LIMIT 1
+            FOR UPDATE
+            "#,
+        )
+        .bind(session_id as i64)
+        .fetch_optional(&mut *tx)
+        .await?;
+        let Some(vote) = vote else {
+            tx.commit().await?;
+            return Ok(GetDrawVoteOutput {
+                session_id,
+                status: "absent".to_string(),
+                vote: None,
+            });
+        };
+
+        let stats = Self::load_draw_vote_stats(&mut tx, vote.id).await?;
+        let vote = Self::maybe_finalize_draw_vote(&mut tx, vote, &stats).await?;
+        let my_vote: Option<(bool,)> = sqlx::query_as(
+            r#"
+            SELECT agree_draw
+            FROM judge_draw_vote_ballots
+            WHERE vote_id = $1 AND user_id = $2
+            LIMIT 1
+            "#,
+        )
+        .bind(vote.id)
+        .bind(user.id)
+        .fetch_optional(&mut *tx)
+        .await?;
+
+        tx.commit().await?;
+        let status = vote.status.clone();
+        Ok(GetDrawVoteOutput {
+            session_id,
+            status,
+            vote: Some(map_draw_vote_detail(
+                vote,
+                stats,
+                my_vote.map(|(agree_draw,)| agree_draw),
+            )),
+        })
+    }
+
+    pub async fn submit_draw_vote(
+        &self,
+        session_id: u64,
+        user: &User,
+        input: SubmitDrawVoteInput,
+    ) -> Result<SubmitDrawVoteOutput, AppError> {
+        let mut tx = self.pool.begin().await?;
+
+        let session_ws_id: Option<(i64,)> = sqlx::query_as(
+            r#"
+            SELECT ws_id
+            FROM debate_sessions
+            WHERE id = $1
+            "#,
+        )
+        .bind(session_id as i64)
+        .fetch_optional(&mut *tx)
+        .await?;
+        let Some((session_ws_id,)) = session_ws_id else {
+            return Err(AppError::NotFound(format!(
+                "debate session id {session_id}"
+            )));
+        };
+        if session_ws_id != user.ws_id {
+            return Err(AppError::NotFound(format!(
+                "debate session id {session_id}"
+            )));
+        }
+
+        let joined = sqlx::query_scalar::<_, i32>(
+            r#"
+            SELECT 1
+            FROM session_participants
+            WHERE session_id = $1 AND user_id = $2
+            LIMIT 1
+            "#,
+        )
+        .bind(session_id as i64)
+        .bind(user.id)
+        .fetch_optional(&mut *tx)
+        .await?;
+        if joined.is_none() {
+            return Err(AppError::DebateConflict(format!(
+                "user {} has not joined session {}",
+                user.id, session_id
+            )));
+        }
+
+        let vote: Option<DrawVoteRow> = sqlx::query_as(
+            r#"
+            SELECT
+                id, ws_id, session_id, report_id, threshold_percent, eligible_voters, required_voters,
+                voting_ends_at, status, resolution, decided_at
+            FROM judge_draw_votes
+            WHERE session_id = $1
+            ORDER BY created_at DESC
+            LIMIT 1
+            FOR UPDATE
+            "#,
+        )
+        .bind(session_id as i64)
+        .fetch_optional(&mut *tx)
+        .await?;
+        let Some(vote) = vote else {
+            return Err(AppError::DebateConflict(format!(
+                "session {} has no draw vote",
+                session_id
+            )));
+        };
+
+        let before_stats = Self::load_draw_vote_stats(&mut tx, vote.id).await?;
+        let vote = Self::maybe_finalize_draw_vote(&mut tx, vote, &before_stats).await?;
+        if vote.status != "open" {
+            return Err(AppError::DebateConflict(format!(
+                "draw vote for session {} is already {}",
+                session_id, vote.status
+            )));
+        }
+
+        let existing: Option<(bool,)> = sqlx::query_as(
+            r#"
+            SELECT agree_draw
+            FROM judge_draw_vote_ballots
+            WHERE vote_id = $1 AND user_id = $2
+            LIMIT 1
+            "#,
+        )
+        .bind(vote.id)
+        .bind(user.id)
+        .fetch_optional(&mut *tx)
+        .await?;
+        let newly_submitted = existing.is_none();
+
+        sqlx::query(
+            r#"
+            INSERT INTO judge_draw_vote_ballots(
+                vote_id, ws_id, session_id, report_id, user_id, agree_draw, voted_at
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, NOW())
+            ON CONFLICT (vote_id, user_id)
+            DO UPDATE
+            SET agree_draw = EXCLUDED.agree_draw,
+                voted_at = NOW()
+            "#,
+        )
+        .bind(vote.id)
+        .bind(vote.ws_id)
+        .bind(vote.session_id)
+        .bind(vote.report_id)
+        .bind(user.id)
+        .bind(input.agree_draw)
+        .execute(&mut *tx)
+        .await?;
+
+        let stats = Self::load_draw_vote_stats(&mut tx, vote.id).await?;
+        let vote = Self::maybe_finalize_draw_vote(&mut tx, vote, &stats).await?;
+
+        tx.commit().await?;
+        let status = vote.status.clone();
+        Ok(SubmitDrawVoteOutput {
+            session_id,
+            status,
+            vote: map_draw_vote_detail(vote, stats, Some(input.agree_draw)),
+            newly_submitted,
+        })
+    }
+
     pub async fn submit_judge_report(
         &self,
         job_id: u64,
@@ -569,7 +1007,7 @@ impl AppState {
         let mut tx = self.pool.begin().await?;
         let Some(job): Option<JudgeJobForUpdate> = sqlx::query_as(
             r#"
-            SELECT id, session_id, status, rejudge_triggered, error_message
+            SELECT id, ws_id, session_id, status, rejudge_triggered, error_message
             FROM judge_jobs
             WHERE id = $1
             FOR UPDATE
@@ -656,6 +1094,11 @@ impl AppState {
         .fetch_one(&mut *tx)
         .await?;
 
+        if input.needs_draw_vote {
+            Self::create_draw_vote_for_report(&mut tx, job.ws_id, job.session_id, report_id.0)
+                .await?;
+        }
+
         for stage in input.stage_summaries.iter() {
             sqlx::query(
                 r#"
@@ -719,7 +1162,7 @@ impl AppState {
         let mut tx = self.pool.begin().await?;
         let Some(job): Option<JudgeJobForUpdate> = sqlx::query_as(
             r#"
-            SELECT id, session_id, status, rejudge_triggered, error_message
+            SELECT id, ws_id, session_id, status, rejudge_triggered, error_message
             FROM judge_jobs
             WHERE id = $1
             FOR UPDATE
@@ -1239,6 +1682,247 @@ mod tests {
             )
             .await
             .expect_err("should reject");
+        assert!(matches!(err, AppError::DebateConflict(_)));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn submit_judge_report_should_create_draw_vote_when_needed() -> Result<()> {
+        let (_tdb, state) = AppState::new_for_test().await?;
+        let session_id = seed_topic_and_session(&state, 1, "closed").await?;
+        join_user_to_session(&state, session_id, 1).await?;
+        join_user_to_session(&state, session_id, 2).await?;
+        join_user_to_session(&state, session_id, 3).await?;
+        let job_id = seed_running_judge_job(&state, session_id).await?;
+
+        state
+            .submit_judge_report(
+                job_id as u64,
+                SubmitJudgeReportInput {
+                    winner: "draw".to_string(),
+                    pro_score: 80,
+                    con_score: 80,
+                    logic_pro: 80,
+                    logic_con: 80,
+                    evidence_pro: 80,
+                    evidence_con: 80,
+                    rebuttal_pro: 80,
+                    rebuttal_con: 80,
+                    clarity_pro: 80,
+                    clarity_con: 80,
+                    pro_summary: "pro".to_string(),
+                    con_summary: "con".to_string(),
+                    rationale: "rationale".to_string(),
+                    style_mode: Some("rational".to_string()),
+                    needs_draw_vote: true,
+                    rejudge_triggered: true,
+                    payload: serde_json::json!({}),
+                    winner_first: Some("pro".to_string()),
+                    winner_second: Some("con".to_string()),
+                    stage_summaries: vec![],
+                },
+            )
+            .await?;
+
+        let row: (i32, i32, String, String) = sqlx::query_as(
+            r#"
+            SELECT eligible_voters, required_voters, status, resolution
+            FROM judge_draw_votes
+            WHERE session_id = $1
+            ORDER BY created_at DESC
+            LIMIT 1
+            "#,
+        )
+        .bind(session_id)
+        .fetch_one(&state.pool)
+        .await?;
+        assert_eq!(row.0, 3);
+        assert_eq!(row.1, 3);
+        assert_eq!(row.2, "open");
+        assert_eq!(row.3, "pending");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn submit_draw_vote_should_decide_after_threshold_reached() -> Result<()> {
+        let (_tdb, state) = AppState::new_for_test().await?;
+        let session_id = seed_topic_and_session(&state, 1, "closed").await?;
+        join_user_to_session(&state, session_id, 1).await?;
+        join_user_to_session(&state, session_id, 2).await?;
+        join_user_to_session(&state, session_id, 3).await?;
+        let job_id = seed_running_judge_job(&state, session_id).await?;
+
+        state
+            .submit_judge_report(
+                job_id as u64,
+                SubmitJudgeReportInput {
+                    winner: "draw".to_string(),
+                    pro_score: 79,
+                    con_score: 79,
+                    logic_pro: 79,
+                    logic_con: 79,
+                    evidence_pro: 79,
+                    evidence_con: 79,
+                    rebuttal_pro: 79,
+                    rebuttal_con: 79,
+                    clarity_pro: 79,
+                    clarity_con: 79,
+                    pro_summary: "pro".to_string(),
+                    con_summary: "con".to_string(),
+                    rationale: "rationale".to_string(),
+                    style_mode: Some("rational".to_string()),
+                    needs_draw_vote: true,
+                    rejudge_triggered: true,
+                    payload: serde_json::json!({}),
+                    winner_first: Some("pro".to_string()),
+                    winner_second: Some("con".to_string()),
+                    stage_summaries: vec![],
+                },
+            )
+            .await?;
+
+        let user1 = state.find_user_by_id(1).await?.expect("user1 should exist");
+        let user2 = state.find_user_by_id(2).await?.expect("user2 should exist");
+        let user3 = state.find_user_by_id(3).await?.expect("user3 should exist");
+
+        let vote1 = state
+            .submit_draw_vote(
+                session_id as u64,
+                &user1,
+                SubmitDrawVoteInput { agree_draw: true },
+            )
+            .await?;
+        assert_eq!(vote1.status, "open");
+
+        let vote2 = state
+            .submit_draw_vote(
+                session_id as u64,
+                &user2,
+                SubmitDrawVoteInput { agree_draw: true },
+            )
+            .await?;
+        assert_eq!(vote2.status, "open");
+
+        let vote3 = state
+            .submit_draw_vote(
+                session_id as u64,
+                &user3,
+                SubmitDrawVoteInput { agree_draw: false },
+            )
+            .await?;
+        assert_eq!(vote3.status, "decided");
+        assert_eq!(vote3.vote.resolution, "accept_draw");
+        assert_eq!(vote3.vote.participated_voters, 3);
+        assert_eq!(vote3.vote.agree_votes, 2);
+        assert_eq!(vote3.vote.disagree_votes, 1);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn get_draw_vote_status_should_auto_expire_to_open_rematch() -> Result<()> {
+        let (_tdb, state) = AppState::new_for_test().await?;
+        let session_id = seed_topic_and_session(&state, 1, "closed").await?;
+        join_user_to_session(&state, session_id, 1).await?;
+        join_user_to_session(&state, session_id, 2).await?;
+        let job_id = seed_running_judge_job(&state, session_id).await?;
+
+        state
+            .submit_judge_report(
+                job_id as u64,
+                SubmitJudgeReportInput {
+                    winner: "draw".to_string(),
+                    pro_score: 75,
+                    con_score: 75,
+                    logic_pro: 75,
+                    logic_con: 75,
+                    evidence_pro: 75,
+                    evidence_con: 75,
+                    rebuttal_pro: 75,
+                    rebuttal_con: 75,
+                    clarity_pro: 75,
+                    clarity_con: 75,
+                    pro_summary: "pro".to_string(),
+                    con_summary: "con".to_string(),
+                    rationale: "rationale".to_string(),
+                    style_mode: Some("rational".to_string()),
+                    needs_draw_vote: true,
+                    rejudge_triggered: true,
+                    payload: serde_json::json!({}),
+                    winner_first: Some("pro".to_string()),
+                    winner_second: Some("con".to_string()),
+                    stage_summaries: vec![],
+                },
+            )
+            .await?;
+
+        sqlx::query(
+            r#"
+            UPDATE judge_draw_votes
+            SET voting_ends_at = NOW() - INTERVAL '1 second',
+                updated_at = NOW()
+            WHERE session_id = $1
+            "#,
+        )
+        .bind(session_id)
+        .execute(&state.pool)
+        .await?;
+
+        let user1 = state.find_user_by_id(1).await?.expect("user1 should exist");
+        let status = state
+            .get_draw_vote_status(session_id as u64, &user1)
+            .await?;
+        assert_eq!(status.status, "expired");
+        let vote = status.vote.expect("vote should exist");
+        assert_eq!(vote.resolution, "open_rematch");
+        assert_eq!(vote.participated_voters, 0);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn submit_draw_vote_should_reject_non_participant() -> Result<()> {
+        let (_tdb, state) = AppState::new_for_test().await?;
+        let session_id = seed_topic_and_session(&state, 1, "closed").await?;
+        join_user_to_session(&state, session_id, 1).await?;
+        let job_id = seed_running_judge_job(&state, session_id).await?;
+
+        state
+            .submit_judge_report(
+                job_id as u64,
+                SubmitJudgeReportInput {
+                    winner: "draw".to_string(),
+                    pro_score: 70,
+                    con_score: 70,
+                    logic_pro: 70,
+                    logic_con: 70,
+                    evidence_pro: 70,
+                    evidence_con: 70,
+                    rebuttal_pro: 70,
+                    rebuttal_con: 70,
+                    clarity_pro: 70,
+                    clarity_con: 70,
+                    pro_summary: "pro".to_string(),
+                    con_summary: "con".to_string(),
+                    rationale: "rationale".to_string(),
+                    style_mode: Some("rational".to_string()),
+                    needs_draw_vote: true,
+                    rejudge_triggered: true,
+                    payload: serde_json::json!({}),
+                    winner_first: Some("pro".to_string()),
+                    winner_second: Some("con".to_string()),
+                    stage_summaries: vec![],
+                },
+            )
+            .await?;
+
+        let user4 = state.find_user_by_id(4).await?.expect("user4 should exist");
+        let err = state
+            .submit_draw_vote(
+                session_id as u64,
+                &user4,
+                SubmitDrawVoteInput { agree_draw: true },
+            )
+            .await
+            .expect_err("non participant should be rejected");
         assert!(matches!(err, AppError::DebateConflict(_)));
         Ok(())
     }

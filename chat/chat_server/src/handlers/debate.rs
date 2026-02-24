@@ -1,6 +1,6 @@
 use crate::{
     AppError, AppState, CreateDebateMessageInput, JoinDebateSessionInput, ListDebateSessions,
-    ListDebateTopics, PinDebateMessageInput, RequestJudgeJobInput,
+    ListDebateTopics, PinDebateMessageInput, RequestJudgeJobInput, SubmitDrawVoteInput,
 };
 use axum::{
     extract::{Path, Query, State},
@@ -189,5 +189,58 @@ pub(crate) async fn get_latest_judge_report_handler(
     Path(id): Path<u64>,
 ) -> Result<impl IntoResponse, AppError> {
     let ret = state.get_latest_judge_report(id, &user).await?;
+    Ok((StatusCode::OK, Json(ret)))
+}
+
+/// Get draw-vote status for latest draw-required judge report in a debate session.
+#[utoipa::path(
+    get,
+    path = "/api/debate/sessions/{id}/draw-vote",
+    params(
+        ("id" = u64, Path, description = "Debate session id")
+    ),
+    responses(
+        (status = 200, description = "Draw vote status", body = crate::GetDrawVoteOutput),
+        (status = 404, description = "Debate session not found", body = ErrorOutput),
+        (status = 409, description = "User is not participant", body = ErrorOutput),
+    ),
+    security(
+        ("token" = [])
+    )
+)]
+pub(crate) async fn get_draw_vote_status_handler(
+    Extension(user): Extension<User>,
+    State(state): State<AppState>,
+    Path(id): Path<u64>,
+) -> Result<impl IntoResponse, AppError> {
+    let ret = state.get_draw_vote_status(id, &user).await?;
+    Ok((StatusCode::OK, Json(ret)))
+}
+
+/// Submit or update current user's draw vote.
+#[utoipa::path(
+    post,
+    path = "/api/debate/sessions/{id}/draw-vote/ballots",
+    params(
+        ("id" = u64, Path, description = "Debate session id")
+    ),
+    request_body = SubmitDrawVoteInput,
+    responses(
+        (status = 200, description = "Draw vote submit result", body = crate::SubmitDrawVoteOutput),
+        (status = 400, description = "Invalid input", body = ErrorOutput),
+        (status = 404, description = "Debate session not found", body = ErrorOutput),
+        (status = 409, description = "Vote conflict", body = ErrorOutput),
+    ),
+    security(
+        ("token" = [])
+    )
+)]
+pub(crate) async fn submit_draw_vote_handler(
+    Extension(user): Extension<User>,
+    State(state): State<AppState>,
+    Path(id): Path<u64>,
+    Json(input): Json<SubmitDrawVoteInput>,
+) -> Result<impl IntoResponse, AppError> {
+    let ret = state.submit_draw_vote(id, &user, input).await?;
     Ok((StatusCode::OK, Json(ret)))
 }
