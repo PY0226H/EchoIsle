@@ -13,7 +13,7 @@ use chat_core::{
     DecodingKey, EncodingKey, User,
 };
 use handlers::*;
-use middlewares::{verify_chat, verify_file_ticket};
+use middlewares::{verify_ai_internal_key, verify_chat, verify_file_ticket};
 use openapi::OpenApiRouter;
 use sqlx::PgPool;
 use std::{fmt, ops::Deref, sync::Arc, time::Duration};
@@ -100,6 +100,13 @@ pub async fn get_router(state: AppState) -> Result<Router, AppError> {
         .route("/iap/verify", post(verify_iap_order_handler))
         .route("/wallet", get(get_wallet_balance_handler))
         .route("/wallet/ledger", get(list_wallet_ledger_handler));
+    let internal_ai = Router::new()
+        .route("/judge/jobs/:id/report", post(submit_judge_report_handler))
+        .route(
+            "/judge/jobs/:id/failed",
+            post(mark_judge_job_failed_handler),
+        )
+        .layer(from_fn_with_state(state.clone(), verify_ai_internal_key));
     let protected_api = Router::new()
         .route("/users", get(list_chat_users_handler))
         .nest("/debate", debate)
@@ -116,6 +123,7 @@ pub async fn get_router(state: AppState) -> Result<Router, AppError> {
         .layer(from_fn_with_state(state.clone(), verify_file_ticket));
     let api = Router::new()
         .merge(protected_api)
+        .nest("/internal/ai", internal_ai)
         .merge(file_api)
         // routes doesn't need token verification
         .route("/signin", post(signin_handler))

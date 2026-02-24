@@ -9,6 +9,8 @@ pub struct AppConfig {
     pub auth: AuthConfig,
     #[serde(default)]
     pub kafka: KafkaConfig,
+    #[serde(default)]
+    pub ai_judge: AiJudgeConfig,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -44,6 +46,20 @@ pub struct KafkaConfig {
     pub producer_timeout_ms: u64,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AiJudgeConfig {
+    #[serde(default = "default_ai_judge_internal_key")]
+    pub internal_key: String,
+}
+
+impl Default for AiJudgeConfig {
+    fn default() -> Self {
+        Self {
+            internal_key: default_ai_judge_internal_key(),
+        }
+    }
+}
+
 impl Default for KafkaConfig {
     fn default() -> Self {
         Self {
@@ -77,6 +93,10 @@ fn default_kafka_group_id() -> String {
 
 fn default_kafka_timeout_ms() -> u64 {
     1500
+}
+
+fn default_ai_judge_internal_key() -> String {
+    "dev-ai-internal-key".to_string()
 }
 
 impl AppConfig {

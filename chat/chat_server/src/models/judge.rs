@@ -4,6 +4,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sqlx::FromRow;
+use std::collections::HashSet;
 use tracing::warn;
 use utoipa::ToSchema;
 
@@ -76,6 +77,73 @@ pub struct GetJudgeReportOutput {
     pub report: Option<JudgeReportDetail>,
 }
 
+#[derive(Debug, Clone, ToSchema, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct JudgeStageSummaryInput {
+    pub stage_no: i32,
+    pub from_message_id: Option<u64>,
+    pub to_message_id: Option<u64>,
+    pub pro_score: i32,
+    pub con_score: i32,
+    pub summary: Value,
+}
+
+#[derive(Debug, Clone, ToSchema, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SubmitJudgeReportInput {
+    pub winner: String,
+    pub pro_score: i32,
+    pub con_score: i32,
+    pub logic_pro: i32,
+    pub logic_con: i32,
+    pub evidence_pro: i32,
+    pub evidence_con: i32,
+    pub rebuttal_pro: i32,
+    pub rebuttal_con: i32,
+    pub clarity_pro: i32,
+    pub clarity_con: i32,
+    pub pro_summary: String,
+    pub con_summary: String,
+    pub rationale: String,
+    pub style_mode: Option<String>,
+    #[serde(default)]
+    pub needs_draw_vote: bool,
+    #[serde(default)]
+    pub rejudge_triggered: bool,
+    #[serde(default)]
+    pub payload: Value,
+    pub winner_first: Option<String>,
+    pub winner_second: Option<String>,
+    #[serde(default)]
+    pub stage_summaries: Vec<JudgeStageSummaryInput>,
+}
+
+#[derive(Debug, Clone, ToSchema, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SubmitJudgeReportOutput {
+    pub job_id: u64,
+    pub session_id: u64,
+    pub report_id: u64,
+    pub status: String,
+    pub newly_created: bool,
+}
+
+#[derive(Debug, Clone, ToSchema, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MarkJudgeJobFailedInput {
+    pub error_message: String,
+}
+
+#[derive(Debug, Clone, ToSchema, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MarkJudgeJobFailedOutput {
+    pub job_id: u64,
+    pub session_id: u64,
+    pub status: String,
+    pub error_message: String,
+    pub newly_marked: bool,
+}
+
 #[derive(Debug, Clone, FromRow)]
 struct DebateSessionForJudge {
     ws_id: i64,
@@ -89,6 +157,15 @@ struct JudgeJobRow {
     style_mode: String,
     rejudge_triggered: bool,
     requested_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, FromRow)]
+struct JudgeJobForUpdate {
+    id: i64,
+    session_id: i64,
+    status: String,
+    rejudge_triggered: bool,
+    error_message: Option<String>,
 }
 
 #[derive(Debug, Clone, FromRow)]
@@ -138,6 +215,65 @@ fn normalize_style_mode(style_mode: Option<String>) -> Result<String, AppError> 
 
 fn can_request_judge(status: &str) -> bool {
     matches!(status, "judging" | "closed")
+}
+
+fn normalize_winner(winner: &str, field: &str) -> Result<String, AppError> {
+    let winner = winner.trim().to_ascii_lowercase();
+    if matches!(winner.as_str(), "pro" | "con" | "draw") {
+        Ok(winner)
+    } else {
+        Err(AppError::DebateError(format!(
+            "invalid {field}: {winner}, expect `pro` | `con` | `draw`"
+        )))
+    }
+}
+
+fn validate_score(score: i32, field: &str) -> Result<(), AppError> {
+    if !(0..=100).contains(&score) {
+        return Err(AppError::DebateError(format!(
+            "invalid {field}: {score}, expect 0..=100"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_non_empty_text(input: &str, field: &str, max_len: usize) -> Result<String, AppError> {
+    let ret = input.trim();
+    if ret.is_empty() {
+        return Err(AppError::DebateError(format!("{field} cannot be empty")));
+    }
+    if ret.len() > max_len {
+        return Err(AppError::DebateError(format!(
+            "{field} too long, max {max_len} chars"
+        )));
+    }
+    Ok(ret.to_string())
+}
+
+fn map_report_detail(v: JudgeReportRow) -> JudgeReportDetail {
+    JudgeReportDetail {
+        report_id: v.id as u64,
+        job_id: v.job_id as u64,
+        winner: v.winner,
+        pro_score: v.pro_score,
+        con_score: v.con_score,
+        logic_pro: v.logic_pro,
+        logic_con: v.logic_con,
+        evidence_pro: v.evidence_pro,
+        evidence_con: v.evidence_con,
+        rebuttal_pro: v.rebuttal_pro,
+        rebuttal_con: v.rebuttal_con,
+        clarity_pro: v.clarity_pro,
+        clarity_con: v.clarity_con,
+        pro_summary: v.pro_summary,
+        con_summary: v.con_summary,
+        rationale: v.rationale,
+        style_mode: v.style_mode,
+        needs_draw_vote: v.needs_draw_vote,
+        rejudge_triggered: v.rejudge_triggered,
+        payload: v.payload,
+        created_at: v.created_at,
+    }
 }
 
 impl AppState {
@@ -374,29 +510,285 @@ impl AppState {
                 rejudge_triggered: job.rejudge_triggered,
                 requested_at: job.requested_at,
             }),
-            report: report.map(|v| JudgeReportDetail {
-                report_id: v.id as u64,
-                job_id: v.job_id as u64,
-                winner: v.winner,
-                pro_score: v.pro_score,
-                con_score: v.con_score,
-                logic_pro: v.logic_pro,
-                logic_con: v.logic_con,
-                evidence_pro: v.evidence_pro,
-                evidence_con: v.evidence_con,
-                rebuttal_pro: v.rebuttal_pro,
-                rebuttal_con: v.rebuttal_con,
-                clarity_pro: v.clarity_pro,
-                clarity_con: v.clarity_con,
-                pro_summary: v.pro_summary,
-                con_summary: v.con_summary,
-                rationale: v.rationale,
-                style_mode: v.style_mode,
-                needs_draw_vote: v.needs_draw_vote,
-                rejudge_triggered: v.rejudge_triggered,
-                payload: v.payload,
-                created_at: v.created_at,
-            }),
+            report: report.map(map_report_detail),
+        })
+    }
+
+    pub async fn submit_judge_report(
+        &self,
+        job_id: u64,
+        input: SubmitJudgeReportInput,
+    ) -> Result<SubmitJudgeReportOutput, AppError> {
+        let winner = normalize_winner(&input.winner, "winner")?;
+        let winner_first = match input.winner_first.as_deref() {
+            Some(v) => Some(normalize_winner(v, "winner_first")?),
+            None => None,
+        };
+        let winner_second = match input.winner_second.as_deref() {
+            Some(v) => Some(normalize_winner(v, "winner_second")?),
+            None => None,
+        };
+        let style_mode = normalize_style_mode(input.style_mode)?;
+        let pro_summary = validate_non_empty_text(&input.pro_summary, "pro_summary", 4000)?;
+        let con_summary = validate_non_empty_text(&input.con_summary, "con_summary", 4000)?;
+        let rationale = validate_non_empty_text(&input.rationale, "rationale", 4000)?;
+
+        for (score, field) in [
+            (input.pro_score, "pro_score"),
+            (input.con_score, "con_score"),
+            (input.logic_pro, "logic_pro"),
+            (input.logic_con, "logic_con"),
+            (input.evidence_pro, "evidence_pro"),
+            (input.evidence_con, "evidence_con"),
+            (input.rebuttal_pro, "rebuttal_pro"),
+            (input.rebuttal_con, "rebuttal_con"),
+            (input.clarity_pro, "clarity_pro"),
+            (input.clarity_con, "clarity_con"),
+        ] {
+            validate_score(score, field)?;
+        }
+
+        let mut stage_no_set = HashSet::new();
+        for stage in input.stage_summaries.iter() {
+            if stage.stage_no <= 0 {
+                return Err(AppError::DebateError(format!(
+                    "invalid stage_no: {}, expect > 0",
+                    stage.stage_no
+                )));
+            }
+            if !stage_no_set.insert(stage.stage_no) {
+                return Err(AppError::DebateError(format!(
+                    "duplicated stage_no: {}",
+                    stage.stage_no
+                )));
+            }
+            validate_score(stage.pro_score, "stage.pro_score")?;
+            validate_score(stage.con_score, "stage.con_score")?;
+        }
+
+        let mut tx = self.pool.begin().await?;
+        let Some(job): Option<JudgeJobForUpdate> = sqlx::query_as(
+            r#"
+            SELECT id, session_id, status, rejudge_triggered, error_message
+            FROM judge_jobs
+            WHERE id = $1
+            FOR UPDATE
+            "#,
+        )
+        .bind(job_id as i64)
+        .fetch_optional(&mut *tx)
+        .await?
+        else {
+            return Err(AppError::NotFound(format!("judge job id {job_id}")));
+        };
+
+        let existing_report: Option<JudgeReportRow> = sqlx::query_as(
+            r#"
+            SELECT
+                id, job_id, winner, pro_score, con_score,
+                logic_pro, logic_con, evidence_pro, evidence_con, rebuttal_pro, rebuttal_con,
+                clarity_pro, clarity_con, pro_summary, con_summary, rationale, style_mode,
+                needs_draw_vote, rejudge_triggered, payload, created_at
+            FROM judge_reports
+            WHERE job_id = $1
+            LIMIT 1
+            "#,
+        )
+        .bind(job_id as i64)
+        .fetch_optional(&mut *tx)
+        .await?;
+        if let Some(report) = existing_report {
+            tx.commit().await?;
+            return Ok(SubmitJudgeReportOutput {
+                job_id,
+                session_id: job.session_id as u64,
+                report_id: report.id as u64,
+                status: "succeeded".to_string(),
+                newly_created: false,
+            });
+        }
+
+        if job.status != "running" {
+            return Err(AppError::DebateConflict(format!(
+                "judge job {} is not running, current status {}",
+                job_id, job.status
+            )));
+        }
+
+        let rejudge_triggered = input.rejudge_triggered || job.rejudge_triggered;
+        let report_id: (i64,) = sqlx::query_as(
+            r#"
+            INSERT INTO judge_reports(
+                ws_id, session_id, job_id, winner, pro_score, con_score,
+                logic_pro, logic_con, evidence_pro, evidence_con, rebuttal_pro, rebuttal_con,
+                clarity_pro, clarity_con, pro_summary, con_summary, rationale, style_mode,
+                needs_draw_vote, rejudge_triggered, payload, created_at, updated_at
+            )
+            SELECT
+                ws_id, session_id, id, $2, $3, $4,
+                $5, $6, $7, $8, $9, $10,
+                $11, $12, $13, $14, $15, $16,
+                $17, $18, $19, NOW(), NOW()
+            FROM judge_jobs
+            WHERE id = $1
+            RETURNING id
+            "#,
+        )
+        .bind(job_id as i64)
+        .bind(&winner)
+        .bind(input.pro_score)
+        .bind(input.con_score)
+        .bind(input.logic_pro)
+        .bind(input.logic_con)
+        .bind(input.evidence_pro)
+        .bind(input.evidence_con)
+        .bind(input.rebuttal_pro)
+        .bind(input.rebuttal_con)
+        .bind(input.clarity_pro)
+        .bind(input.clarity_con)
+        .bind(pro_summary)
+        .bind(con_summary)
+        .bind(rationale)
+        .bind(style_mode.clone())
+        .bind(input.needs_draw_vote)
+        .bind(rejudge_triggered)
+        .bind(input.payload)
+        .fetch_one(&mut *tx)
+        .await?;
+
+        for stage in input.stage_summaries.iter() {
+            sqlx::query(
+                r#"
+                INSERT INTO judge_stage_summaries(
+                    ws_id, session_id, job_id, stage_no, from_message_id, to_message_id,
+                    pro_score, con_score, summary, created_at
+                )
+                SELECT
+                    ws_id, session_id, id, $2, $3, $4, $5, $6, $7, NOW()
+                FROM judge_jobs
+                WHERE id = $1
+                "#,
+            )
+            .bind(job_id as i64)
+            .bind(stage.stage_no)
+            .bind(stage.from_message_id.map(|v| v as i64))
+            .bind(stage.to_message_id.map(|v| v as i64))
+            .bind(stage.pro_score)
+            .bind(stage.con_score)
+            .bind(stage.summary.clone())
+            .execute(&mut *tx)
+            .await?;
+        }
+
+        sqlx::query(
+            r#"
+            UPDATE judge_jobs
+            SET status = 'succeeded',
+                style_mode = $2,
+                winner_first = $3,
+                winner_second = $4,
+                error_message = NULL,
+                finished_at = NOW(),
+                updated_at = NOW()
+            WHERE id = $1
+            "#,
+        )
+        .bind(job_id as i64)
+        .bind(style_mode)
+        .bind(winner_first)
+        .bind(winner_second)
+        .execute(&mut *tx)
+        .await?;
+
+        tx.commit().await?;
+        Ok(SubmitJudgeReportOutput {
+            job_id,
+            session_id: job.session_id as u64,
+            report_id: report_id.0 as u64,
+            status: "succeeded".to_string(),
+            newly_created: true,
+        })
+    }
+
+    pub async fn mark_judge_job_failed(
+        &self,
+        job_id: u64,
+        input: MarkJudgeJobFailedInput,
+    ) -> Result<MarkJudgeJobFailedOutput, AppError> {
+        let error_message = validate_non_empty_text(&input.error_message, "error_message", 4000)?;
+        let mut tx = self.pool.begin().await?;
+        let Some(job): Option<JudgeJobForUpdate> = sqlx::query_as(
+            r#"
+            SELECT id, session_id, status, rejudge_triggered, error_message
+            FROM judge_jobs
+            WHERE id = $1
+            FOR UPDATE
+            "#,
+        )
+        .bind(job_id as i64)
+        .fetch_optional(&mut *tx)
+        .await?
+        else {
+            return Err(AppError::NotFound(format!("judge job id {job_id}")));
+        };
+        let report_exists = sqlx::query_scalar::<_, i64>(
+            r#"
+            SELECT id
+            FROM judge_reports
+            WHERE job_id = $1
+            LIMIT 1
+            "#,
+        )
+        .bind(job.id)
+        .fetch_optional(&mut *tx)
+        .await?
+        .is_some();
+        if report_exists {
+            return Err(AppError::DebateConflict(format!(
+                "judge job {} already has report, cannot mark failed",
+                job_id
+            )));
+        }
+
+        if job.status == "failed" {
+            tx.commit().await?;
+            return Ok(MarkJudgeJobFailedOutput {
+                job_id,
+                session_id: job.session_id as u64,
+                status: "failed".to_string(),
+                error_message: job.error_message.unwrap_or(error_message),
+                newly_marked: false,
+            });
+        }
+        if job.status != "running" {
+            return Err(AppError::DebateConflict(format!(
+                "judge job {} is not running, current status {}",
+                job_id, job.status
+            )));
+        }
+
+        sqlx::query(
+            r#"
+            UPDATE judge_jobs
+            SET status = 'failed',
+                error_message = $2,
+                finished_at = NOW(),
+                updated_at = NOW()
+            WHERE id = $1
+            "#,
+        )
+        .bind(job.id)
+        .bind(&error_message)
+        .execute(&mut *tx)
+        .await?;
+
+        tx.commit().await?;
+        Ok(MarkJudgeJobFailedOutput {
+            job_id,
+            session_id: job.session_id as u64,
+            status: "failed".to_string(),
+            error_message,
+            newly_marked: true,
         })
     }
 }
@@ -453,6 +845,24 @@ mod tests {
         .execute(&state.pool)
         .await?;
         Ok(())
+    }
+
+    async fn seed_running_judge_job(state: &AppState, session_id: i64) -> Result<i64> {
+        let job_id: (i64,) = sqlx::query_as(
+            r#"
+            INSERT INTO judge_jobs(
+                ws_id, session_id, requested_by, status, style_mode, requested_at, started_at, created_at, updated_at
+            )
+            VALUES ($1, $2, $3, 'running', 'rational', NOW(), NOW(), NOW(), NOW())
+            RETURNING id
+            "#,
+        )
+        .bind(1_i64)
+        .bind(session_id)
+        .bind(1_i64)
+        .fetch_one(&state.pool)
+        .await?;
+        Ok(job_id.0)
     }
 
     #[tokio::test]
@@ -635,6 +1045,201 @@ mod tests {
         assert_eq!(report.job_id, job_id.0 as u64);
         assert_eq!(report.winner, "pro");
         assert_eq!(report.pro_score, 82);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn submit_judge_report_should_persist_report_and_mark_job_succeeded() -> Result<()> {
+        let (_tdb, state) = AppState::new_for_test().await?;
+        let session_id = seed_topic_and_session(&state, 1, "judging").await?;
+        let job_id = seed_running_judge_job(&state, session_id).await?;
+
+        let ret = state
+            .submit_judge_report(
+                job_id as u64,
+                SubmitJudgeReportInput {
+                    winner: "pro".to_string(),
+                    pro_score: 84,
+                    con_score: 76,
+                    logic_pro: 83,
+                    logic_con: 74,
+                    evidence_pro: 85,
+                    evidence_con: 78,
+                    rebuttal_pro: 82,
+                    rebuttal_con: 73,
+                    clarity_pro: 86,
+                    clarity_con: 79,
+                    pro_summary: "pro summary".to_string(),
+                    con_summary: "con summary".to_string(),
+                    rationale: "final rationale".to_string(),
+                    style_mode: Some("mixed".to_string()),
+                    needs_draw_vote: false,
+                    rejudge_triggered: false,
+                    payload: serde_json::json!({"provider":"openai","traceId":"abc"}),
+                    winner_first: Some("pro".to_string()),
+                    winner_second: Some("pro".to_string()),
+                    stage_summaries: vec![
+                        JudgeStageSummaryInput {
+                            stage_no: 1,
+                            from_message_id: Some(1),
+                            to_message_id: Some(100),
+                            pro_score: 80,
+                            con_score: 75,
+                            summary: serde_json::json!({"brief":"s1"}),
+                        },
+                        JudgeStageSummaryInput {
+                            stage_no: 2,
+                            from_message_id: Some(101),
+                            to_message_id: Some(200),
+                            pro_score: 84,
+                            con_score: 76,
+                            summary: serde_json::json!({"brief":"s2"}),
+                        },
+                    ],
+                },
+            )
+            .await?;
+        assert!(ret.newly_created);
+        assert_eq!(ret.status, "succeeded");
+
+        let row: (String, Option<String>, Option<String>) = sqlx::query_as(
+            r#"
+            SELECT status, winner_first, winner_second
+            FROM judge_jobs
+            WHERE id = $1
+            "#,
+        )
+        .bind(job_id)
+        .fetch_one(&state.pool)
+        .await?;
+        assert_eq!(row.0, "succeeded");
+        assert_eq!(row.1.as_deref(), Some("pro"));
+        assert_eq!(row.2.as_deref(), Some("pro"));
+
+        let stage_cnt: (i64,) = sqlx::query_as(
+            r#"
+            SELECT COUNT(*)::bigint
+            FROM judge_stage_summaries
+            WHERE job_id = $1
+            "#,
+        )
+        .bind(job_id)
+        .fetch_one(&state.pool)
+        .await?;
+        assert_eq!(stage_cnt.0, 2);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn submit_judge_report_should_be_idempotent_by_job_id() -> Result<()> {
+        let (_tdb, state) = AppState::new_for_test().await?;
+        let session_id = seed_topic_and_session(&state, 1, "judging").await?;
+        let job_id = seed_running_judge_job(&state, session_id).await?;
+        let input = SubmitJudgeReportInput {
+            winner: "con".to_string(),
+            pro_score: 72,
+            con_score: 81,
+            logic_pro: 70,
+            logic_con: 83,
+            evidence_pro: 74,
+            evidence_con: 82,
+            rebuttal_pro: 71,
+            rebuttal_con: 80,
+            clarity_pro: 73,
+            clarity_con: 79,
+            pro_summary: "pro".to_string(),
+            con_summary: "con".to_string(),
+            rationale: "rationale".to_string(),
+            style_mode: Some("rational".to_string()),
+            needs_draw_vote: false,
+            rejudge_triggered: false,
+            payload: serde_json::json!({"x":1}),
+            winner_first: Some("con".to_string()),
+            winner_second: Some("con".to_string()),
+            stage_summaries: vec![],
+        };
+        let first = state
+            .submit_judge_report(job_id as u64, input.clone())
+            .await?;
+        let second = state.submit_judge_report(job_id as u64, input).await?;
+        assert!(first.newly_created);
+        assert!(!second.newly_created);
+        assert_eq!(first.report_id, second.report_id);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn mark_judge_job_failed_should_update_status_and_be_idempotent() -> Result<()> {
+        let (_tdb, state) = AppState::new_for_test().await?;
+        let session_id = seed_topic_and_session(&state, 1, "judging").await?;
+        let job_id = seed_running_judge_job(&state, session_id).await?;
+        let first = state
+            .mark_judge_job_failed(
+                job_id as u64,
+                MarkJudgeJobFailedInput {
+                    error_message: "timeout".to_string(),
+                },
+            )
+            .await?;
+        let second = state
+            .mark_judge_job_failed(
+                job_id as u64,
+                MarkJudgeJobFailedInput {
+                    error_message: "ignored".to_string(),
+                },
+            )
+            .await?;
+        assert!(first.newly_marked);
+        assert!(!second.newly_marked);
+        assert_eq!(second.error_message, "timeout");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn mark_judge_job_failed_should_reject_when_report_exists() -> Result<()> {
+        let (_tdb, state) = AppState::new_for_test().await?;
+        let session_id = seed_topic_and_session(&state, 1, "closed").await?;
+        let job_id = seed_running_judge_job(&state, session_id).await?;
+
+        state
+            .submit_judge_report(
+                job_id as u64,
+                SubmitJudgeReportInput {
+                    winner: "pro".to_string(),
+                    pro_score: 80,
+                    con_score: 70,
+                    logic_pro: 80,
+                    logic_con: 70,
+                    evidence_pro: 80,
+                    evidence_con: 70,
+                    rebuttal_pro: 80,
+                    rebuttal_con: 70,
+                    clarity_pro: 80,
+                    clarity_con: 70,
+                    pro_summary: "p".to_string(),
+                    con_summary: "c".to_string(),
+                    rationale: "r".to_string(),
+                    style_mode: Some("rational".to_string()),
+                    needs_draw_vote: false,
+                    rejudge_triggered: false,
+                    payload: serde_json::json!({}),
+                    winner_first: Some("pro".to_string()),
+                    winner_second: Some("pro".to_string()),
+                    stage_summaries: vec![],
+                },
+            )
+            .await?;
+
+        let err = state
+            .mark_judge_job_failed(
+                job_id as u64,
+                MarkJudgeJobFailedInput {
+                    error_message: "should fail".to_string(),
+                },
+            )
+            .await
+            .expect_err("should reject");
+        assert!(matches!(err, AppError::DebateConflict(_)));
         Ok(())
     }
 }

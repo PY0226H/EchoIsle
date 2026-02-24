@@ -3,9 +3,11 @@ use crate::{
     AppState, CreateChat, CreateDebateMessageInput, CreateMessage, CreateUser, DebateMessage,
     DebateSessionSummary, DebateTopic, ErrorOutput, GetJudgeReportOutput, IapProduct,
     JoinDebateSessionInput, JoinDebateSessionOutput, JudgeJobSnapshot, JudgeReportDetail,
-    ListDebateSessions, ListDebateTopics, ListIapProducts, ListMessages, ListWalletLedger,
-    PinDebateMessageInput, PinDebateMessageOutput, RequestJudgeJobInput, RequestJudgeJobOutput,
-    SigninUser, VerifyIapOrderInput, VerifyIapOrderOutput, WalletBalanceOutput, WalletLedgerItem,
+    JudgeStageSummaryInput, ListDebateSessions, ListDebateTopics, ListIapProducts, ListMessages,
+    ListWalletLedger, MarkJudgeJobFailedInput, MarkJudgeJobFailedOutput, PinDebateMessageInput,
+    PinDebateMessageOutput, RequestJudgeJobInput, RequestJudgeJobOutput, SigninUser,
+    SubmitJudgeReportInput, SubmitJudgeReportOutput, VerifyIapOrderInput, VerifyIapOrderOutput,
+    WalletBalanceOutput, WalletLedgerItem,
 };
 use axum::Router;
 use chat_core::{AgentType, Chat, ChatAgent, ChatType, ChatUser, Message, User, Workspace};
@@ -34,6 +36,8 @@ pub(crate) trait OpenApiRouter {
             pin_debate_message_handler,
             request_judge_job_handler,
             get_latest_judge_report_handler,
+            submit_judge_report_handler,
+            mark_judge_job_failed_handler,
             list_iap_products_handler,
             verify_iap_order_handler,
             get_wallet_balance_handler,
@@ -55,6 +59,8 @@ pub(crate) trait OpenApiRouter {
                 JoinDebateSessionInput, JoinDebateSessionOutput,
                 DebateMessage, CreateDebateMessageInput, PinDebateMessageInput, PinDebateMessageOutput,
                 RequestJudgeJobInput, RequestJudgeJobOutput, JudgeJobSnapshot, JudgeReportDetail, GetJudgeReportOutput,
+                SubmitJudgeReportInput, SubmitJudgeReportOutput, JudgeStageSummaryInput,
+                MarkJudgeJobFailedInput, MarkJudgeJobFailedOutput,
                 IapProduct, ListIapProducts, VerifyIapOrderInput, VerifyIapOrderOutput,
                 WalletBalanceOutput, ListWalletLedger, WalletLedgerItem,
                 SigninUser, CreateUser, CreateChat, CreateMessage, ListMessages, AuthOutput, AccessTicketsOutput, ErrorOutput
@@ -75,7 +81,13 @@ impl Modify for SecurityAddon {
             components.add_security_scheme(
                 "token",
                 SecurityScheme::Http(HttpBuilder::new().scheme(HttpAuthScheme::Bearer).build()),
-            )
+            );
+            components.add_security_scheme(
+                "internal_key",
+                SecurityScheme::ApiKey(utoipa::openapi::security::ApiKey::Header(
+                    utoipa::openapi::security::ApiKeyValue::new("x-ai-internal-key"),
+                )),
+            );
         }
     }
 }

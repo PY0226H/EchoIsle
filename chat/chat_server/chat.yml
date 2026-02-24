@@ -20,3 +20,5 @@ kafka:
   consume_enabled: false
   consume_topics: []
   producer_timeout_ms: 1500
+ai_judge:
+  internal_key: dev-ai-internal-key
