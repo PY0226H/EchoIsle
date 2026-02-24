@@ -685,6 +685,7 @@ dependencies = [
  "jwt-simple",
  "mime_guess",
  "rdkafka",
+ "reqwest",
  "serde",
  "serde_json",
  "serde_yaml",

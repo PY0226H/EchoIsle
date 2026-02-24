@@ -50,12 +50,36 @@ pub struct KafkaConfig {
 pub struct AiJudgeConfig {
     #[serde(default = "default_ai_judge_internal_key")]
     pub internal_key: String,
+    #[serde(default)]
+    pub dispatch_enabled: bool,
+    #[serde(default = "default_ai_judge_service_base_url")]
+    pub service_base_url: String,
+    #[serde(default = "default_ai_judge_dispatch_path")]
+    pub dispatch_path: String,
+    #[serde(default = "default_ai_judge_dispatch_interval_secs")]
+    pub dispatch_interval_secs: u64,
+    #[serde(default = "default_ai_judge_dispatch_batch_size")]
+    pub dispatch_batch_size: i64,
+    #[serde(default = "default_ai_judge_dispatch_lock_secs")]
+    pub dispatch_lock_secs: i64,
+    #[serde(default = "default_ai_judge_dispatch_timeout_ms")]
+    pub dispatch_timeout_ms: u64,
+    #[serde(default = "default_ai_judge_dispatch_max_attempts")]
+    pub dispatch_max_attempts: i32,
 }
 
 impl Default for AiJudgeConfig {
     fn default() -> Self {
         Self {
             internal_key: default_ai_judge_internal_key(),
+            dispatch_enabled: false,
+            service_base_url: default_ai_judge_service_base_url(),
+            dispatch_path: default_ai_judge_dispatch_path(),
+            dispatch_interval_secs: default_ai_judge_dispatch_interval_secs(),
+            dispatch_batch_size: default_ai_judge_dispatch_batch_size(),
+            dispatch_lock_secs: default_ai_judge_dispatch_lock_secs(),
+            dispatch_timeout_ms: default_ai_judge_dispatch_timeout_ms(),
+            dispatch_max_attempts: default_ai_judge_dispatch_max_attempts(),
         }
     }
 }
@@ -97,6 +121,34 @@ fn default_kafka_timeout_ms() -> u64 {
 
 fn default_ai_judge_internal_key() -> String {
     "dev-ai-internal-key".to_string()
+}
+
+fn default_ai_judge_service_base_url() -> String {
+    "http://127.0.0.1:8787".to_string()
+}
+
+fn default_ai_judge_dispatch_path() -> String {
+    "/internal/judge/dispatch".to_string()
+}
+
+fn default_ai_judge_dispatch_interval_secs() -> u64 {
+    2
+}
+
+fn default_ai_judge_dispatch_batch_size() -> i64 {
+    20
+}
+
+fn default_ai_judge_dispatch_lock_secs() -> i64 {
+    30
+}
+
+fn default_ai_judge_dispatch_timeout_ms() -> u64 {
+    8_000
+}
+
+fn default_ai_judge_dispatch_max_attempts() -> i32 {
+    3
 }
 
 impl AppConfig {

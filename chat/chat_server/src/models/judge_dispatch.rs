@@ -1,0 +1,553 @@
+use crate::{AppError, AppState};
+use chrono::{DateTime, Utc};
+use reqwest::Client;
+use serde::Serialize;
+use sqlx::FromRow;
+use tracing::warn;
+
+const DISPATCH_MESSAGE_WINDOW_LIMIT: i64 = 100;
+const DISPATCH_ERROR_MAX_LEN: usize = 1000;
+
+#[derive(Debug, Default, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct JudgeDispatchTickReport {
+    pub claimed: usize,
+    pub dispatched: usize,
+    pub failed: usize,
+    pub marked_failed: usize,
+}
+
+#[derive(Debug, Clone, FromRow)]
+struct PendingDispatchJob {
+    id: i64,
+    ws_id: i64,
+    session_id: i64,
+    requested_by: i64,
+    style_mode: String,
+    rejudge_triggered: bool,
+    requested_at: DateTime<Utc>,
+    dispatch_attempts: i32,
+}
+
+#[derive(Debug, Clone, FromRow)]
+struct SessionTopicRow {
+    status: String,
+    scheduled_start_at: DateTime<Utc>,
+    actual_start_at: Option<DateTime<Utc>>,
+    end_at: DateTime<Utc>,
+    title: String,
+    description: String,
+    category: String,
+    stance_pro: String,
+    stance_con: String,
+    context_seed: Option<String>,
+}
+
+#[derive(Debug, Clone, FromRow)]
+struct SessionMessageRow {
+    id: i64,
+    user_id: i64,
+    side: String,
+    content: String,
+    created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AiJudgeDispatchRequest {
+    job: AiJudgeDispatchJob,
+    session: AiJudgeDispatchSession,
+    topic: AiJudgeDispatchTopic,
+    messages: Vec<AiJudgeDispatchMessage>,
+    message_window_size: i64,
+    rubric_version: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AiJudgeDispatchJob {
+    job_id: u64,
+    ws_id: u64,
+    session_id: u64,
+    requested_by: u64,
+    style_mode: String,
+    rejudge_triggered: bool,
+    requested_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AiJudgeDispatchSession {
+    status: String,
+    scheduled_start_at: DateTime<Utc>,
+    actual_start_at: Option<DateTime<Utc>>,
+    end_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AiJudgeDispatchTopic {
+    title: String,
+    description: String,
+    category: String,
+    stance_pro: String,
+    stance_con: String,
+    context_seed: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AiJudgeDispatchMessage {
+    message_id: u64,
+    user_id: u64,
+    side: String,
+    content: String,
+    created_at: DateTime<Utc>,
+}
+
+fn build_dispatch_url(base: &str, path: &str) -> String {
+    let base = base.trim_end_matches('/');
+    let path = path.trim_start_matches('/');
+    format!("{base}/{path}")
+}
+
+fn sanitize_error_message(err: &str) -> String {
+    let ret = err.trim();
+    if ret.is_empty() {
+        return "dispatch failed with empty error".to_string();
+    }
+    if ret.len() <= DISPATCH_ERROR_MAX_LEN {
+        return ret.to_string();
+    }
+    ret.chars().take(DISPATCH_ERROR_MAX_LEN).collect()
+}
+
+impl AppState {
+    pub async fn dispatch_pending_judge_jobs_once(
+        &self,
+    ) -> Result<JudgeDispatchTickReport, AppError> {
+        let jobs = self.claim_pending_dispatch_jobs().await?;
+        let mut report = JudgeDispatchTickReport {
+            claimed: jobs.len(),
+            ..Default::default()
+        };
+
+        for job in jobs.into_iter() {
+            let payload = match self.load_dispatch_payload(&job).await {
+                Ok(v) => v,
+                Err(err) => {
+                    report.failed += 1;
+                    if self
+                        .mark_dispatch_failure(job.id, job.dispatch_attempts, &err.to_string())
+                        .await?
+                    {
+                        report.marked_failed += 1;
+                    }
+                    continue;
+                }
+            };
+            match self.send_dispatch_request(&payload).await {
+                Ok(_) => {
+                    self.mark_dispatch_sent(job.id).await?;
+                    report.dispatched += 1;
+                }
+                Err(err) => {
+                    report.failed += 1;
+                    if self
+                        .mark_dispatch_failure(job.id, job.dispatch_attempts, &err.to_string())
+                        .await?
+                    {
+                        report.marked_failed += 1;
+                    }
+                }
+            }
+        }
+
+        Ok(report)
+    }
+
+    async fn claim_pending_dispatch_jobs(&self) -> Result<Vec<PendingDispatchJob>, AppError> {
+        let max_attempts = self.config.ai_judge.dispatch_max_attempts.max(1);
+        let batch_size = self.config.ai_judge.dispatch_batch_size.max(1);
+        let lock_secs = self.config.ai_judge.dispatch_lock_secs.max(1);
+        let rows = sqlx::query_as(
+            r#"
+            WITH due AS (
+                SELECT j.id
+                FROM judge_jobs j
+                WHERE j.status = 'running'
+                  AND NOT EXISTS (
+                    SELECT 1
+                    FROM judge_reports r
+                    WHERE r.job_id = j.id
+                  )
+                  AND (j.dispatch_locked_until IS NULL OR j.dispatch_locked_until <= NOW())
+                  AND j.dispatch_attempts < $1
+                ORDER BY j.requested_at ASC
+                LIMIT $2
+                FOR UPDATE SKIP LOCKED
+            )
+            UPDATE judge_jobs j
+            SET dispatch_attempts = j.dispatch_attempts + 1,
+                last_dispatch_at = NOW(),
+                dispatch_locked_until = NOW() + ($3::bigint * INTERVAL '1 second'),
+                updated_at = NOW()
+            FROM due
+            WHERE j.id = due.id
+            RETURNING
+                j.id,
+                j.ws_id,
+                j.session_id,
+                j.requested_by,
+                j.style_mode,
+                j.rejudge_triggered,
+                j.requested_at,
+                j.dispatch_attempts
+            "#,
+        )
+        .bind(max_attempts)
+        .bind(batch_size)
+        .bind(lock_secs)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows)
+    }
+
+    async fn load_dispatch_payload(
+        &self,
+        job: &PendingDispatchJob,
+    ) -> Result<AiJudgeDispatchRequest, AppError> {
+        let session_topic: SessionTopicRow = sqlx::query_as(
+            r#"
+            SELECT
+                s.status,
+                s.scheduled_start_at,
+                s.actual_start_at,
+                s.end_at,
+                t.title,
+                t.description,
+                t.category,
+                t.stance_pro,
+                t.stance_con,
+                t.context_seed
+            FROM debate_sessions s
+            JOIN debate_topics t ON t.id = s.topic_id
+            WHERE s.id = $1 AND s.ws_id = $2
+            "#,
+        )
+        .bind(job.session_id)
+        .bind(job.ws_id)
+        .fetch_optional(&self.pool)
+        .await?
+        .ok_or_else(|| {
+            AppError::NotFound(format!(
+                "dispatch session {} in workspace {}",
+                job.session_id, job.ws_id
+            ))
+        })?;
+
+        let mut messages: Vec<SessionMessageRow> = sqlx::query_as(
+            r#"
+            SELECT id, user_id, side, content, created_at
+            FROM session_messages
+            WHERE session_id = $1
+            ORDER BY id DESC
+            LIMIT $2
+            "#,
+        )
+        .bind(job.session_id)
+        .bind(DISPATCH_MESSAGE_WINDOW_LIMIT)
+        .fetch_all(&self.pool)
+        .await?;
+        messages.reverse();
+
+        Ok(AiJudgeDispatchRequest {
+            job: AiJudgeDispatchJob {
+                job_id: job.id as u64,
+                ws_id: job.ws_id as u64,
+                session_id: job.session_id as u64,
+                requested_by: job.requested_by as u64,
+                style_mode: job.style_mode.clone(),
+                rejudge_triggered: job.rejudge_triggered,
+                requested_at: job.requested_at,
+            },
+            session: AiJudgeDispatchSession {
+                status: session_topic.status,
+                scheduled_start_at: session_topic.scheduled_start_at,
+                actual_start_at: session_topic.actual_start_at,
+                end_at: session_topic.end_at,
+            },
+            topic: AiJudgeDispatchTopic {
+                title: session_topic.title,
+                description: session_topic.description,
+                category: session_topic.category,
+                stance_pro: session_topic.stance_pro,
+                stance_con: session_topic.stance_con,
+                context_seed: session_topic.context_seed,
+            },
+            messages: messages
+                .into_iter()
+                .map(|v| AiJudgeDispatchMessage {
+                    message_id: v.id as u64,
+                    user_id: v.user_id as u64,
+                    side: v.side,
+                    content: v.content,
+                    created_at: v.created_at,
+                })
+                .collect(),
+            message_window_size: DISPATCH_MESSAGE_WINDOW_LIMIT,
+            rubric_version: "v1-logic-evidence-rebuttal-clarity".to_string(),
+        })
+    }
+
+    async fn send_dispatch_request(
+        &self,
+        payload: &AiJudgeDispatchRequest,
+    ) -> Result<(), AppError> {
+        let url = build_dispatch_url(
+            &self.config.ai_judge.service_base_url,
+            &self.config.ai_judge.dispatch_path,
+        );
+        let client = Client::builder()
+            .timeout(std::time::Duration::from_millis(
+                self.config.ai_judge.dispatch_timeout_ms.max(1),
+            ))
+            .build()
+            .map_err(|e| AppError::AnyError(e.into()))?;
+        let resp = client
+            .post(&url)
+            .header("x-ai-internal-key", &self.config.ai_judge.internal_key)
+            .json(payload)
+            .send()
+            .await
+            .map_err(|e| AppError::AnyError(e.into()))?;
+        if resp.status().is_success() {
+            Ok(())
+        } else {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            Err(AppError::DebateConflict(format!(
+                "dispatch request failed: status={}, body={}",
+                status, body
+            )))
+        }
+    }
+
+    async fn mark_dispatch_sent(&self, job_id: i64) -> Result<(), AppError> {
+        sqlx::query(
+            r#"
+            UPDATE judge_jobs
+            SET started_at = COALESCE(started_at, NOW()),
+                error_message = NULL,
+                dispatch_locked_until = NULL,
+                updated_at = NOW()
+            WHERE id = $1 AND status = 'running'
+            "#,
+        )
+        .bind(job_id)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    async fn mark_dispatch_failure(
+        &self,
+        job_id: i64,
+        dispatch_attempts: i32,
+        err_msg: &str,
+    ) -> Result<bool, AppError> {
+        let err_msg = sanitize_error_message(err_msg);
+        let max_attempts = self.config.ai_judge.dispatch_max_attempts.max(1);
+        if dispatch_attempts >= max_attempts {
+            sqlx::query(
+                r#"
+                UPDATE judge_jobs
+                SET status = 'failed',
+                    error_message = $2,
+                    finished_at = NOW(),
+                    dispatch_locked_until = NULL,
+                    updated_at = NOW()
+                WHERE id = $1
+                  AND status = 'running'
+                "#,
+            )
+            .bind(job_id)
+            .bind(&err_msg)
+            .execute(&self.pool)
+            .await?;
+            warn!(
+                job_id,
+                "judge dispatch failed and marked job as failed: {}", err_msg
+            );
+            Ok(true)
+        } else {
+            sqlx::query(
+                r#"
+                UPDATE judge_jobs
+                SET error_message = $2,
+                    updated_at = NOW()
+                WHERE id = $1
+                  AND status = 'running'
+                "#,
+            )
+            .bind(job_id)
+            .bind(&err_msg)
+            .execute(&self.pool)
+            .await?;
+            warn!(
+                job_id,
+                "judge dispatch failed, waiting next retry: {}", err_msg
+            );
+            Ok(false)
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use anyhow::Result;
+    use chrono::Duration;
+    use std::sync::Arc;
+
+    async fn seed_topic_and_session(state: &AppState, ws_id: i64, status: &str) -> Result<i64> {
+        let topic_id: (i64,) = sqlx::query_as(
+            r#"
+            INSERT INTO debate_topics(ws_id, title, description, category, stance_pro, stance_con, is_active, created_by)
+            VALUES ($1, 'topic-dispatch', 'desc', 'game', 'pro', 'con', true, 1)
+            RETURNING id
+            "#,
+        )
+        .bind(ws_id)
+        .fetch_one(&state.pool)
+        .await?;
+
+        let now = Utc::now();
+        let session_id: (i64,) = sqlx::query_as(
+            r#"
+            INSERT INTO debate_sessions(
+                ws_id, topic_id, status, scheduled_start_at, actual_start_at, end_at, max_participants_per_side
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, 500)
+            RETURNING id
+            "#,
+        )
+        .bind(ws_id)
+        .bind(topic_id.0)
+        .bind(status)
+        .bind(now - Duration::minutes(20))
+        .bind(now - Duration::minutes(15))
+        .bind(now - Duration::minutes(1))
+        .fetch_one(&state.pool)
+        .await?;
+
+        Ok(session_id.0)
+    }
+
+    async fn seed_running_job(state: &AppState, session_id: i64, attempts: i32) -> Result<i64> {
+        let job_id: (i64,) = sqlx::query_as(
+            r#"
+            INSERT INTO judge_jobs(
+                ws_id, session_id, requested_by, status, style_mode, requested_at, dispatch_attempts, dispatch_locked_until
+            )
+            VALUES ($1, $2, $3, 'running', 'rational', NOW(), $4, NULL)
+            RETURNING id
+            "#,
+        )
+        .bind(1_i64)
+        .bind(session_id)
+        .bind(1_i64)
+        .bind(attempts)
+        .fetch_one(&state.pool)
+        .await?;
+        Ok(job_id.0)
+    }
+
+    async fn seed_messages(state: &AppState, session_id: i64, count: i64) -> Result<()> {
+        for idx in 0..count {
+            sqlx::query(
+                r#"
+                INSERT INTO session_messages(ws_id, session_id, user_id, side, content)
+                VALUES (1, $1, 1, 'pro', $2)
+                "#,
+            )
+            .bind(session_id)
+            .bind(format!("msg-{idx}"))
+            .execute(&state.pool)
+            .await?;
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn load_dispatch_payload_should_include_recent_messages_ordered_asc() -> Result<()> {
+        let (_tdb, state) = AppState::new_for_test().await?;
+        let session_id = seed_topic_and_session(&state, 1, "judging").await?;
+        let job_id = seed_running_job(&state, session_id, 0).await?;
+        seed_messages(&state, session_id, 3).await?;
+
+        let job = PendingDispatchJob {
+            id: job_id,
+            ws_id: 1,
+            session_id,
+            requested_by: 1,
+            style_mode: "rational".to_string(),
+            rejudge_triggered: false,
+            requested_at: Utc::now(),
+            dispatch_attempts: 1,
+        };
+        let payload = state.load_dispatch_payload(&job).await?;
+        assert_eq!(payload.job.job_id, job_id as u64);
+        assert_eq!(payload.topic.title, "topic-dispatch");
+        assert_eq!(payload.messages.len(), 3);
+        assert_eq!(payload.messages[0].content, "msg-0");
+        assert_eq!(payload.messages[2].content, "msg-2");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn dispatch_pending_judge_jobs_once_should_mark_failed_after_max_attempts() -> Result<()>
+    {
+        let (_tdb, mut state) = AppState::new_for_test().await?;
+        let inner = Arc::get_mut(&mut state.inner).expect("state should be unique");
+        inner.config.ai_judge.dispatch_max_attempts = 1;
+        inner.config.ai_judge.dispatch_timeout_ms = 200;
+        inner.config.ai_judge.dispatch_lock_secs = 1;
+        inner.config.ai_judge.dispatch_batch_size = 20;
+        inner.config.ai_judge.service_base_url = "http://127.0.0.1:9".to_string();
+        inner.config.ai_judge.dispatch_path = "/internal/judge/dispatch".to_string();
+
+        let session_id = seed_topic_and_session(&state, 1, "judging").await?;
+        let job_id = seed_running_job(&state, session_id, 0).await?;
+
+        let tick = state.dispatch_pending_judge_jobs_once().await?;
+        assert_eq!(tick.claimed, 1);
+        assert_eq!(tick.failed, 1);
+        assert_eq!(tick.marked_failed, 1);
+
+        let row: (String,) = sqlx::query_as(
+            r#"
+            SELECT status
+            FROM judge_jobs
+            WHERE id = $1
+            "#,
+        )
+        .bind(job_id)
+        .fetch_one(&state.pool)
+        .await?;
+        assert_eq!(row.0, "failed");
+        Ok(())
+    }
+
+    #[test]
+    fn build_dispatch_url_should_join_base_and_path() {
+        assert_eq!(
+            build_dispatch_url("http://127.0.0.1:8787/", "/internal/judge/dispatch"),
+            "http://127.0.0.1:8787/internal/judge/dispatch"
+        );
+        assert_eq!(
+            build_dispatch_url("http://127.0.0.1:8787", "internal/judge/dispatch"),
+            "http://127.0.0.1:8787/internal/judge/dispatch"
+        );
+    }
+}

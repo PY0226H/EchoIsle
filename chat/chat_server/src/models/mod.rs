@@ -3,6 +3,7 @@ mod chat;
 mod debate;
 mod file;
 mod judge;
+mod judge_dispatch;
 mod messages;
 mod payment;
 mod user;

@@ -57,6 +57,7 @@ mod tests {
             kafka: crate::config::KafkaConfig::default(),
             ai_judge: crate::config::AiJudgeConfig {
                 internal_key: "secret-key".to_string(),
+                ..Default::default()
             },
         };
         Ok(AppState::new_for_unit_test(config)?)

@@ -180,6 +180,7 @@ impl AppState {
             }),
         };
         spawn_debate_session_worker(state.clone());
+        spawn_ai_judge_dispatch_worker(state.clone());
         Ok(state)
     }
 
@@ -220,6 +221,31 @@ fn spawn_debate_session_worker(state: AppState) {
                 debug!("debate session worker tick success");
             }
             sleep(Duration::from_secs(DEBATE_SESSION_WORKER_INTERVAL_SECS)).await;
+        }
+    });
+}
+
+fn spawn_ai_judge_dispatch_worker(state: AppState) {
+    tokio::spawn(async move {
+        loop {
+            let interval = state.config.ai_judge.dispatch_interval_secs.max(1);
+            if state.config.ai_judge.dispatch_enabled {
+                match state.dispatch_pending_judge_jobs_once().await {
+                    Ok(report) => {
+                        debug!(
+                            claimed = report.claimed,
+                            dispatched = report.dispatched,
+                            failed = report.failed,
+                            marked_failed = report.marked_failed,
+                            "ai judge dispatch worker tick success"
+                        );
+                    }
+                    Err(err) => {
+                        warn!("ai judge dispatch worker tick failed: {}", err);
+                    }
+                }
+            }
+            sleep(Duration::from_secs(interval)).await;
         }
     });
 }

@@ -386,7 +386,7 @@ impl AppState {
                 ws_id, session_id, requested_by, status, style_mode, rejudge_triggered,
                 requested_at, started_at, created_at, updated_at
             )
-            VALUES ($1, $2, $3, 'running', $4, $5, NOW(), NOW(), NOW(), NOW())
+            VALUES ($1, $2, $3, 'running', $4, $5, NOW(), NULL, NOW(), NOW())
             RETURNING id, status, style_mode, rejudge_triggered, requested_at
             "#,
         )
