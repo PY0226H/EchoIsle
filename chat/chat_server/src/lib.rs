@@ -242,6 +242,7 @@ fn spawn_ai_judge_dispatch_worker(state: AppState) {
                             dispatched = report.dispatched,
                             failed = report.failed,
                             marked_failed = report.marked_failed,
+                            timed_out_failed = report.timed_out_failed,
                             "ai judge dispatch worker tick success"
                         );
                     }

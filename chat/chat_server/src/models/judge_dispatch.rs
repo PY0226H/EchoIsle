@@ -15,6 +15,7 @@ pub struct JudgeDispatchTickReport {
     pub dispatched: usize,
     pub failed: usize,
     pub marked_failed: usize,
+    pub timed_out_failed: usize,
 }
 
 #[derive(Debug, Clone, FromRow)]
@@ -126,8 +127,10 @@ impl AppState {
     pub async fn dispatch_pending_judge_jobs_once(
         &self,
     ) -> Result<JudgeDispatchTickReport, AppError> {
+        let timed_out_failed = self.mark_timed_out_dispatch_jobs_failed().await?;
         let jobs = self.claim_pending_dispatch_jobs().await?;
         let mut report = JudgeDispatchTickReport {
+            timed_out_failed,
             claimed: jobs.len(),
             ..Default::default()
         };
@@ -164,6 +167,40 @@ impl AppState {
         }
 
         Ok(report)
+    }
+
+    async fn mark_timed_out_dispatch_jobs_failed(&self) -> Result<usize, AppError> {
+        let max_attempts = self.config.ai_judge.dispatch_max_attempts.max(1);
+        let rows_affected = sqlx::query(
+            r#"
+            UPDATE judge_jobs j
+            SET status = 'failed',
+                error_message = COALESCE(
+                    NULLIF(j.error_message, ''),
+                    format(
+                        'dispatch callback timeout after %s attempts',
+                        j.dispatch_attempts::text
+                    )
+                ),
+                finished_at = NOW(),
+                dispatch_locked_until = NULL,
+                updated_at = NOW()
+            WHERE j.status = 'running'
+              AND NOT EXISTS (
+                SELECT 1
+                FROM judge_reports r
+                WHERE r.job_id = j.id
+              )
+              AND j.dispatch_attempts >= $1
+              AND j.dispatch_locked_until IS NOT NULL
+              AND j.dispatch_locked_until <= NOW()
+            "#,
+        )
+        .bind(max_attempts)
+        .execute(&self.pool)
+        .await?
+        .rows_affected() as usize;
+        Ok(rows_affected)
     }
 
     async fn claim_pending_dispatch_jobs(&self) -> Result<Vec<PendingDispatchJob>, AppError> {
@@ -334,17 +371,19 @@ impl AppState {
     }
 
     async fn mark_dispatch_sent(&self, job_id: i64) -> Result<(), AppError> {
+        let callback_wait_secs = self.config.ai_judge.dispatch_callback_wait_secs.max(1);
         sqlx::query(
             r#"
             UPDATE judge_jobs
             SET started_at = COALESCE(started_at, NOW()),
                 error_message = NULL,
-                dispatch_locked_until = NULL,
+                dispatch_locked_until = NOW() + ($2::bigint * INTERVAL '1 second'),
                 updated_at = NOW()
             WHERE id = $1 AND status = 'running'
             "#,
         )
         .bind(job_id)
+        .bind(callback_wait_secs)
         .execute(&self.pool)
         .await?;
         Ok(())
@@ -407,8 +446,14 @@ impl AppState {
 mod tests {
     use super::*;
     use anyhow::Result;
+    use axum::{routing::post, Json, Router};
     use chrono::Duration;
-    use std::sync::Arc;
+    use serde_json::Value;
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    };
+    use tokio::net::TcpListener;
 
     async fn seed_topic_and_session(state: &AppState, ws_id: i64, status: &str) -> Result<i64> {
         let topic_id: (i64,) = sqlx::query_as(
@@ -444,13 +489,20 @@ mod tests {
         Ok(session_id.0)
     }
 
-    async fn seed_running_job(state: &AppState, session_id: i64, attempts: i32) -> Result<i64> {
+    async fn seed_running_job(
+        state: &AppState,
+        session_id: i64,
+        attempts: i32,
+        lock_secs_offset: Option<i64>,
+    ) -> Result<i64> {
+        let dispatch_locked_until =
+            lock_secs_offset.map(|secs| Utc::now() + Duration::seconds(secs));
         let job_id: (i64,) = sqlx::query_as(
             r#"
             INSERT INTO judge_jobs(
                 ws_id, session_id, requested_by, status, style_mode, requested_at, dispatch_attempts, dispatch_locked_until
             )
-            VALUES ($1, $2, $3, 'running', 'rational', NOW(), $4, NULL)
+            VALUES ($1, $2, $3, 'running', 'rational', NOW(), $4, $5)
             RETURNING id
             "#,
         )
@@ -458,9 +510,36 @@ mod tests {
         .bind(session_id)
         .bind(1_i64)
         .bind(attempts)
+        .bind(dispatch_locked_until)
         .fetch_one(&state.pool)
         .await?;
         Ok(job_id.0)
+    }
+
+    async fn spawn_mock_dispatch_server() -> Result<(String, Arc<AtomicUsize>)> {
+        let hit_count = Arc::new(AtomicUsize::new(0));
+        let app = {
+            let hit_count = hit_count.clone();
+            Router::new().route(
+                "/internal/judge/dispatch",
+                post(move |Json(_payload): Json<Value>| {
+                    let hit_count = hit_count.clone();
+                    async move {
+                        hit_count.fetch_add(1, Ordering::SeqCst);
+                        (
+                            axum::http::StatusCode::OK,
+                            Json(serde_json::json!({"ok": true})),
+                        )
+                    }
+                }),
+            )
+        };
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        let addr = listener.local_addr()?;
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        Ok((format!("http://{}", addr), hit_count))
     }
 
     async fn seed_messages(state: &AppState, session_id: i64, count: i64) -> Result<()> {
@@ -483,7 +562,7 @@ mod tests {
     async fn load_dispatch_payload_should_include_recent_messages_ordered_asc() -> Result<()> {
         let (_tdb, state) = AppState::new_for_test().await?;
         let session_id = seed_topic_and_session(&state, 1, "judging").await?;
-        let job_id = seed_running_job(&state, session_id, 0).await?;
+        let job_id = seed_running_job(&state, session_id, 0, None).await?;
         seed_messages(&state, session_id, 3).await?;
 
         let job = PendingDispatchJob {
@@ -518,7 +597,7 @@ mod tests {
         inner.config.ai_judge.dispatch_path = "/internal/judge/dispatch".to_string();
 
         let session_id = seed_topic_and_session(&state, 1, "judging").await?;
-        let job_id = seed_running_job(&state, session_id, 0).await?;
+        let job_id = seed_running_job(&state, session_id, 0, None).await?;
 
         let tick = state.dispatch_pending_judge_jobs_once().await?;
         assert_eq!(tick.claimed, 1);
@@ -536,6 +615,85 @@ mod tests {
         .fetch_one(&state.pool)
         .await?;
         assert_eq!(row.0, "failed");
+        assert_eq!(tick.timed_out_failed, 0);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn dispatch_pending_judge_jobs_once_should_not_redispatch_within_callback_wait_window(
+    ) -> Result<()> {
+        let (_tdb, mut state) = AppState::new_for_test().await?;
+        let inner = Arc::get_mut(&mut state.inner).expect("state should be unique");
+        let (service_base_url, hit_count) = spawn_mock_dispatch_server().await?;
+        inner.config.ai_judge.dispatch_max_attempts = 3;
+        inner.config.ai_judge.dispatch_timeout_ms = 1_000;
+        inner.config.ai_judge.dispatch_lock_secs = 1;
+        inner.config.ai_judge.dispatch_batch_size = 20;
+        inner.config.ai_judge.dispatch_callback_wait_secs = 120;
+        inner.config.ai_judge.service_base_url = service_base_url;
+        inner.config.ai_judge.dispatch_path = "/internal/judge/dispatch".to_string();
+
+        let session_id = seed_topic_and_session(&state, 1, "judging").await?;
+        seed_messages(&state, session_id, 2).await?;
+        let job_id = seed_running_job(&state, session_id, 0, None).await?;
+
+        let first = state.dispatch_pending_judge_jobs_once().await?;
+        assert_eq!(first.claimed, 1);
+        assert_eq!(first.dispatched, 1);
+        assert_eq!(hit_count.load(Ordering::SeqCst), 1);
+
+        let second = state.dispatch_pending_judge_jobs_once().await?;
+        assert_eq!(second.claimed, 0);
+        assert_eq!(second.dispatched, 0);
+        assert_eq!(hit_count.load(Ordering::SeqCst), 1);
+
+        let lock_row: (Option<DateTime<Utc>>,) = sqlx::query_as(
+            r#"
+            SELECT dispatch_locked_until
+            FROM judge_jobs
+            WHERE id = $1
+            "#,
+        )
+        .bind(job_id)
+        .fetch_one(&state.pool)
+        .await?;
+        assert!(lock_row.0.is_some());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn dispatch_pending_judge_jobs_once_should_mark_timeout_failed_when_attempts_exhausted(
+    ) -> Result<()> {
+        let (_tdb, mut state) = AppState::new_for_test().await?;
+        let inner = Arc::get_mut(&mut state.inner).expect("state should be unique");
+        inner.config.ai_judge.dispatch_max_attempts = 2;
+        inner.config.ai_judge.dispatch_timeout_ms = 200;
+        inner.config.ai_judge.dispatch_lock_secs = 1;
+        inner.config.ai_judge.dispatch_batch_size = 20;
+        inner.config.ai_judge.dispatch_callback_wait_secs = 60;
+
+        let session_id = seed_topic_and_session(&state, 1, "judging").await?;
+        let job_id = seed_running_job(&state, session_id, 2, Some(-10)).await?;
+
+        let tick = state.dispatch_pending_judge_jobs_once().await?;
+        assert_eq!(tick.claimed, 0);
+        assert_eq!(tick.timed_out_failed, 1);
+
+        let row: (String, Option<String>) = sqlx::query_as(
+            r#"
+            SELECT status, error_message
+            FROM judge_jobs
+            WHERE id = $1
+            "#,
+        )
+        .bind(job_id)
+        .fetch_one(&state.pool)
+        .await?;
+        assert_eq!(row.0, "failed");
+        assert!(row
+            .1
+            .unwrap_or_default()
+            .contains("dispatch callback timeout after 2 attempts"));
         Ok(())
     }
 

@@ -30,3 +30,4 @@ ai_judge:
   dispatch_lock_secs: 30
   dispatch_timeout_ms: 8000
   dispatch_max_attempts: 3
+  dispatch_callback_wait_secs: 60

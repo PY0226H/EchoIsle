@@ -66,6 +66,8 @@ pub struct AiJudgeConfig {
     pub dispatch_timeout_ms: u64,
     #[serde(default = "default_ai_judge_dispatch_max_attempts")]
     pub dispatch_max_attempts: i32,
+    #[serde(default = "default_ai_judge_dispatch_callback_wait_secs")]
+    pub dispatch_callback_wait_secs: i64,
 }
 
 impl Default for AiJudgeConfig {
@@ -80,6 +82,7 @@ impl Default for AiJudgeConfig {
             dispatch_lock_secs: default_ai_judge_dispatch_lock_secs(),
             dispatch_timeout_ms: default_ai_judge_dispatch_timeout_ms(),
             dispatch_max_attempts: default_ai_judge_dispatch_max_attempts(),
+            dispatch_callback_wait_secs: default_ai_judge_dispatch_callback_wait_secs(),
         }
     }
 }
@@ -149,6 +152,10 @@ fn default_ai_judge_dispatch_timeout_ms() -> u64 {
 
 fn default_ai_judge_dispatch_max_attempts() -> i32 {
     3
+}
+
+fn default_ai_judge_dispatch_callback_wait_secs() -> i64 {
+    60
 }
 
 impl AppConfig {
