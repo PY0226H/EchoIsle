@@ -13,6 +13,9 @@ const STYLE_ENTERTAINING: &str = "entertaining";
 const STYLE_MIXED: &str = "mixed";
 const DRAW_VOTE_THRESHOLD_PERCENT: i32 = 70;
 const DRAW_VOTE_WINDOW_SECS: i64 = 300;
+const REMATCH_DELAY_SECS: i64 = 600;
+const REMATCH_MIN_DURATION_SECS: i64 = 900;
+const REMATCH_MAX_DURATION_SECS: i64 = 14_400;
 
 #[derive(Debug, Clone, ToSchema, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -95,6 +98,7 @@ pub struct DrawVoteDetail {
     pub voting_ends_at: DateTime<Utc>,
     pub decided_at: Option<DateTime<Utc>>,
     pub my_vote: Option<bool>,
+    pub rematch_session_id: Option<u64>,
 }
 
 #[derive(Debug, Clone, ToSchema, Serialize, Deserialize)]
@@ -250,6 +254,7 @@ struct DrawVoteRow {
     status: String,
     resolution: String,
     decided_at: Option<DateTime<Utc>>,
+    rematch_session_id: Option<i64>,
 }
 
 #[derive(Debug, Clone, FromRow)]
@@ -257,6 +262,18 @@ struct DrawVoteStatsRow {
     participated_voters: i32,
     agree_votes: i32,
     disagree_votes: i32,
+}
+
+#[derive(Debug, Clone, FromRow)]
+struct DebateSessionForRematch {
+    id: i64,
+    ws_id: i64,
+    topic_id: i64,
+    scheduled_start_at: DateTime<Utc>,
+    actual_start_at: Option<DateTime<Utc>>,
+    end_at: DateTime<Utc>,
+    max_participants_per_side: i32,
+    rematch_round: i32,
 }
 
 fn normalize_style_mode(style_mode: Option<String>) -> Result<String, AppError> {
@@ -378,6 +395,7 @@ fn map_draw_vote_detail(
         voting_ends_at: vote.voting_ends_at,
         decided_at: vote.decided_at,
         my_vote,
+        rematch_session_id: vote.rematch_session_id.map(|v| v as u64),
     }
 }
 
@@ -671,13 +689,115 @@ impl AppState {
             WHERE id = $1
             RETURNING
                 id, ws_id, session_id, report_id, threshold_percent, eligible_voters, required_voters,
-                voting_ends_at, status, resolution, decided_at
+                voting_ends_at, status, resolution, decided_at, rematch_session_id
             "#,
         )
         .bind(vote.id)
         .bind(status)
         .bind(resolution)
         .bind(Some(now))
+        .fetch_one(&mut **tx)
+        .await?;
+        if updated.resolution == "open_rematch" {
+            let with_rematch = Self::ensure_rematch_session_for_vote(tx, updated).await?;
+            return Ok(with_rematch);
+        }
+        Ok(updated)
+    }
+
+    fn rematch_schedule_from_source(
+        source: &DebateSessionForRematch,
+    ) -> (DateTime<Utc>, DateTime<Utc>, i32) {
+        let now = Utc::now();
+        let base_start = now + chrono::Duration::seconds(REMATCH_DELAY_SECS);
+        let base_from = source.actual_start_at.unwrap_or(source.scheduled_start_at);
+        let duration_secs = (source.end_at - base_from)
+            .num_seconds()
+            .clamp(REMATCH_MIN_DURATION_SECS, REMATCH_MAX_DURATION_SECS);
+        let end_at = base_start + chrono::Duration::seconds(duration_secs);
+        let next_round = source.rematch_round + 1;
+        (base_start, end_at, next_round)
+    }
+
+    async fn ensure_rematch_session_for_vote(
+        tx: &mut Transaction<'_, Postgres>,
+        vote: DrawVoteRow,
+    ) -> Result<DrawVoteRow, AppError> {
+        if vote.rematch_session_id.is_some() {
+            return Ok(vote);
+        }
+
+        let existing: Option<(i64,)> = sqlx::query_as(
+            r#"
+            SELECT id
+            FROM debate_sessions
+            WHERE parent_session_id = $1
+            ORDER BY rematch_round DESC, created_at DESC
+            LIMIT 1
+            "#,
+        )
+        .bind(vote.session_id)
+        .fetch_optional(&mut **tx)
+        .await?;
+
+        let rematch_session_id = if let Some((session_id,)) = existing {
+            session_id
+        } else {
+            let source: DebateSessionForRematch = sqlx::query_as(
+                r#"
+                SELECT
+                    id, ws_id, topic_id, scheduled_start_at, actual_start_at, end_at,
+                    max_participants_per_side, rematch_round
+                FROM debate_sessions
+                WHERE id = $1
+                FOR UPDATE
+                "#,
+            )
+            .bind(vote.session_id)
+            .fetch_one(&mut **tx)
+            .await?;
+            let (scheduled_start_at, end_at, next_round) =
+                Self::rematch_schedule_from_source(&source);
+            let rematch_id: (i64,) = sqlx::query_as(
+                r#"
+                INSERT INTO debate_sessions(
+                    ws_id, topic_id, status, scheduled_start_at, actual_start_at, end_at,
+                    max_participants_per_side, pro_count, con_count, hot_score,
+                    parent_session_id, rematch_round, created_at, updated_at
+                )
+                VALUES (
+                    $1, $2, 'scheduled', $3, NULL, $4,
+                    $5, 0, 0, 0,
+                    $6, $7, NOW(), NOW()
+                )
+                RETURNING id
+                "#,
+            )
+            .bind(source.ws_id)
+            .bind(source.topic_id)
+            .bind(scheduled_start_at)
+            .bind(end_at)
+            .bind(source.max_participants_per_side)
+            .bind(source.id)
+            .bind(next_round)
+            .fetch_one(&mut **tx)
+            .await?;
+            rematch_id.0
+        };
+
+        let updated: DrawVoteRow = sqlx::query_as(
+            r#"
+            UPDATE judge_draw_votes
+            SET rematch_session_id = $2,
+                updated_at = NOW()
+            WHERE id = $1
+            RETURNING
+                id, ws_id, session_id, report_id, threshold_percent, eligible_voters, required_voters,
+                voting_ends_at, status, resolution, decided_at, rematch_session_id
+            "#,
+        )
+        .bind(vote.id)
+        .bind(rematch_session_id)
         .fetch_one(&mut **tx)
         .await?;
         Ok(updated)
@@ -777,7 +897,7 @@ impl AppState {
             r#"
             SELECT
                 id, ws_id, session_id, report_id, threshold_percent, eligible_voters, required_voters,
-                voting_ends_at, status, resolution, decided_at
+                voting_ends_at, status, resolution, decided_at, rematch_session_id
             FROM judge_draw_votes
             WHERE session_id = $1
             ORDER BY created_at DESC
@@ -798,7 +918,10 @@ impl AppState {
         };
 
         let stats = Self::load_draw_vote_stats(&mut tx, vote.id).await?;
-        let vote = Self::maybe_finalize_draw_vote(&mut tx, vote, &stats).await?;
+        let mut vote = Self::maybe_finalize_draw_vote(&mut tx, vote, &stats).await?;
+        if vote.resolution == "open_rematch" && vote.rematch_session_id.is_none() {
+            vote = Self::ensure_rematch_session_for_vote(&mut tx, vote).await?;
+        }
         let my_vote: Option<(bool,)> = sqlx::query_as(
             r#"
             SELECT agree_draw
@@ -877,7 +1000,7 @@ impl AppState {
             r#"
             SELECT
                 id, ws_id, session_id, report_id, threshold_percent, eligible_voters, required_voters,
-                voting_ends_at, status, resolution, decided_at
+                voting_ends_at, status, resolution, decided_at, rematch_session_id
             FROM judge_draw_votes
             WHERE session_id = $1
             ORDER BY created_at DESC
@@ -940,7 +1063,10 @@ impl AppState {
         .await?;
 
         let stats = Self::load_draw_vote_stats(&mut tx, vote.id).await?;
-        let vote = Self::maybe_finalize_draw_vote(&mut tx, vote, &stats).await?;
+        let mut vote = Self::maybe_finalize_draw_vote(&mut tx, vote, &stats).await?;
+        if vote.resolution == "open_rematch" && vote.rematch_session_id.is_none() {
+            vote = Self::ensure_rematch_session_for_vote(&mut tx, vote).await?;
+        }
 
         tx.commit().await?;
         let status = vote.status.clone();
@@ -1815,6 +1941,7 @@ mod tests {
         assert_eq!(vote3.vote.participated_voters, 3);
         assert_eq!(vote3.vote.agree_votes, 2);
         assert_eq!(vote3.vote.disagree_votes, 1);
+        assert!(vote3.vote.rematch_session_id.is_none());
         Ok(())
     }
 
@@ -1875,6 +2002,109 @@ mod tests {
         let vote = status.vote.expect("vote should exist");
         assert_eq!(vote.resolution, "open_rematch");
         assert_eq!(vote.participated_voters, 0);
+        let rematch_session_id = vote
+            .rematch_session_id
+            .expect("expired open_rematch should create rematch session");
+        let rematch_row: (String, Option<i64>, i32) = sqlx::query_as(
+            r#"
+            SELECT status, parent_session_id, rematch_round
+            FROM debate_sessions
+            WHERE id = $1
+            "#,
+        )
+        .bind(rematch_session_id as i64)
+        .fetch_one(&state.pool)
+        .await?;
+        assert_eq!(rematch_row.0, "scheduled");
+        assert_eq!(rematch_row.1, Some(session_id));
+        assert_eq!(rematch_row.2, 1);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn submit_draw_vote_should_open_rematch_when_disagree_majority() -> Result<()> {
+        let (_tdb, state) = AppState::new_for_test().await?;
+        let session_id = seed_topic_and_session(&state, 1, "closed").await?;
+        join_user_to_session(&state, session_id, 1).await?;
+        join_user_to_session(&state, session_id, 2).await?;
+        join_user_to_session(&state, session_id, 3).await?;
+        let job_id = seed_running_judge_job(&state, session_id).await?;
+
+        state
+            .submit_judge_report(
+                job_id as u64,
+                SubmitJudgeReportInput {
+                    winner: "draw".to_string(),
+                    pro_score: 78,
+                    con_score: 78,
+                    logic_pro: 78,
+                    logic_con: 78,
+                    evidence_pro: 78,
+                    evidence_con: 78,
+                    rebuttal_pro: 78,
+                    rebuttal_con: 78,
+                    clarity_pro: 78,
+                    clarity_con: 78,
+                    pro_summary: "pro".to_string(),
+                    con_summary: "con".to_string(),
+                    rationale: "rationale".to_string(),
+                    style_mode: Some("rational".to_string()),
+                    needs_draw_vote: true,
+                    rejudge_triggered: true,
+                    payload: serde_json::json!({}),
+                    winner_first: Some("pro".to_string()),
+                    winner_second: Some("con".to_string()),
+                    stage_summaries: vec![],
+                },
+            )
+            .await?;
+
+        let user1 = state.find_user_by_id(1).await?.expect("user1 should exist");
+        let user2 = state.find_user_by_id(2).await?.expect("user2 should exist");
+        let user3 = state.find_user_by_id(3).await?.expect("user3 should exist");
+
+        state
+            .submit_draw_vote(
+                session_id as u64,
+                &user1,
+                SubmitDrawVoteInput { agree_draw: false },
+            )
+            .await?;
+        state
+            .submit_draw_vote(
+                session_id as u64,
+                &user2,
+                SubmitDrawVoteInput { agree_draw: false },
+            )
+            .await?;
+        let final_vote = state
+            .submit_draw_vote(
+                session_id as u64,
+                &user3,
+                SubmitDrawVoteInput { agree_draw: true },
+            )
+            .await?;
+        assert_eq!(final_vote.status, "decided");
+        assert_eq!(final_vote.vote.resolution, "open_rematch");
+        assert_eq!(final_vote.vote.agree_votes, 1);
+        assert_eq!(final_vote.vote.disagree_votes, 2);
+        let rematch_session_id = final_vote
+            .vote
+            .rematch_session_id
+            .expect("open_rematch decision should create rematch session");
+        let rematch_row: (String, Option<i64>, i32) = sqlx::query_as(
+            r#"
+            SELECT status, parent_session_id, rematch_round
+            FROM debate_sessions
+            WHERE id = $1
+            "#,
+        )
+        .bind(rematch_session_id as i64)
+        .fetch_one(&state.pool)
+        .await?;
+        assert_eq!(rematch_row.0, "scheduled");
+        assert_eq!(rematch_row.1, Some(session_id));
+        assert_eq!(rematch_row.2, 1);
         Ok(())
     }
 
