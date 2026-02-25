@@ -17,7 +17,9 @@ use chat_core::{
 };
 use clickhouse::Client;
 use handlers::{
-    create_event_handler, get_judge_refresh_summary_handler, GetJudgeRefreshSummaryOutput,
+    create_event_handler, get_judge_refresh_summary_handler,
+    get_judge_refresh_summary_metrics_handler, GetJudgeRefreshSummaryOutput,
+    JudgeRefreshSummaryMetrics,
 };
 use openapi::OpenApiRouter as _;
 use std::{fmt, ops::Deref, sync::Arc};
@@ -46,6 +48,7 @@ pub struct AppStateInner {
     pub(crate) sessions: Arc<DashMap<String, (String, i64)>>,
     pub(crate) judge_refresh_summary_cache:
         Arc<DashMap<String, (i64, GetJudgeRefreshSummaryOutput)>>,
+    pub(crate) judge_refresh_summary_metrics: Arc<JudgeRefreshSummaryMetrics>,
 }
 
 pub async fn get_router(state: AppState) -> Result<Router, AppError> {
@@ -64,6 +67,10 @@ pub async fn get_router(state: AppState) -> Result<Router, AppError> {
         .route(
             "/judge-refresh/summary",
             get(get_judge_refresh_summary_handler),
+        )
+        .route(
+            "/judge-refresh/summary/metrics",
+            get(get_judge_refresh_summary_metrics_handler),
         )
         .layer(from_fn_with_state(
             state.clone(),
@@ -112,6 +119,7 @@ impl AppState {
         // TODO: load sessions from db
         let sessions = Arc::new(DashMap::new());
         let judge_refresh_summary_cache = Arc::new(DashMap::new());
+        let judge_refresh_summary_metrics = Arc::new(JudgeRefreshSummaryMetrics::default());
         Ok(Self {
             inner: Arc::new(AppStateInner {
                 config,
@@ -119,6 +127,7 @@ impl AppState {
                 client,
                 sessions,
                 judge_refresh_summary_cache,
+                judge_refresh_summary_metrics,
             }),
         })
     }

@@ -17,11 +17,13 @@ pub(crate) trait OpenApiRouter {
         paths(
             create_event_handler,
             get_judge_refresh_summary_handler,
+            get_judge_refresh_summary_metrics_handler,
         ),
         components(
             schemas(
                 ErrorOutput,
                 GetJudgeRefreshSummaryOutput,
+                GetJudgeRefreshSummaryMetricsOutput,
                 JudgeRefreshSummaryItem,
             ),
         ),

@@ -11,6 +11,7 @@ use axum::{
 use chat_core::pb::AnalyticsEvent;
 use clickhouse::Row;
 use serde::{Deserialize, Serialize};
+use std::sync::atomic::{AtomicU64, Ordering};
 use tracing::info;
 use utoipa::{IntoParams, ToSchema};
 
@@ -81,6 +82,91 @@ pub(crate) struct GetJudgeRefreshSummaryOutput {
     pub rows: Vec<JudgeRefreshSummaryItem>,
 }
 
+#[derive(Default)]
+pub(crate) struct JudgeRefreshSummaryMetrics {
+    request_total: AtomicU64,
+    cache_hit_total: AtomicU64,
+    cache_miss_total: AtomicU64,
+    db_query_total: AtomicU64,
+    db_error_total: AtomicU64,
+    db_latency_total_ms: AtomicU64,
+    db_latency_samples: AtomicU64,
+    last_db_latency_ms: AtomicU64,
+}
+
+#[derive(Debug, Clone, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct GetJudgeRefreshSummaryMetricsOutput {
+    pub request_total: u64,
+    pub cache_hit_total: u64,
+    pub cache_miss_total: u64,
+    pub cache_hit_rate: f64,
+    pub db_query_total: u64,
+    pub db_error_total: u64,
+    pub avg_db_latency_ms: f64,
+    pub last_db_latency_ms: u64,
+}
+
+impl JudgeRefreshSummaryMetrics {
+    pub(crate) fn observe_cache_hit(&self) {
+        self.request_total.fetch_add(1, Ordering::Relaxed);
+        self.cache_hit_total.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub(crate) fn observe_cache_miss(&self) {
+        self.request_total.fetch_add(1, Ordering::Relaxed);
+        self.cache_miss_total.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub(crate) fn observe_db_success(&self, latency_ms: u64) {
+        self.db_query_total.fetch_add(1, Ordering::Relaxed);
+        self.db_latency_total_ms
+            .fetch_add(latency_ms, Ordering::Relaxed);
+        self.db_latency_samples.fetch_add(1, Ordering::Relaxed);
+        self.last_db_latency_ms.store(latency_ms, Ordering::Relaxed);
+    }
+
+    pub(crate) fn observe_db_error(&self, latency_ms: u64) {
+        self.db_query_total.fetch_add(1, Ordering::Relaxed);
+        self.db_error_total.fetch_add(1, Ordering::Relaxed);
+        self.db_latency_total_ms
+            .fetch_add(latency_ms, Ordering::Relaxed);
+        self.db_latency_samples.fetch_add(1, Ordering::Relaxed);
+        self.last_db_latency_ms.store(latency_ms, Ordering::Relaxed);
+    }
+
+    pub(crate) fn snapshot(&self) -> GetJudgeRefreshSummaryMetricsOutput {
+        let request_total = self.request_total.load(Ordering::Relaxed);
+        let cache_hit_total = self.cache_hit_total.load(Ordering::Relaxed);
+        let cache_miss_total = self.cache_miss_total.load(Ordering::Relaxed);
+        let db_query_total = self.db_query_total.load(Ordering::Relaxed);
+        let db_error_total = self.db_error_total.load(Ordering::Relaxed);
+        let db_latency_total_ms = self.db_latency_total_ms.load(Ordering::Relaxed);
+        let db_latency_samples = self.db_latency_samples.load(Ordering::Relaxed);
+        let last_db_latency_ms = self.last_db_latency_ms.load(Ordering::Relaxed);
+        let cache_hit_rate = if request_total == 0 {
+            0.0
+        } else {
+            (cache_hit_total as f64) * 100.0 / (request_total as f64)
+        };
+        let avg_db_latency_ms = if db_latency_samples == 0 {
+            0.0
+        } else {
+            (db_latency_total_ms as f64) / (db_latency_samples as f64)
+        };
+        GetJudgeRefreshSummaryMetricsOutput {
+            request_total,
+            cache_hit_total,
+            cache_miss_total,
+            cache_hit_rate,
+            db_query_total,
+            db_error_total,
+            avg_db_latency_ms,
+            last_db_latency_ms,
+        }
+    }
+}
+
 fn normalize_hours(v: Option<u32>) -> u32 {
     v.unwrap_or(24).clamp(1, 168)
 }
@@ -102,6 +188,11 @@ fn is_cache_fresh(cached_at_ms: i64, now_ms: i64, ttl_ms: i64) -> bool {
     }
     let age_ms = now_ms.saturating_sub(cached_at_ms);
     age_ms >= 0 && age_ms <= ttl_ms
+}
+
+fn duration_to_millis_u64(v: std::time::Duration) -> u64 {
+    let ms = v.as_millis();
+    ms.min(u128::from(u64::MAX)) as u64
 }
 
 /// Query aggregated quality metrics for judge realtime refresh pipeline.
@@ -131,9 +222,11 @@ pub(crate) async fn get_judge_refresh_summary_handler(
     if let Some(entry) = state.judge_refresh_summary_cache.get(&cache_key) {
         let (cached_at_ms, payload) = entry.value();
         if is_cache_fresh(*cached_at_ms, now_ms, SUMMARY_CACHE_TTL_MS) {
+            state.judge_refresh_summary_metrics.observe_cache_hit();
             return Ok(Json(payload.clone()));
         }
     }
+    state.judge_refresh_summary_metrics.observe_cache_miss();
 
     let mut sql = format!(
         r#"
@@ -170,14 +263,34 @@ LIMIT {}
         limit
     ));
 
-    let mut cursor = state
-        .client
-        .query(sql.as_str())
-        .fetch::<JudgeRefreshSummaryItem>()?;
-    let mut rows = Vec::new();
-    while let Some(row) = cursor.next().await? {
-        rows.push(row);
+    let query_start = std::time::Instant::now();
+    let query_result: Result<Vec<JudgeRefreshSummaryItem>, AppError> = async {
+        let mut cursor = state
+            .client
+            .query(sql.as_str())
+            .fetch::<JudgeRefreshSummaryItem>()?;
+        let mut rows = Vec::new();
+        while let Some(row) = cursor.next().await? {
+            rows.push(row);
+        }
+        Ok(rows)
     }
+    .await;
+    let query_latency_ms = duration_to_millis_u64(query_start.elapsed());
+    let rows = match query_result {
+        Ok(v) => {
+            state
+                .judge_refresh_summary_metrics
+                .observe_db_success(query_latency_ms);
+            v
+        }
+        Err(err) => {
+            state
+                .judge_refresh_summary_metrics
+                .observe_db_error(query_latency_ms);
+            return Err(err);
+        }
+    };
 
     let output = GetJudgeRefreshSummaryOutput {
         window_hours: hours,
@@ -188,6 +301,23 @@ LIMIT {}
         .judge_refresh_summary_cache
         .insert(cache_key, (now_ms, output.clone()));
     Ok(Json(output))
+}
+
+/// Read in-memory metrics snapshot for judge refresh summary endpoint.
+#[utoipa::path(
+    get,
+    path = "/api/judge-refresh/summary/metrics",
+    responses(
+        (status = 200, description = "Judge refresh summary metrics", body = GetJudgeRefreshSummaryMetricsOutput),
+    ),
+    security(
+        ("token" = [])
+    )
+)]
+pub(crate) async fn get_judge_refresh_summary_metrics_handler(
+    State(state): State<AppState>,
+) -> Result<impl IntoResponse, AppError> {
+    Ok(Json(state.judge_refresh_summary_metrics.snapshot()))
 }
 
 #[cfg(test)]
@@ -229,5 +359,31 @@ mod tests {
         assert!(is_cache_fresh(1000, 1000, 500));
         assert!(!is_cache_fresh(1000, 1501, 500));
         assert!(!is_cache_fresh(2000, 1000, 500));
+    }
+
+    #[test]
+    fn duration_to_millis_u64_should_convert() {
+        assert_eq!(
+            duration_to_millis_u64(std::time::Duration::from_millis(123)),
+            123
+        );
+    }
+
+    #[test]
+    fn judge_refresh_summary_metrics_snapshot_should_calculate_stats() {
+        let metrics = JudgeRefreshSummaryMetrics::default();
+        metrics.observe_cache_hit();
+        metrics.observe_cache_miss();
+        metrics.observe_db_success(20);
+        metrics.observe_db_error(40);
+        let snapshot = metrics.snapshot();
+        assert_eq!(snapshot.request_total, 2);
+        assert_eq!(snapshot.cache_hit_total, 1);
+        assert_eq!(snapshot.cache_miss_total, 1);
+        assert_eq!(snapshot.db_query_total, 2);
+        assert_eq!(snapshot.db_error_total, 1);
+        assert_eq!(snapshot.last_db_latency_ms, 40);
+        assert_eq!(snapshot.cache_hit_rate, 50.0);
+        assert_eq!(snapshot.avg_db_latency_ms, 30.0);
     }
 }
