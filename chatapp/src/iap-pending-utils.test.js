@@ -11,6 +11,8 @@ import {
   PENDING_IAP_STORAGE_KEY,
   normalizePendingIapItem,
   readPendingIapQueue,
+  removeExhaustedPendingIap,
+  removePendingIapByTransaction,
   registerPendingIapFailure,
   resetPendingIapRetry,
   sanitizePendingIapQueue,
@@ -201,6 +203,45 @@ test('settlePendingIapSuccess should remove transaction', () => {
   const next = settlePendingIapSuccess(queue, 'tx-a');
   assert.equal(next.length, 1);
   assert.equal(next[0].transactionId, 'tx-b');
+});
+
+test('removePendingIapByTransaction should remove specific transaction', () => {
+  const queue = [
+    normalizePendingIapItem(buildItem({ transactionId: 'tx-a' })),
+    normalizePendingIapItem(buildItem({ transactionId: 'tx-b' })),
+  ];
+  const next = removePendingIapByTransaction(queue, 'tx-b');
+  assert.equal(next.length, 1);
+  assert.equal(next[0].transactionId, 'tx-a');
+});
+
+test('removeExhaustedPendingIap should remove max-attempt transactions only', () => {
+  const retryPolicy = { baseDelayMs: 100, maxDelayMs: 1_000, maxAttempts: 2 };
+  const now = 77_000;
+  const exhausted = registerPendingIapFailure(
+    registerPendingIapFailure(
+      [],
+      buildItem({ transactionId: 'tx-exhausted' }),
+      'first fail',
+      now,
+      retryPolicy,
+    ),
+    buildItem({ transactionId: 'tx-exhausted' }),
+    'second fail',
+    now + 1_000,
+    retryPolicy,
+  );
+  const queue = exhausted.concat([
+    normalizePendingIapItem(buildItem({
+      transactionId: 'tx-active',
+      attempts: 1,
+      updatedAt: now + 1_500,
+      nextRetryAt: now + 2_000,
+    })),
+  ]);
+  const next = removeExhaustedPendingIap(queue, now + 2_000, retryPolicy);
+  assert.equal(next.length, 1);
+  assert.equal(next[0].transactionId, 'tx-active');
 });
 
 test('read/write pending queue should work with storage', () => {

@@ -149,6 +149,13 @@
             </div>
             <div class="flex items-center gap-2">
               <button
+                @click="dropAllExhaustedPending"
+                :disabled="retryingAll || exhaustedPendingCount === 0"
+                class="px-3 py-1.5 text-xs rounded border bg-white hover:bg-gray-100 disabled:opacity-50"
+              >
+                清理已达上限({{ exhaustedPendingCount }})
+              </button>
+              <button
                 @click="recoverAllExhaustedPending"
                 :disabled="retryingAll || exhaustedPendingCount === 0"
                 class="px-3 py-1.5 text-xs rounded border bg-white hover:bg-gray-100 disabled:opacity-50"
@@ -206,6 +213,13 @@
                   >
                     恢复重试
                   </button>
+                  <button
+                    @click="ignorePendingItem(item)"
+                    :disabled="isRetryingItem(item.transactionId)"
+                    class="px-2 py-1 text-xs rounded border bg-white hover:bg-gray-100 disabled:opacity-50"
+                  >
+                    忽略
+                  </button>
                 </div>
               </div>
             </div>
@@ -260,6 +274,8 @@ import {
   filterRetryablePendingIap,
   isPendingIapMaxAttemptsReached,
   isPendingIapRetryable,
+  removeExhaustedPendingIap,
+  removePendingIapByTransaction,
   readPendingIapQueue,
   registerPendingIapFailure,
   resetPendingIapRetry,
@@ -379,6 +395,16 @@ export default {
       this.successText = `已恢复重试：tx=${item.transactionId}`;
       this.errorText = '';
     },
+    ignorePendingItem(item) {
+      if (!item?.transactionId) {
+        return;
+      }
+      this.syncPendingQueue(
+        removePendingIapByTransaction(this.pendingQueue, item.transactionId, Date.now()),
+      );
+      this.successText = `已忽略交易：tx=${item.transactionId}`;
+      this.errorText = '';
+    },
     recoverAllExhaustedPending() {
       const recoverCount = this.exhaustedPendingCount;
       if (recoverCount === 0) {
@@ -398,6 +424,17 @@ export default {
       }
       this.syncPendingQueue(nextQueue);
       this.successText = `已恢复 ${recoverCount} 条达到上限的交易`;
+      this.errorText = '';
+    },
+    dropAllExhaustedPending() {
+      const dropCount = this.exhaustedPendingCount;
+      if (dropCount === 0) {
+        return;
+      }
+      this.syncPendingQueue(
+        removeExhaustedPendingIap(this.pendingQueue, Date.now(), this.pendingRetryPolicy),
+      );
+      this.successText = `已清理 ${dropCount} 条达到上限的交易`;
       this.errorText = '';
     },
     async verifyAndSettlePurchase(purchase, { queueOnFailure = true, silent = false } = {}) {

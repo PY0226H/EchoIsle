@@ -245,6 +245,25 @@ export function resetPendingIapRetry(
   return sanitizePendingIapQueue(next, nowMs);
 }
 
+export function removePendingIapByTransaction(queue, transactionId, nowMs = Date.now()) {
+  const tx = toNonEmptyString(transactionId);
+  const current = sanitizePendingIapQueue(queue, nowMs);
+  if (!tx) {
+    return current;
+  }
+  return current.filter((item) => item.transactionId !== tx);
+}
+
+export function removeExhaustedPendingIap(
+  queue,
+  nowMs = Date.now(),
+  retryPolicy = {},
+) {
+  return sanitizePendingIapQueue(queue, nowMs).filter(
+    (item) => !isPendingIapMaxAttemptsReached(item, retryPolicy),
+  );
+}
+
 export function readPendingIapQueue(storage = globalThis?.localStorage) {
   if (!storage?.getItem) {
     return [];
