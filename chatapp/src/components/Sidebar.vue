@@ -29,6 +29,12 @@
         >
           AI Judge
         </li>
+        <li
+          @click="goRoute('/debate')"
+          :class="['px-2 py-1 rounded cursor-pointer mt-1', { 'bg-blue-600': isRouteActive('/debate') }]"
+        >
+          Debate
+        </li>
       </ul>
     </div>
 
@@ -111,6 +117,9 @@ export default {
       }
     },
     isRouteActive(path) {
+      if (path === '/debate') {
+        return this.$route.path.startsWith('/debate');
+      }
       return this.$route.path === path;
     },
     selectChannel(channelId) {

@@ -88,7 +88,11 @@ pub async fn get_router(state: AppState) -> Result<Router, AppError> {
         .route("/sessions/:id/join", post(join_debate_session_handler))
         .route(
             "/sessions/:id/messages",
-            post(create_debate_message_handler),
+            get(list_debate_messages_handler).post(create_debate_message_handler),
+        )
+        .route(
+            "/sessions/:id/pins",
+            get(list_debate_pinned_messages_handler),
         )
         .route("/messages/:id/pin", post(pin_debate_message_handler))
         .route("/sessions/:id/judge/jobs", post(request_judge_job_handler))

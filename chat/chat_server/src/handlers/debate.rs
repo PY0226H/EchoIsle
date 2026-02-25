@@ -1,7 +1,7 @@
 use crate::{
     AppError, AppState, CreateDebateMessageInput, GetJudgeReportQuery, JoinDebateSessionInput,
-    ListDebateSessions, ListDebateTopics, PinDebateMessageInput, RequestJudgeJobInput,
-    SubmitDrawVoteInput,
+    ListDebateMessages, ListDebatePinnedMessages, ListDebateSessions, ListDebateTopics,
+    PinDebateMessageInput, RequestJudgeJobInput, SubmitDrawVoteInput,
 };
 use axum::{
     extract::{Path, Query, State},
@@ -113,6 +113,33 @@ pub(crate) async fn create_debate_message_handler(
     Ok((StatusCode::CREATED, Json(msg)))
 }
 
+/// List messages in a debate session.
+#[utoipa::path(
+    get,
+    path = "/api/debate/sessions/{id}/messages",
+    params(
+        ("id" = u64, Path, description = "Debate session id"),
+        ListDebateMessages
+    ),
+    responses(
+        (status = 200, description = "Debate messages", body = Vec<crate::DebateMessage>),
+        (status = 404, description = "Debate session not found", body = ErrorOutput),
+        (status = 409, description = "User is not participant", body = ErrorOutput),
+    ),
+    security(
+        ("token" = [])
+    )
+)]
+pub(crate) async fn list_debate_messages_handler(
+    Extension(user): Extension<User>,
+    State(state): State<AppState>,
+    Path(id): Path<u64>,
+    Query(input): Query<ListDebateMessages>,
+) -> Result<impl IntoResponse, AppError> {
+    let messages = state.list_debate_messages(id, &user, input).await?;
+    Ok((StatusCode::OK, Json(messages)))
+}
+
 /// Pin an existing debate message with wallet consume.
 #[utoipa::path(
     post,
@@ -139,6 +166,33 @@ pub(crate) async fn pin_debate_message_handler(
 ) -> Result<impl IntoResponse, AppError> {
     let ret = state.pin_debate_message(id, &user, input).await?;
     Ok((StatusCode::OK, Json(ret)))
+}
+
+/// List pinned messages in a debate session.
+#[utoipa::path(
+    get,
+    path = "/api/debate/sessions/{id}/pins",
+    params(
+        ("id" = u64, Path, description = "Debate session id"),
+        ListDebatePinnedMessages
+    ),
+    responses(
+        (status = 200, description = "Pinned debate messages", body = Vec<crate::DebatePinnedMessage>),
+        (status = 404, description = "Debate session not found", body = ErrorOutput),
+        (status = 409, description = "User is not participant", body = ErrorOutput),
+    ),
+    security(
+        ("token" = [])
+    )
+)]
+pub(crate) async fn list_debate_pinned_messages_handler(
+    Extension(user): Extension<User>,
+    State(state): State<AppState>,
+    Path(id): Path<u64>,
+    Query(input): Query<ListDebatePinnedMessages>,
+) -> Result<impl IntoResponse, AppError> {
+    let pins = state.list_debate_pinned_messages(id, &user, input).await?;
+    Ok((StatusCode::OK, Json(pins)))
 }
 
 /// Request an AI judge job for a debate session.

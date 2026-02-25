@@ -23,7 +23,7 @@ const getUrlBase = () => {
   return URL_BASE;
 }
 
-const getSseBase = () => {
+const getNotifyBase = () => {
   if (config && config.server.notification) {
     return config.server.notification;
   }
@@ -37,7 +37,7 @@ const initSSE = (store, notifyTicket, handlers = {}) => {
     onDebateJudgeReportReady = null,
     onDebateDrawVoteResolved = null,
   } = handlers;
-  let sse_base = getSseBase();
+  let sse_base = getNotifyBase();
   let url = `${sse_base}?token=${notifyTicket}`;
   const sse = new EventSource(url);
 
@@ -94,6 +94,7 @@ const initSSE = (store, notifyTicket, handlers = {}) => {
 
 export {
   getUrlBase,
+  getNotifyBase,
   initSSE,
 };
 

@@ -47,6 +47,18 @@ const network = async (store, method, url, data = null, headers = {}) => {
   }
 };
 
+const buildQueryString = (params = {}) => {
+  const query = new URLSearchParams();
+  Object.entries(params).forEach(([key, value]) => {
+    if (value === undefined || value === null || value === '') {
+      return;
+    }
+    query.set(key, String(value));
+  });
+  const raw = query.toString();
+  return raw ? `?${raw}` : '';
+};
+
 export default createStore({
   state: {
     context: {},        // Context for analytics events
@@ -340,6 +352,128 @@ export default createStore({
         'post',
         `/debate/sessions/${sessionId}/draw-vote/ballots`,
         { agreeDraw },
+        {
+          Authorization: `Bearer ${state.token}`,
+        },
+      );
+      return response.data;
+    },
+    async listDebateTopics({ state }, payload = {}) {
+      const suffix = buildQueryString({
+        category: payload.category,
+        activeOnly: payload.activeOnly,
+        limit: payload.limit,
+      });
+      const response = await network(this, 'get', `/debate/topics${suffix}`, null, {
+        Authorization: `Bearer ${state.token}`,
+      });
+      return response.data || [];
+    },
+    async listDebateSessions({ state }, payload = {}) {
+      const suffix = buildQueryString({
+        status: payload.status,
+        topicId: payload.topicId,
+        from: payload.from,
+        to: payload.to,
+        limit: payload.limit,
+      });
+      const response = await network(this, 'get', `/debate/sessions${suffix}`, null, {
+        Authorization: `Bearer ${state.token}`,
+      });
+      return response.data || [];
+    },
+    async joinDebateSession({ state }, { sessionId, side }) {
+      if (!sessionId) {
+        throw new Error('sessionId is required');
+      }
+      if (!side) {
+        throw new Error('side is required');
+      }
+      const response = await network(
+        this,
+        'post',
+        `/debate/sessions/${sessionId}/join`,
+        { side },
+        {
+          Authorization: `Bearer ${state.token}`,
+        },
+      );
+      return response.data;
+    },
+    async listDebateMessages({ state }, { sessionId, lastId = null, limit = 80 } = {}) {
+      if (!sessionId) {
+        throw new Error('sessionId is required');
+      }
+      const suffix = buildQueryString({
+        lastId,
+        limit,
+      });
+      const response = await network(
+        this,
+        'get',
+        `/debate/sessions/${sessionId}/messages${suffix}`,
+        null,
+        {
+          Authorization: `Bearer ${state.token}`,
+        },
+      );
+      return response.data || [];
+    },
+    async listDebatePinnedMessages({ state }, { sessionId, activeOnly = true, limit = 20 } = {}) {
+      if (!sessionId) {
+        throw new Error('sessionId is required');
+      }
+      const suffix = buildQueryString({
+        activeOnly,
+        limit,
+      });
+      const response = await network(
+        this,
+        'get',
+        `/debate/sessions/${sessionId}/pins${suffix}`,
+        null,
+        {
+          Authorization: `Bearer ${state.token}`,
+        },
+      );
+      return response.data || [];
+    },
+    async createDebateMessage({ state }, { sessionId, content }) {
+      if (!sessionId) {
+        throw new Error('sessionId is required');
+      }
+      if (!content || !content.trim()) {
+        throw new Error('content is required');
+      }
+      const response = await network(
+        this,
+        'post',
+        `/debate/sessions/${sessionId}/messages`,
+        { content: content.trim() },
+        {
+          Authorization: `Bearer ${state.token}`,
+        },
+      );
+      return response.data;
+    },
+    async pinDebateMessage({ state }, { messageId, pinSeconds, idempotencyKey }) {
+      if (!messageId) {
+        throw new Error('messageId is required');
+      }
+      if (!pinSeconds) {
+        throw new Error('pinSeconds is required');
+      }
+      if (!idempotencyKey || !idempotencyKey.trim()) {
+        throw new Error('idempotencyKey is required');
+      }
+      const response = await network(
+        this,
+        'post',
+        `/debate/messages/${messageId}/pin`,
+        {
+          pinSeconds,
+          idempotencyKey: idempotencyKey.trim(),
+        },
         {
           Authorization: `Bearer ${state.token}`,
         },

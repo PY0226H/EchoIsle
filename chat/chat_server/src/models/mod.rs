@@ -12,9 +12,10 @@ mod workspace;
 pub use agent::{CreateAgent, UpdateAgent};
 pub use chat::CreateChat;
 pub use debate::{
-    CreateDebateMessageInput, DebateMessage, DebateSessionSummary, DebateTopic,
-    JoinDebateSessionInput, JoinDebateSessionOutput, ListDebateSessions, ListDebateTopics,
-    PinDebateMessageInput, PinDebateMessageOutput,
+    CreateDebateMessageInput, DebateMessage, DebatePinnedMessage, DebateSessionSummary,
+    DebateTopic, JoinDebateSessionInput, JoinDebateSessionOutput, ListDebateMessages,
+    ListDebatePinnedMessages, ListDebateSessions, ListDebateTopics, PinDebateMessageInput,
+    PinDebateMessageOutput,
 };
 pub use judge::{
     DrawVoteDetail, GetDrawVoteOutput, GetJudgeReportOutput, GetJudgeReportQuery, JudgeJobSnapshot,

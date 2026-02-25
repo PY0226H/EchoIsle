@@ -12,6 +12,10 @@ use utoipa::{IntoParams, ToSchema};
 
 const DEFAULT_LIMIT: u64 = 20;
 const MAX_LIMIT: u64 = 100;
+const DEBATE_MESSAGE_DEFAULT_LIMIT: u64 = 80;
+const DEBATE_MESSAGE_MAX_LIMIT: u64 = 200;
+const DEBATE_PIN_DEFAULT_LIMIT: u64 = 20;
+const DEBATE_PIN_MAX_LIMIT: u64 = 100;
 const DEBATE_MESSAGE_MAX_LEN: usize = 1000;
 const PIN_MIN_SECONDS: i32 = 30;
 const PIN_MAX_SECONDS: i32 = 600;
@@ -107,6 +111,38 @@ pub struct CreateDebateMessageInput {
     pub content: String,
 }
 
+#[derive(Debug, Clone, IntoParams, ToSchema, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ListDebateMessages {
+    pub last_id: Option<u64>,
+    pub limit: Option<u64>,
+}
+
+#[derive(Debug, Clone, IntoParams, ToSchema, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ListDebatePinnedMessages {
+    #[serde(default = "default_true")]
+    pub active_only: bool,
+    pub limit: Option<u64>,
+}
+
+#[derive(Debug, Clone, FromRow, ToSchema, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DebatePinnedMessage {
+    pub id: i64,
+    pub ws_id: i64,
+    pub session_id: i64,
+    pub message_id: i64,
+    pub user_id: i64,
+    pub side: String,
+    pub content: String,
+    pub cost_coins: i64,
+    pub pin_seconds: i32,
+    pub pinned_at: DateTime<Utc>,
+    pub expires_at: DateTime<Utc>,
+    pub status: String,
+}
+
 #[derive(Debug, Clone, ToSchema, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PinDebateMessageInput {
@@ -177,6 +213,20 @@ fn default_true() -> bool {
 
 fn normalize_limit(limit: Option<u64>) -> i64 {
     let limit = limit.unwrap_or(DEFAULT_LIMIT).clamp(1, MAX_LIMIT);
+    limit as i64
+}
+
+fn normalize_debate_message_limit(limit: Option<u64>) -> i64 {
+    let limit = limit
+        .unwrap_or(DEBATE_MESSAGE_DEFAULT_LIMIT)
+        .clamp(1, DEBATE_MESSAGE_MAX_LIMIT);
+    limit as i64
+}
+
+fn normalize_debate_pin_limit(limit: Option<u64>) -> i64 {
+    let limit = limit
+        .unwrap_or(DEBATE_PIN_DEFAULT_LIMIT)
+        .clamp(1, DEBATE_PIN_MAX_LIMIT);
     limit as i64
 }
 
@@ -519,6 +569,130 @@ impl AppState {
 
         tx.commit().await?;
         Ok(msg)
+    }
+
+    pub async fn list_debate_messages(
+        &self,
+        session_id: u64,
+        user: &User,
+        input: ListDebateMessages,
+    ) -> Result<Vec<DebateMessage>, AppError> {
+        let mut tx = self.pool.begin().await?;
+        let session = self
+            .load_session_for_action(&mut tx, session_id as i64)
+            .await?
+            .ok_or_else(|| AppError::NotFound(format!("debate session id {session_id}")))?;
+        if session.ws_id != user.ws_id {
+            return Err(AppError::NotFound(format!(
+                "debate session id {session_id}"
+            )));
+        }
+
+        let participant: Option<(i64,)> = sqlx::query_as(
+            r#"
+            SELECT user_id
+            FROM session_participants
+            WHERE session_id = $1 AND user_id = $2
+            "#,
+        )
+        .bind(session_id as i64)
+        .bind(user.id)
+        .fetch_optional(&mut *tx)
+        .await?;
+        if participant.is_none() {
+            return Err(AppError::DebateConflict(format!(
+                "user {} has not joined session {}",
+                user.id, session_id
+            )));
+        }
+
+        let mut rows: Vec<DebateMessage> = sqlx::query_as(
+            r#"
+            SELECT id, ws_id, session_id, user_id, side, content, created_at
+            FROM session_messages
+            WHERE session_id = $1
+              AND ($2::bigint IS NULL OR id < $2)
+            ORDER BY id DESC
+            LIMIT $3
+            "#,
+        )
+        .bind(session_id as i64)
+        .bind(input.last_id.map(|v| v as i64))
+        .bind(normalize_debate_message_limit(input.limit))
+        .fetch_all(&mut *tx)
+        .await?;
+
+        tx.commit().await?;
+        rows.reverse();
+        Ok(rows)
+    }
+
+    pub async fn list_debate_pinned_messages(
+        &self,
+        session_id: u64,
+        user: &User,
+        input: ListDebatePinnedMessages,
+    ) -> Result<Vec<DebatePinnedMessage>, AppError> {
+        let mut tx = self.pool.begin().await?;
+        let session = self
+            .load_session_for_action(&mut tx, session_id as i64)
+            .await?
+            .ok_or_else(|| AppError::NotFound(format!("debate session id {session_id}")))?;
+        if session.ws_id != user.ws_id {
+            return Err(AppError::NotFound(format!(
+                "debate session id {session_id}"
+            )));
+        }
+
+        let participant: Option<(i64,)> = sqlx::query_as(
+            r#"
+            SELECT user_id
+            FROM session_participants
+            WHERE session_id = $1 AND user_id = $2
+            "#,
+        )
+        .bind(session_id as i64)
+        .bind(user.id)
+        .fetch_optional(&mut *tx)
+        .await?;
+        if participant.is_none() {
+            return Err(AppError::DebateConflict(format!(
+                "user {} has not joined session {}",
+                user.id, session_id
+            )));
+        }
+
+        let rows: Vec<DebatePinnedMessage> = sqlx::query_as(
+            r#"
+            SELECT
+                p.id,
+                p.ws_id,
+                p.session_id,
+                p.message_id,
+                p.user_id,
+                m.side,
+                m.content,
+                p.cost_coins,
+                p.pin_seconds,
+                p.pinned_at,
+                p.expires_at,
+                p.status
+            FROM session_pinned_messages p
+            INNER JOIN session_messages m ON m.id = p.message_id
+            WHERE p.session_id = $1
+              AND (NOT $2::boolean OR (p.status = 'active' AND p.expires_at > NOW()))
+            ORDER BY p.pinned_at DESC
+            LIMIT $3
+            "#,
+        )
+        .bind(session_id as i64)
+        .bind(input.active_only)
+        .bind(normalize_debate_pin_limit(input.limit))
+        .fetch_all(&mut *tx)
+        .await?;
+
+        tx.commit().await?;
+        Ok(rows)
     }
 
     pub async fn pin_debate_message(
@@ -1437,5 +1611,31 @@ mod tests {
         assert_eq!(report.closed, 1);
         assert_eq!(session_status(&state, session_id).await?, "closed");
         Ok(())
+    }
+
+    #[test]
+    fn normalize_debate_message_limit_should_clamp_range() {
+        assert_eq!(
+            normalize_debate_message_limit(None),
+            DEBATE_MESSAGE_DEFAULT_LIMIT as i64
+        );
+        assert_eq!(normalize_debate_message_limit(Some(0)), 1);
+        assert_eq!(
+            normalize_debate_message_limit(Some(999)),
+            DEBATE_MESSAGE_MAX_LIMIT as i64
+        );
+    }
+
+    #[test]
+    fn normalize_debate_pin_limit_should_clamp_range() {
+        assert_eq!(
+            normalize_debate_pin_limit(None),
+            DEBATE_PIN_DEFAULT_LIMIT as i64
+        );
+        assert_eq!(normalize_debate_pin_limit(Some(0)), 1);
+        assert_eq!(
+            normalize_debate_pin_limit(Some(999)),
+            DEBATE_PIN_MAX_LIMIT as i64
+        );
     }
 }

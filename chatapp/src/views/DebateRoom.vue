@@ -1,0 +1,409 @@
+<template>
+  <div class="flex h-screen">
+    <Sidebar />
+    <div class="flex-1 flex flex-col bg-gray-50 min-h-0">
+      <div class="border-b bg-white px-5 py-3 flex items-center justify-between gap-3">
+        <div>
+          <div class="text-xs uppercase text-gray-500">Debate Room</div>
+          <div class="text-lg font-semibold text-gray-900">Session {{ sessionId || '-' }}</div>
+        </div>
+        <div class="flex items-center gap-2">
+          <span
+            :class="[
+              'inline-block w-2.5 h-2.5 rounded-full',
+              wsConnected ? 'bg-green-500' : 'bg-gray-400',
+            ]"
+          />
+          <span class="text-xs text-gray-600">{{ wsConnected ? 'WS Connected' : 'WS Disconnected' }}</span>
+          <button
+            @click="refreshRoom"
+            :disabled="loading"
+            class="px-3 py-1.5 text-sm rounded border bg-white hover:bg-gray-100 disabled:opacity-50"
+          >
+            {{ loading ? '刷新中...' : '刷新' }}
+          </button>
+          <button
+            @click="goLobby"
+            class="px-3 py-1.5 text-sm rounded bg-blue-600 text-white"
+          >
+            返回大厅
+          </button>
+        </div>
+      </div>
+
+      <div v-if="errorText" class="mx-5 mt-4 bg-red-50 text-red-700 border border-red-200 rounded p-3 text-sm">
+        {{ errorText }}
+      </div>
+
+      <div class="px-5 py-3">
+        <div class="text-xs uppercase text-gray-500 mb-2">置顶消息</div>
+        <div v-if="pins.length === 0" class="text-sm text-gray-500 bg-white rounded border p-3">
+          当前没有有效置顶消息
+        </div>
+        <div v-else class="flex flex-col gap-2 max-h-40 overflow-y-auto pr-1">
+          <div
+            v-for="pin in pins"
+            :key="pin.id"
+            class="bg-white border rounded p-3 text-sm"
+          >
+            <div class="flex items-center justify-between">
+              <div class="font-semibold text-gray-900">
+                {{ pin.side }} · user {{ pin.userId }} · {{ pin.costCoins }} coins
+              </div>
+              <div class="text-xs text-gray-500">
+                到期 {{ formatDateTime(pin.expiresAt) }}
+              </div>
+            </div>
+            <div class="text-gray-700 mt-1 whitespace-pre-wrap">{{ pin.content }}</div>
+          </div>
+        </div>
+      </div>
+
+      <div class="flex-1 min-h-0 px-5 pb-4">
+        <div class="text-xs uppercase text-gray-500 mb-2">发言流</div>
+        <div class="bg-white border rounded-lg h-full flex flex-col min-h-0">
+          <div class="flex-1 overflow-y-auto p-3 space-y-2">
+            <div v-if="messages.length === 0" class="text-sm text-gray-500">
+              当前暂无消息
+            </div>
+            <div
+              v-for="message in messages"
+              :key="message.id"
+              class="rounded border p-3"
+              :class="isOwnMessage(message) ? 'border-blue-200 bg-blue-50' : 'border-gray-200 bg-gray-50'"
+            >
+              <div class="flex items-center justify-between mb-1">
+                <div class="text-xs text-gray-600">
+                  {{ message.side }} · user {{ message.userId }}
+                </div>
+                <div class="text-xs text-gray-500">
+                  {{ formatDateTime(message.createdAt) }}
+                </div>
+              </div>
+              <div class="text-sm text-gray-800 whitespace-pre-wrap">{{ message.content }}</div>
+              <div v-if="isOwnMessage(message)" class="mt-2 flex items-center gap-2">
+                <select
+                  v-model.number="pinSeconds"
+                  class="border rounded px-2 py-1 text-xs"
+                >
+                  <option :value="30">30s</option>
+                  <option :value="60">60s</option>
+                  <option :value="90">90s</option>
+                  <option :value="120">120s</option>
+                  <option :value="180">180s</option>
+                  <option :value="300">300s</option>
+                  <option :value="600">600s</option>
+                </select>
+                <button
+                  @click="pinMessage(message)"
+                  :disabled="pinningMessageId === message.id"
+                  class="px-2 py-1 text-xs rounded bg-indigo-600 text-white disabled:opacity-50"
+                >
+                  {{ pinningMessageId === message.id ? '置顶中...' : '置顶' }}
+                </button>
+              </div>
+            </div>
+          </div>
+
+          <div class="border-t p-3">
+            <div class="flex gap-2">
+              <textarea
+                v-model="messageInput"
+                rows="2"
+                class="flex-1 border rounded px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                placeholder="输入你的辩论发言..."
+              />
+              <button
+                @click="sendMessage"
+                :disabled="sending"
+                class="px-4 py-2 h-fit rounded bg-blue-600 text-white text-sm disabled:opacity-50"
+              >
+                {{ sending ? '发送中...' : '发送' }}
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</template>
+
+<script>
+import Sidebar from '../components/Sidebar.vue';
+import { getNotifyBase } from '../utils';
+import {
+  buildDebateRoomWsUrl,
+  extractDebateRoomEvent,
+  parseDebateRoomWsMessage,
+} from '../debate-room-utils';
+
+function normalizeMessage(raw) {
+  if (!raw) {
+    return null;
+  }
+  const id = raw.id ?? raw.messageId;
+  if (!id) {
+    return null;
+  }
+  return {
+    id,
+    sessionId: raw.sessionId,
+    userId: raw.userId,
+    side: raw.side || 'unknown',
+    content: raw.content || '',
+    createdAt: raw.createdAt || new Date().toISOString(),
+  };
+}
+
+export default {
+  components: {
+    Sidebar,
+  },
+  data() {
+    return {
+      sessionId: null,
+      messages: [],
+      pins: [],
+      loading: false,
+      sending: false,
+      pinningMessageId: null,
+      messageInput: '',
+      pinSeconds: 60,
+      errorText: '',
+      ws: null,
+      wsConnected: false,
+      wsReconnectTimer: null,
+      destroyed: false,
+    };
+  },
+  computed: {
+    userId() {
+      return this.$store.state.user?.id || null;
+    },
+  },
+  methods: {
+    parseSessionId() {
+      const parsed = Number(this.$route.params.id);
+      if (!parsed || Number.isNaN(parsed)) {
+        throw new Error('invalid session id');
+      }
+      this.sessionId = parsed;
+    },
+    formatDateTime(value) {
+      if (!value) {
+        return '-';
+      }
+      const date = new Date(value);
+      return Number.isNaN(date.getTime()) ? '-' : date.toLocaleString();
+    },
+    isOwnMessage(message) {
+      return Number(message.userId) === Number(this.userId);
+    },
+    upsertMessage(raw) {
+      const normalized = normalizeMessage(raw);
+      if (!normalized) {
+        return;
+      }
+      const index = this.messages.findIndex((item) => item.id === normalized.id);
+      if (index >= 0) {
+        this.messages.splice(index, 1, normalized);
+      } else {
+        this.messages.push(normalized);
+      }
+      this.messages.sort((a, b) => Number(a.id) - Number(b.id));
+    },
+    async refreshRoom() {
+      if (!this.sessionId) {
+        return;
+      }
+      this.loading = true;
+      this.errorText = '';
+      try {
+        const [messages, pins] = await Promise.all([
+          this.$store.dispatch('listDebateMessages', {
+            sessionId: this.sessionId,
+            limit: 120,
+          }),
+          this.$store.dispatch('listDebatePinnedMessages', {
+            sessionId: this.sessionId,
+            activeOnly: true,
+            limit: 30,
+          }),
+        ]);
+        this.messages = [];
+        messages.forEach((item) => this.upsertMessage(item));
+        this.pins = pins;
+      } catch (error) {
+        this.errorText = error?.response?.data?.error || error?.message || '加载辩论房间失败';
+      } finally {
+        this.loading = false;
+      }
+    },
+    handleRoomPayload(payload) {
+      const event = payload?.event;
+      if (event === 'DebateMessageCreated') {
+        this.upsertMessage({
+          id: payload.messageId,
+          sessionId: payload.sessionId,
+          userId: payload.userId,
+          side: payload.side,
+          content: payload.content,
+          createdAt: payload.createdAt,
+        });
+        return;
+      }
+      if (event === 'DebateMessagePinned') {
+        this.refreshPins();
+      }
+    },
+    clearWsReconnectTimer() {
+      if (this.wsReconnectTimer) {
+        clearTimeout(this.wsReconnectTimer);
+        this.wsReconnectTimer = null;
+      }
+    },
+    scheduleWsReconnect() {
+      if (this.destroyed || this.wsReconnectTimer) {
+        return;
+      }
+      this.wsReconnectTimer = setTimeout(() => {
+        this.wsReconnectTimer = null;
+        this.connectRoomWs();
+      }, 3000);
+    },
+    disconnectWs() {
+      this.clearWsReconnectTimer();
+      if (this.ws) {
+        this.ws.close();
+      }
+      this.ws = null;
+      this.wsConnected = false;
+    },
+    async connectRoomWs() {
+      if (this.destroyed || !this.sessionId) {
+        return;
+      }
+      try {
+        await this.$store.dispatch('refreshAccessTickets');
+        const notifyTicket = this.$store.state.accessTickets?.notifyToken;
+        if (!notifyTicket) {
+          this.scheduleWsReconnect();
+          return;
+        }
+        const wsUrl = buildDebateRoomWsUrl({
+          notifyBase: getNotifyBase(),
+          sessionId: this.sessionId,
+          notifyTicket,
+        });
+        this.disconnectWs();
+        const ws = new WebSocket(wsUrl);
+        this.ws = ws;
+        ws.onopen = () => {
+          if (this.ws !== ws) {
+            return;
+          }
+          this.wsConnected = true;
+        };
+        ws.onmessage = (event) => {
+          const msg = parseDebateRoomWsMessage(event?.data);
+          const payload = extractDebateRoomEvent(msg);
+          if (payload) {
+            this.handleRoomPayload(payload);
+          }
+        };
+        ws.onerror = () => {
+          if (this.ws !== ws) {
+            return;
+          }
+          ws.close();
+        };
+        ws.onclose = () => {
+          if (this.ws !== ws) {
+            return;
+          }
+          this.ws = null;
+          this.wsConnected = false;
+          this.scheduleWsReconnect();
+        };
+      } catch (error) {
+        this.wsConnected = false;
+        this.scheduleWsReconnect();
+      }
+    },
+    async refreshPins() {
+      if (!this.sessionId) {
+        return;
+      }
+      try {
+        this.pins = await this.$store.dispatch('listDebatePinnedMessages', {
+          sessionId: this.sessionId,
+          activeOnly: true,
+          limit: 30,
+        });
+      } catch (_) {
+        // Keep current room usable even if pin list refresh fails.
+      }
+    },
+    async sendMessage() {
+      if (!this.messageInput.trim() || !this.sessionId) {
+        return;
+      }
+      this.sending = true;
+      this.errorText = '';
+      try {
+        const created = await this.$store.dispatch('createDebateMessage', {
+          sessionId: this.sessionId,
+          content: this.messageInput,
+        });
+        this.upsertMessage(created);
+        this.messageInput = '';
+      } catch (error) {
+        this.errorText = error?.response?.data?.error || error?.message || '发送失败';
+      } finally {
+        this.sending = false;
+      }
+    },
+    buildPinIdempotencyKey(messageId) {
+      if (globalThis?.crypto?.randomUUID) {
+        return `pin-${messageId}-${globalThis.crypto.randomUUID()}`;
+      }
+      return `pin-${messageId}-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+    },
+    async pinMessage(message) {
+      if (!message?.id) {
+        return;
+      }
+      this.errorText = '';
+      this.pinningMessageId = message.id;
+      try {
+        await this.$store.dispatch('pinDebateMessage', {
+          messageId: message.id,
+          pinSeconds: this.pinSeconds,
+          idempotencyKey: this.buildPinIdempotencyKey(message.id),
+        });
+        await this.refreshPins();
+      } catch (error) {
+        this.errorText = error?.response?.data?.error || error?.message || '置顶失败';
+      } finally {
+        this.pinningMessageId = null;
+      }
+    },
+    async goLobby() {
+      await this.$router.push('/debate');
+    },
+  },
+  async mounted() {
+    try {
+      this.parseSessionId();
+      await this.refreshRoom();
+      await this.connectRoomWs();
+    } catch (error) {
+      this.errorText = error?.message || '初始化失败';
+    }
+  },
+  beforeUnmount() {
+    this.destroyed = true;
+    this.disconnectWs();
+  },
+};
+</script>
