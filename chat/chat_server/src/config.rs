@@ -3,7 +3,7 @@ use std::{env, fs::File, path::PathBuf};
 use anyhow::{bail, Result};
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppConfig {
     pub server: ServerConfig,
     pub auth: AuthConfig,
@@ -11,15 +11,17 @@ pub struct AppConfig {
     pub kafka: KafkaConfig,
     #[serde(default)]
     pub ai_judge: AiJudgeConfig,
+    #[serde(default)]
+    pub payment: PaymentConfig,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AuthConfig {
     pub sk: String,
     pub pk: String,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ServerConfig {
     pub port: u16,
     pub db_url: String,
@@ -76,6 +78,20 @@ pub struct AiJudgeConfig {
     pub dispatch_callback_wait_secs: i64,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PaymentConfig {
+    #[serde(default = "default_payment_verify_mode")]
+    pub verify_mode: String,
+    #[serde(default = "default_payment_apple_verify_url_prod")]
+    pub apple_verify_url_prod: String,
+    #[serde(default = "default_payment_apple_verify_url_sandbox")]
+    pub apple_verify_url_sandbox: String,
+    #[serde(default)]
+    pub apple_shared_secret: String,
+    #[serde(default = "default_payment_verify_timeout_ms")]
+    pub verify_timeout_ms: u64,
+}
+
 impl Default for AiJudgeConfig {
     fn default() -> Self {
         Self {
@@ -108,6 +124,18 @@ impl Default for KafkaConfig {
             consume_enabled: false,
             consume_topics: Vec::new(),
             producer_timeout_ms: default_kafka_timeout_ms(),
+        }
+    }
+}
+
+impl Default for PaymentConfig {
+    fn default() -> Self {
+        Self {
+            verify_mode: default_payment_verify_mode(),
+            apple_verify_url_prod: default_payment_apple_verify_url_prod(),
+            apple_verify_url_sandbox: default_payment_apple_verify_url_sandbox(),
+            apple_shared_secret: String::new(),
+            verify_timeout_ms: default_payment_verify_timeout_ms(),
         }
     }
 }
@@ -178,6 +206,22 @@ fn default_ai_judge_dispatch_max_attempts() -> i32 {
 
 fn default_ai_judge_dispatch_callback_wait_secs() -> i64 {
     60
+}
+
+fn default_payment_verify_mode() -> String {
+    "mock".to_string()
+}
+
+fn default_payment_apple_verify_url_prod() -> String {
+    "https://buy.itunes.apple.com/verifyReceipt".to_string()
+}
+
+fn default_payment_apple_verify_url_sandbox() -> String {
+    "https://sandbox.itunes.apple.com/verifyReceipt".to_string()
+}
+
+fn default_payment_verify_timeout_ms() -> u64 {
+    8_000
 }
 
 impl AppConfig {

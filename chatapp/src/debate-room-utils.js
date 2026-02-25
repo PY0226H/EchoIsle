@@ -113,6 +113,17 @@ export function canSubmitDrawVote(vote, nowMs = Date.now()) {
   return nowMs < endsAtMs;
 }
 
+export function getDrawVoteRemainingMs(vote, nowMs = Date.now()) {
+  if (!vote) {
+    return null;
+  }
+  const endsAtMs = new Date(vote.votingEndsAt || '').getTime();
+  if (!Number.isFinite(endsAtMs)) {
+    return null;
+  }
+  return Math.max(0, endsAtMs - nowMs);
+}
+
 export function normalizeDebateRoomMessage(raw) {
   if (!raw || typeof raw !== 'object') {
     return null;

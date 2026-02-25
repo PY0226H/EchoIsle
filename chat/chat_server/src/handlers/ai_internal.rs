@@ -103,6 +103,7 @@ mod tests {
                 internal_key: "secret-key".to_string(),
                 ..Default::default()
             },
+            payment: crate::config::PaymentConfig::default(),
         };
         Ok(AppState::new_for_unit_test(config)?)
     }

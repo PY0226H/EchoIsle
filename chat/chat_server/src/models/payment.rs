@@ -1,10 +1,11 @@
-use crate::{AppError, AppState};
+use crate::{config::PaymentConfig, AppError, AppState};
 use chat_core::User;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use serde_json::json;
+use serde_json::{json, Value};
 use sha1::{Digest, Sha1};
 use sqlx::{FromRow, Postgres, Transaction};
+use std::time::Duration;
 use utoipa::{IntoParams, ToSchema};
 
 const DEFAULT_LIMIT: u64 = 20;
@@ -132,6 +133,262 @@ fn mock_verify_receipt(receipt: &str) -> (String, Option<String>) {
     ("verified".to_string(), None)
 }
 
+#[derive(Debug, Clone)]
+struct ReceiptVerifyResult {
+    status: String,
+    verify_mode: String,
+    verify_reason: Option<String>,
+    raw_payload: Value,
+}
+
+#[derive(Debug, Clone)]
+struct ReceiptRecord {
+    transaction_id: String,
+    original_transaction_id: Option<String>,
+    product_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AppleVerifyEndpoint {
+    Production,
+    Sandbox,
+}
+
+impl AppleVerifyEndpoint {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Production => "production",
+            Self::Sandbox => "sandbox",
+        }
+    }
+}
+
+fn normalize_verify_mode(mode: &str) -> &str {
+    match mode.trim().to_ascii_lowercase().as_str() {
+        "apple" | "prod" | "production" => "apple",
+        _ => "mock",
+    }
+}
+
+fn apple_verify_url(config: &PaymentConfig, endpoint: AppleVerifyEndpoint) -> &str {
+    match endpoint {
+        AppleVerifyEndpoint::Production => config.apple_verify_url_prod.as_str(),
+        AppleVerifyEndpoint::Sandbox => config.apple_verify_url_sandbox.as_str(),
+    }
+}
+
+fn extract_apple_status(payload: &Value) -> Option<i64> {
+    payload.get("status").and_then(Value::as_i64)
+}
+
+fn extract_receipt_records(payload: &Value) -> Vec<ReceiptRecord> {
+    let mut out = Vec::new();
+    for items in [
+        payload.get("latest_receipt_info").and_then(Value::as_array),
+        payload.pointer("/receipt/in_app").and_then(Value::as_array),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        for item in items {
+            let transaction_id = item
+                .get("transaction_id")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .unwrap_or_default()
+                .to_string();
+            if transaction_id.is_empty() {
+                continue;
+            }
+            let original_transaction_id = item
+                .get("original_transaction_id")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|v| !v.is_empty())
+                .map(ToString::to_string);
+            let product_id = item
+                .get("product_id")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|v| !v.is_empty())
+                .map(ToString::to_string);
+            out.push(ReceiptRecord {
+                transaction_id,
+                original_transaction_id,
+                product_id,
+            });
+        }
+    }
+    out
+}
+
+fn select_matching_record<'a>(
+    records: &'a [ReceiptRecord],
+    product_id: &str,
+    transaction_id: &str,
+    original_transaction_id: Option<&str>,
+) -> Option<&'a ReceiptRecord> {
+    records.iter().find(|record| {
+        if record.transaction_id != transaction_id {
+            return false;
+        }
+        if let Some(original) = original_transaction_id {
+            if record.original_transaction_id.as_deref() != Some(original) {
+                return false;
+            }
+        }
+        record
+            .product_id
+            .as_deref()
+            .map(|v| v == product_id)
+            .unwrap_or(true)
+    })
+}
+
+fn build_mock_verify_result(receipt: &str, transaction_id: &str) -> ReceiptVerifyResult {
+    let (status, verify_reason) = mock_verify_receipt(receipt);
+    ReceiptVerifyResult {
+        status,
+        verify_mode: "mock".to_string(),
+        verify_reason,
+        raw_payload: json!({
+            "source": "mock",
+            "transactionId": transaction_id,
+            "receiptDataLen": receipt.len(),
+            "receiptDataPrefix": receipt.chars().take(24).collect::<String>(),
+        }),
+    }
+}
+
+async fn post_apple_verify_receipt(
+    client: &reqwest::Client,
+    config: &PaymentConfig,
+    endpoint: AppleVerifyEndpoint,
+    receipt: &str,
+) -> Result<Value, AppError> {
+    let mut request_body = json!({
+        "receipt-data": receipt,
+        "exclude-old-transactions": true,
+    });
+    if !config.apple_shared_secret.trim().is_empty() {
+        request_body["password"] = Value::String(config.apple_shared_secret.trim().to_string());
+    }
+
+    let response = client
+        .post(apple_verify_url(config, endpoint))
+        .json(&request_body)
+        .send()
+        .await
+        .map_err(|err| AppError::PaymentError(format!("apple verify request failed: {err}")))?;
+
+    let status = response.status();
+    let payload = response.json::<Value>().await.map_err(|err| {
+        AppError::PaymentError(format!("apple verify payload parse failed: {err}"))
+    })?;
+    if !status.is_success() {
+        return Err(AppError::PaymentError(format!(
+            "apple verify http status {}",
+            status.as_u16()
+        )));
+    }
+    Ok(payload)
+}
+
+async fn verify_with_apple(
+    config: &PaymentConfig,
+    product_id: &str,
+    transaction_id: &str,
+    original_transaction_id: Option<&str>,
+    receipt: &str,
+) -> Result<ReceiptVerifyResult, AppError> {
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_millis(config.verify_timeout_ms.max(1_000)))
+        .build()
+        .map_err(|err| {
+            AppError::PaymentError(format!("build apple verify client failed: {err}"))
+        })?;
+
+    let mut endpoint = AppleVerifyEndpoint::Production;
+    let mut payload = post_apple_verify_receipt(&client, config, endpoint, receipt).await?;
+    let mut status_code = extract_apple_status(&payload)
+        .ok_or_else(|| AppError::PaymentError("apple verify payload missing status".to_string()))?;
+
+    if status_code == 21007 {
+        endpoint = AppleVerifyEndpoint::Sandbox;
+        payload = post_apple_verify_receipt(&client, config, endpoint, receipt).await?;
+        status_code = extract_apple_status(&payload).ok_or_else(|| {
+            AppError::PaymentError("apple sandbox payload missing status".to_string())
+        })?;
+    } else if status_code == 21008 {
+        endpoint = AppleVerifyEndpoint::Production;
+        payload = post_apple_verify_receipt(&client, config, endpoint, receipt).await?;
+        status_code = extract_apple_status(&payload).ok_or_else(|| {
+            AppError::PaymentError("apple production payload missing status".to_string())
+        })?;
+    }
+
+    let records = extract_receipt_records(&payload);
+    let matched_record = select_matching_record(
+        &records,
+        product_id,
+        transaction_id,
+        original_transaction_id,
+    );
+    let status = if status_code == 0 && matched_record.is_some() {
+        "verified"
+    } else {
+        "rejected"
+    }
+    .to_string();
+
+    let verify_reason = if status_code != 0 {
+        Some(format!("apple verify status {status_code}"))
+    } else if matched_record.is_none() {
+        Some("transaction/product not found in apple receipt".to_string())
+    } else {
+        None
+    };
+
+    Ok(ReceiptVerifyResult {
+        status,
+        verify_mode: "apple".to_string(),
+        verify_reason,
+        raw_payload: json!({
+            "source": "apple",
+            "endpoint": endpoint.label(),
+            "statusCode": status_code,
+            "environment": payload.get("environment").and_then(Value::as_str),
+            "transactionId": transaction_id,
+            "matchedTransaction": matched_record.is_some(),
+            "matchedProductId": matched_record.and_then(|v| v.product_id.as_deref()),
+            "matchedOriginalTransactionId": matched_record.and_then(|v| v.original_transaction_id.as_deref()),
+            "receiptDataLen": receipt.len(),
+        }),
+    })
+}
+
+async fn verify_receipt(
+    config: &PaymentConfig,
+    product_id: &str,
+    transaction_id: &str,
+    original_transaction_id: Option<&str>,
+    receipt: &str,
+) -> Result<ReceiptVerifyResult, AppError> {
+    match normalize_verify_mode(&config.verify_mode) {
+        "apple" => {
+            verify_with_apple(
+                config,
+                product_id,
+                transaction_id,
+                original_transaction_id,
+                receipt,
+            )
+            .await
+        }
+        _ => Ok(build_mock_verify_result(receipt, transaction_id)),
+    }
+}
+
 async fn wallet_balance_in_tx(
     tx: &mut Transaction<'_, Postgres>,
     ws_id: i64,
@@ -246,6 +503,15 @@ impl AppState {
                 "receipt_data is too large, max {MAX_RECEIPT_LEN}"
             )));
         }
+        let product_id = input.product_id.trim();
+        let transaction_id = input.transaction_id.trim();
+        let original_transaction_id = input
+            .original_transaction_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+            .map(ToString::to_string);
+        let receipt = input.receipt_data.trim();
 
         let Some(product): Option<IapProduct> = sqlx::query_as(
             r#"
@@ -254,14 +520,11 @@ impl AppState {
             WHERE product_id = $1
             "#,
         )
-        .bind(input.product_id.trim())
+        .bind(product_id)
         .fetch_optional(&self.pool)
         .await?
         else {
-            return Err(AppError::NotFound(format!(
-                "iap product {}",
-                input.product_id.trim()
-            )));
+            return Err(AppError::NotFound(format!("iap product {product_id}")));
         };
         if !product.is_active {
             return Err(AppError::PaymentConflict(format!(
@@ -279,7 +542,7 @@ impl AppState {
             WHERE platform = 'apple_iap' AND transaction_id = $1
             "#,
         )
-        .bind(input.transaction_id.trim())
+        .bind(transaction_id)
         .fetch_optional(&mut *tx)
         .await?;
 
@@ -308,19 +571,23 @@ impl AppState {
             });
         }
 
-        let receipt = input.receipt_data.trim();
-        let (status, verify_reason) = mock_verify_receipt(receipt);
+        let verify_result = verify_receipt(
+            &self.config.payment,
+            &product.product_id,
+            transaction_id,
+            original_transaction_id.as_deref(),
+            receipt,
+        )
+        .await?;
+        let status = verify_result.status;
+        let verify_reason = verify_result.verify_reason;
         let verified_at = if status == "verified" {
             Some(Utc::now())
         } else {
             None
         };
-        let raw_payload = json!({
-            "receiptDataLen": receipt.len(),
-            "receiptDataPrefix": receipt.chars().take(24).collect::<String>(),
-            "transactionId": input.transaction_id.trim(),
-            "source": "mock",
-        });
+        let verify_mode = verify_result.verify_mode;
+        let raw_payload = verify_result.raw_payload;
 
         let inserted_order: Option<IapOrderRow> = sqlx::query_as(
             r#"
@@ -328,7 +595,7 @@ impl AppState {
                 ws_id, user_id, platform, product_id, transaction_id, original_transaction_id,
                 receipt_hash, status, verify_mode, verify_reason, coins, raw_payload, verified_at
             )
-            VALUES ($1, $2, 'apple_iap', $3, $4, $5, $6, $7, 'mock', $8, $9, $10, $11)
+            VALUES ($1, $2, 'apple_iap', $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
             ON CONFLICT (platform, transaction_id) DO NOTHING
             RETURNING id, ws_id, user_id, product_id, status, verify_mode, verify_reason, coins
             "#,
@@ -336,10 +603,11 @@ impl AppState {
         .bind(user.ws_id)
         .bind(user.id)
         .bind(&product.product_id)
-        .bind(input.transaction_id.trim())
-        .bind(input.original_transaction_id)
+        .bind(transaction_id)
+        .bind(original_transaction_id.clone())
         .bind(hash_receipt(receipt))
         .bind(&status)
+        .bind(&verify_mode)
         .bind(verify_reason.clone())
         .bind(product.coins)
         .bind(raw_payload)
@@ -355,7 +623,7 @@ impl AppState {
                 WHERE platform = 'apple_iap' AND transaction_id = $1
                 "#,
             )
-            .bind(input.transaction_id.trim())
+            .bind(transaction_id)
             .fetch_one(&mut *tx)
             .await?;
             if order.ws_id != user.ws_id || order.user_id != user.id {
@@ -425,7 +693,7 @@ impl AppState {
 
             let metadata = json!({
                 "productId": inserted_order.product_id,
-                "transactionId": input.transaction_id.trim(),
+                "transactionId": transaction_id,
                 "verifyMode": inserted_order.verify_mode,
             });
             let idempotency_key = format!("iap-order-credit-{}", inserted_order.id);
@@ -473,6 +741,7 @@ impl AppState {
 mod tests {
     use super::*;
     use anyhow::Result;
+    use serde_json::json;
 
     fn verify_input(tx: &str, receipt_data: &str) -> VerifyIapOrderInput {
         VerifyIapOrderInput {
@@ -481,6 +750,65 @@ mod tests {
             original_transaction_id: None,
             receipt_data: receipt_data.to_string(),
         }
+    }
+
+    #[test]
+    fn extract_receipt_records_should_collect_both_paths() {
+        let payload = json!({
+            "latest_receipt_info": [
+                {
+                    "transaction_id": "tx-1",
+                    "original_transaction_id": "otx-1",
+                    "product_id": "com.aicomm.coins.60"
+                }
+            ],
+            "receipt": {
+                "in_app": [
+                    {
+                        "transaction_id": "tx-2",
+                        "original_transaction_id": "otx-2",
+                        "product_id": "com.aicomm.coins.120"
+                    }
+                ]
+            }
+        });
+
+        let records = extract_receipt_records(&payload);
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[0].transaction_id, "tx-1");
+        assert_eq!(records[1].transaction_id, "tx-2");
+    }
+
+    #[test]
+    fn select_matching_record_should_match_transaction_original_and_product() {
+        let records = vec![
+            ReceiptRecord {
+                transaction_id: "tx-a".to_string(),
+                original_transaction_id: Some("otx-a".to_string()),
+                product_id: Some("com.aicomm.coins.60".to_string()),
+            },
+            ReceiptRecord {
+                transaction_id: "tx-b".to_string(),
+                original_transaction_id: None,
+                product_id: Some("com.aicomm.coins.120".to_string()),
+            },
+        ];
+
+        let matched =
+            select_matching_record(&records, "com.aicomm.coins.60", "tx-a", Some("otx-a"));
+        assert!(matched.is_some());
+
+        let not_matched =
+            select_matching_record(&records, "com.aicomm.coins.60", "tx-b", Some("otx-b"));
+        assert!(not_matched.is_none());
+    }
+
+    #[test]
+    fn normalize_verify_mode_should_default_to_mock() {
+        assert_eq!(normalize_verify_mode("apple"), "apple");
+        assert_eq!(normalize_verify_mode(" production "), "apple");
+        assert_eq!(normalize_verify_mode("mock"), "mock");
+        assert_eq!(normalize_verify_mode(""), "mock");
     }
 
     #[tokio::test]
@@ -506,6 +834,7 @@ mod tests {
             .verify_iap_order(&user, verify_input("tx-credit-1", "mock_ok_receipt"))
             .await?;
         assert_eq!(out.status, "verified");
+        assert_eq!(out.verify_mode, "mock");
         assert!(out.credited);
         assert_eq!(out.wallet_balance, 60);
 
@@ -574,6 +903,7 @@ mod tests {
             .verify_iap_order(&user, verify_input("tx-reject-1", "mock_reject:test"))
             .await?;
         assert_eq!(out.status, "rejected");
+        assert_eq!(out.verify_mode, "mock");
         assert!(!out.credited);
         assert_eq!(out.wallet_balance, 0);
 

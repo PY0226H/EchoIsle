@@ -115,6 +115,9 @@
               <div class="text-xs text-gray-700">
                 投票截止：{{ formatDateTime(drawVote.votingEndsAt) }}
               </div>
+              <div v-if="drawVoteStatus === 'open'" class="text-xs text-gray-700">
+                剩余时间：{{ drawVoteRemainingText }}
+              </div>
               <div v-if="canSubmitDrawVote" class="flex flex-wrap gap-2">
                 <button
                   @click="submitDrawVote(true)"
@@ -261,6 +264,7 @@ import {
   buildDebateRoomWsUrl,
   canSubmitDrawVote as canSubmitDrawVoteNow,
   extractDebateRoomEvent,
+  getDrawVoteRemainingMs,
   getOldestDebateMessageId,
   mergeDebateRoomMessages,
   normalizeDebateRoomMessage,
@@ -301,6 +305,9 @@ export default {
       drawVoteErrorText: '',
       allowRejudge: false,
       judgePollTimer: null,
+      nowMs: Date.now(),
+      clockTimer: null,
+      drawVoteDeadlineRefreshTriggered: false,
       destroyed: false,
     };
   },
@@ -323,6 +330,12 @@ export default {
     drawVoteStatus() {
       return normalizeDrawVoteStatus(this.drawVote?.status);
     },
+    drawVoteRemainingMs() {
+      return getDrawVoteRemainingMs(this.drawVote, this.nowMs);
+    },
+    drawVoteRemainingText() {
+      return this.formatRemainingMs(this.drawVoteRemainingMs);
+    },
     drawVoteStatusClass() {
       if (this.drawVoteStatus === 'open') {
         return 'text-amber-700';
@@ -339,7 +352,7 @@ export default {
       return !!(this.judgeReport?.needsDrawVote || this.drawVote);
     },
     canSubmitDrawVote() {
-      return canSubmitDrawVoteNow(this.drawVote) && !this.voteSubmitting;
+      return canSubmitDrawVoteNow(this.drawVote, this.nowMs) && !this.voteSubmitting;
     },
     judgeStatusClass() {
       if (this.judgeStatus === 'ready') {
@@ -368,6 +381,43 @@ export default {
       }
       const date = new Date(value);
       return Number.isNaN(date.getTime()) ? '-' : date.toLocaleString();
+    },
+    formatRemainingMs(ms) {
+      if (!Number.isFinite(ms)) {
+        return '-';
+      }
+      const totalSeconds = Math.max(0, Math.floor(ms / 1000));
+      const hours = Math.floor(totalSeconds / 3600);
+      const minutes = Math.floor((totalSeconds % 3600) / 60);
+      const seconds = totalSeconds % 60;
+      if (hours > 0) {
+        return `${hours}h ${String(minutes).padStart(2, '0')}m ${String(seconds).padStart(2, '0')}s`;
+      }
+      return `${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`;
+    },
+    startClock() {
+      if (this.clockTimer) {
+        return;
+      }
+      this.clockTimer = setInterval(() => {
+        this.nowMs = Date.now();
+        if (
+          this.drawVoteStatus === 'open' &&
+          Number.isFinite(this.drawVoteRemainingMs) &&
+          this.drawVoteRemainingMs <= 0 &&
+          !this.drawVoteDeadlineRefreshTriggered
+        ) {
+          this.drawVoteDeadlineRefreshTriggered = true;
+          this.refreshDrawVote({ silent: true });
+        }
+      }, 1000);
+    },
+    stopClock() {
+      if (!this.clockTimer) {
+        return;
+      }
+      clearInterval(this.clockTimer);
+      this.clockTimer = null;
     },
     drawVoteChoiceText(myVote) {
       return drawVoteChoiceTextLabel(myVote);
@@ -539,6 +589,14 @@ export default {
           sessionId: this.sessionId,
         });
         this.drawVoteData = payload || null;
+        if (normalizeDrawVoteStatus(this.drawVote?.status) === 'open') {
+          const remaining = getDrawVoteRemainingMs(this.drawVote, this.nowMs);
+          if (!Number.isFinite(remaining) || remaining > 0) {
+            this.drawVoteDeadlineRefreshTriggered = false;
+          }
+        } else {
+          this.drawVoteDeadlineRefreshTriggered = false;
+        }
       } catch (error) {
         if (!silent) {
           this.drawVoteErrorText = error?.response?.data?.error || error?.message || '刷新投票状态失败';
@@ -737,6 +795,7 @@ export default {
   },
   async mounted() {
     try {
+      this.startClock();
       this.parseSessionId();
       await this.refreshRoom();
       await this.refreshJudgeReport({ silent: true });
@@ -747,6 +806,7 @@ export default {
   },
   beforeUnmount() {
     this.destroyed = true;
+    this.stopClock();
     this.clearJudgePollTimer();
     this.disconnectWs();
   },

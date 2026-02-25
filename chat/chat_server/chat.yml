@@ -34,3 +34,9 @@ ai_judge:
   dispatch_timeout_ms: 8000
   dispatch_max_attempts: 3
   dispatch_callback_wait_secs: 60
+payment:
+  verify_mode: mock
+  apple_verify_url_prod: https://buy.itunes.apple.com/verifyReceipt
+  apple_verify_url_sandbox: https://sandbox.itunes.apple.com/verifyReceipt
+  apple_shared_secret: ""
+  verify_timeout_ms: 8000

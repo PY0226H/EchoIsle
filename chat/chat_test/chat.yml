@@ -11,3 +11,9 @@ auth:
     -----BEGIN PUBLIC KEY-----
     MCowBQYDK2VwAyEAfM+lwNHj6TRJ3EGP38lIJcOo9Dlt2u2JzcwWMbu7jQY=
     -----END PUBLIC KEY-----
+payment:
+  verify_mode: mock
+  apple_verify_url_prod: https://buy.itunes.apple.com/verifyReceipt
+  apple_verify_url_sandbox: https://sandbox.itunes.apple.com/verifyReceipt
+  apple_shared_secret: ""
+  verify_timeout_ms: 8000

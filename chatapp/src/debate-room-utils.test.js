@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import {
   buildDebateRoomWsUrl,
   canSubmitDrawVote,
+  getDrawVoteRemainingMs,
   getOldestDebateMessageId,
   extractDebateRoomEvent,
   mergeDebateRoomMessages,
@@ -79,6 +80,15 @@ assert.equal(
   false,
 );
 assert.equal(canSubmitDrawVote({ status: 'decided' }), false);
+assert.equal(
+  getDrawVoteRemainingMs({ status: 'open', votingEndsAt: '2026-02-26T00:00:00Z' }, Date.parse('2026-02-25T23:59:30Z')),
+  30 * 1000,
+);
+assert.equal(
+  getDrawVoteRemainingMs({ status: 'open', votingEndsAt: '2026-02-25T00:00:00Z' }, Date.parse('2026-02-25T00:01:00Z')),
+  0,
+);
+assert.equal(getDrawVoteRemainingMs({ status: 'open', votingEndsAt: '' }), null);
 
 const normalized = normalizeDebateRoomMessage({
   messageId: 12,
