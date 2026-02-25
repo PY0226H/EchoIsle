@@ -22,6 +22,8 @@ pub use judge::{
     RequestJudgeJobInput, RequestJudgeJobOutput, SubmitDrawVoteInput, SubmitDrawVoteOutput,
     SubmitJudgeReportInput, SubmitJudgeReportOutput,
 };
+pub(crate) use judge_dispatch::AiJudgeDispatchMetrics;
+pub use judge_dispatch::GetJudgeDispatchMetricsOutput;
 pub use messages::{CreateMessage, ListMessages};
 pub use payment::{
     IapProduct, ListIapProducts, ListWalletLedger, VerifyIapOrderInput, VerifyIapOrderOutput,

@@ -2,13 +2,13 @@ use crate::handlers::*;
 use crate::{
     AppState, CreateChat, CreateDebateMessageInput, CreateMessage, CreateUser, DebateMessage,
     DebateSessionSummary, DebateTopic, DrawVoteDetail, ErrorOutput, GetDrawVoteOutput,
-    GetJudgeReportOutput, IapProduct, JoinDebateSessionInput, JoinDebateSessionOutput,
-    JudgeJobSnapshot, JudgeReportDetail, JudgeStageSummaryInput, ListDebateSessions,
-    ListDebateTopics, ListIapProducts, ListMessages, ListWalletLedger, MarkJudgeJobFailedInput,
-    MarkJudgeJobFailedOutput, PinDebateMessageInput, PinDebateMessageOutput, RequestJudgeJobInput,
-    RequestJudgeJobOutput, SigninUser, SubmitDrawVoteInput, SubmitDrawVoteOutput,
-    SubmitJudgeReportInput, SubmitJudgeReportOutput, VerifyIapOrderInput, VerifyIapOrderOutput,
-    WalletBalanceOutput, WalletLedgerItem,
+    GetJudgeDispatchMetricsOutput, GetJudgeReportOutput, IapProduct, JoinDebateSessionInput,
+    JoinDebateSessionOutput, JudgeJobSnapshot, JudgeReportDetail, JudgeStageSummaryInput,
+    ListDebateSessions, ListDebateTopics, ListIapProducts, ListMessages, ListWalletLedger,
+    MarkJudgeJobFailedInput, MarkJudgeJobFailedOutput, PinDebateMessageInput,
+    PinDebateMessageOutput, RequestJudgeJobInput, RequestJudgeJobOutput, SigninUser,
+    SubmitDrawVoteInput, SubmitDrawVoteOutput, SubmitJudgeReportInput, SubmitJudgeReportOutput,
+    VerifyIapOrderInput, VerifyIapOrderOutput, WalletBalanceOutput, WalletLedgerItem,
 };
 use axum::Router;
 use chat_core::{AgentType, Chat, ChatAgent, ChatType, ChatUser, Message, User, Workspace};
@@ -41,6 +41,7 @@ pub(crate) trait OpenApiRouter {
             submit_draw_vote_handler,
             submit_judge_report_handler,
             mark_judge_job_failed_handler,
+            get_judge_dispatch_metrics_handler,
             list_iap_products_handler,
             verify_iap_order_handler,
             get_wallet_balance_handler,
@@ -65,6 +66,7 @@ pub(crate) trait OpenApiRouter {
                 DrawVoteDetail, GetDrawVoteOutput, SubmitDrawVoteInput, SubmitDrawVoteOutput,
                 SubmitJudgeReportInput, SubmitJudgeReportOutput, JudgeStageSummaryInput,
                 MarkJudgeJobFailedInput, MarkJudgeJobFailedOutput,
+                GetJudgeDispatchMetricsOutput,
                 IapProduct, ListIapProducts, VerifyIapOrderInput, VerifyIapOrderOutput,
                 WalletBalanceOutput, ListWalletLedger, WalletLedgerItem,
                 SigninUser, CreateUser, CreateChat, CreateMessage, ListMessages, AuthOutput, AccessTicketsOutput, ErrorOutput

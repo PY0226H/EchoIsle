@@ -49,6 +49,7 @@ pub struct AppStateInner {
     pub(crate) ek: EncodingKey,
     pub(crate) pool: PgPool,
     pub(crate) event_bus: EventBus,
+    pub(crate) dispatch_metrics: AiJudgeDispatchMetrics,
 }
 
 pub async fn get_router(state: AppState) -> Result<Router, AppError> {
@@ -110,6 +111,10 @@ pub async fn get_router(state: AppState) -> Result<Router, AppError> {
         .route(
             "/judge/jobs/:id/failed",
             post(mark_judge_job_failed_handler),
+        )
+        .route(
+            "/judge/dispatch/metrics",
+            get(get_judge_dispatch_metrics_handler),
         )
         .layer(from_fn_with_state(state.clone(), verify_ai_internal_key));
     let protected_api = Router::new()
@@ -182,6 +187,7 @@ impl AppState {
                 dk,
                 pool,
                 event_bus,
+                dispatch_metrics: AiJudgeDispatchMetrics::default(),
             }),
         };
         spawn_debate_session_worker(state.clone());
@@ -206,6 +212,7 @@ impl AppState {
                 dk,
                 pool,
                 event_bus,
+                dispatch_metrics: AiJudgeDispatchMetrics::default(),
             }),
         })
     }
@@ -255,6 +262,7 @@ fn spawn_ai_judge_dispatch_worker(state: AppState) {
                         );
                     }
                     Err(err) => {
+                        state.observe_dispatch_worker_error();
                         warn!("ai judge dispatch worker tick failed: {}", err);
                     }
                 }
@@ -292,6 +300,7 @@ mod test_util {
                     dk,
                     pool,
                     event_bus: EventBus::Disabled,
+                    dispatch_metrics: AiJudgeDispatchMetrics::default(),
                 }),
             };
             Ok((tdb, state))

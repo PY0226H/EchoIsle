@@ -3,7 +3,9 @@ use chrono::{DateTime, Utc};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use sqlx::FromRow;
+use std::sync::atomic::{AtomicU64, Ordering};
 use tracing::warn;
+use utoipa::ToSchema;
 
 const DISPATCH_MESSAGE_WINDOW_LIMIT: i64 = 100;
 const DISPATCH_ERROR_MAX_LEN: usize = 1000;
@@ -24,6 +26,101 @@ pub struct JudgeDispatchTickReport {
     pub failed_http_5xx: usize,
     pub failed_network: usize,
     pub failed_internal: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct GetJudgeDispatchMetricsOutput {
+    pub tick_success_total: u64,
+    pub tick_error_total: u64,
+    pub claimed_total: u64,
+    pub dispatched_total: u64,
+    pub failed_total: u64,
+    pub marked_failed_total: u64,
+    pub timed_out_failed_total: u64,
+    pub terminal_failed_total: u64,
+    pub retryable_failed_total: u64,
+    pub failed_contract_total: u64,
+    pub failed_http_4xx_total: u64,
+    pub failed_http_429_total: u64,
+    pub failed_http_5xx_total: u64,
+    pub failed_network_total: u64,
+    pub failed_internal_total: u64,
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct AiJudgeDispatchMetrics {
+    tick_success_total: AtomicU64,
+    tick_error_total: AtomicU64,
+    claimed_total: AtomicU64,
+    dispatched_total: AtomicU64,
+    failed_total: AtomicU64,
+    marked_failed_total: AtomicU64,
+    timed_out_failed_total: AtomicU64,
+    terminal_failed_total: AtomicU64,
+    retryable_failed_total: AtomicU64,
+    failed_contract_total: AtomicU64,
+    failed_http_4xx_total: AtomicU64,
+    failed_http_429_total: AtomicU64,
+    failed_http_5xx_total: AtomicU64,
+    failed_network_total: AtomicU64,
+    failed_internal_total: AtomicU64,
+}
+
+impl AiJudgeDispatchMetrics {
+    pub(crate) fn observe_tick_success(&self, report: &JudgeDispatchTickReport) {
+        self.tick_success_total.fetch_add(1, Ordering::Relaxed);
+        self.claimed_total
+            .fetch_add(report.claimed as u64, Ordering::Relaxed);
+        self.dispatched_total
+            .fetch_add(report.dispatched as u64, Ordering::Relaxed);
+        self.failed_total
+            .fetch_add(report.failed as u64, Ordering::Relaxed);
+        self.marked_failed_total
+            .fetch_add(report.marked_failed as u64, Ordering::Relaxed);
+        self.timed_out_failed_total
+            .fetch_add(report.timed_out_failed as u64, Ordering::Relaxed);
+        self.terminal_failed_total
+            .fetch_add(report.terminal_failed as u64, Ordering::Relaxed);
+        self.retryable_failed_total
+            .fetch_add(report.retryable_failed as u64, Ordering::Relaxed);
+        self.failed_contract_total
+            .fetch_add(report.failed_contract as u64, Ordering::Relaxed);
+        self.failed_http_4xx_total
+            .fetch_add(report.failed_http_4xx as u64, Ordering::Relaxed);
+        self.failed_http_429_total
+            .fetch_add(report.failed_http_429 as u64, Ordering::Relaxed);
+        self.failed_http_5xx_total
+            .fetch_add(report.failed_http_5xx as u64, Ordering::Relaxed);
+        self.failed_network_total
+            .fetch_add(report.failed_network as u64, Ordering::Relaxed);
+        self.failed_internal_total
+            .fetch_add(report.failed_internal as u64, Ordering::Relaxed);
+    }
+
+    pub(crate) fn observe_tick_error(&self) {
+        self.tick_error_total.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub(crate) fn snapshot(&self) -> GetJudgeDispatchMetricsOutput {
+        GetJudgeDispatchMetricsOutput {
+            tick_success_total: self.tick_success_total.load(Ordering::Relaxed),
+            tick_error_total: self.tick_error_total.load(Ordering::Relaxed),
+            claimed_total: self.claimed_total.load(Ordering::Relaxed),
+            dispatched_total: self.dispatched_total.load(Ordering::Relaxed),
+            failed_total: self.failed_total.load(Ordering::Relaxed),
+            marked_failed_total: self.marked_failed_total.load(Ordering::Relaxed),
+            timed_out_failed_total: self.timed_out_failed_total.load(Ordering::Relaxed),
+            terminal_failed_total: self.terminal_failed_total.load(Ordering::Relaxed),
+            retryable_failed_total: self.retryable_failed_total.load(Ordering::Relaxed),
+            failed_contract_total: self.failed_contract_total.load(Ordering::Relaxed),
+            failed_http_4xx_total: self.failed_http_4xx_total.load(Ordering::Relaxed),
+            failed_http_429_total: self.failed_http_429_total.load(Ordering::Relaxed),
+            failed_http_5xx_total: self.failed_http_5xx_total.load(Ordering::Relaxed),
+            failed_network_total: self.failed_network_total.load(Ordering::Relaxed),
+            failed_internal_total: self.failed_internal_total.load(Ordering::Relaxed),
+        }
+    }
 }
 
 #[derive(Debug, Clone, FromRow)]
@@ -361,7 +458,20 @@ impl AppState {
             }
         }
 
+        self.observe_dispatch_tick_success(&report);
         Ok(report)
+    }
+
+    pub fn get_judge_dispatch_metrics(&self) -> GetJudgeDispatchMetricsOutput {
+        self.dispatch_metrics.snapshot()
+    }
+
+    pub(crate) fn observe_dispatch_worker_error(&self) {
+        self.dispatch_metrics.observe_tick_error();
+    }
+
+    fn observe_dispatch_tick_success(&self, report: &JudgeDispatchTickReport) {
+        self.dispatch_metrics.observe_tick_success(report);
     }
 
     async fn mark_timed_out_dispatch_jobs_failed(&self) -> Result<usize, AppError> {

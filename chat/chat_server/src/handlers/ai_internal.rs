@@ -59,3 +59,87 @@ pub(crate) async fn mark_judge_job_failed_handler(
     let ret = state.mark_judge_job_failed(id, input).await?;
     Ok((StatusCode::OK, Json(ret)))
 }
+
+/// Internal endpoint to inspect in-memory AI judge dispatch worker metrics.
+#[utoipa::path(
+    get,
+    path = "/api/internal/ai/judge/dispatch/metrics",
+    responses(
+        (status = 200, description = "Dispatch worker metrics snapshot", body = GetJudgeDispatchMetricsOutput),
+        (status = 401, description = "Missing or invalid internal key"),
+    ),
+    security(
+        ("internal_key" = [])
+    )
+)]
+pub(crate) async fn get_judge_dispatch_metrics_handler(
+    State(state): State<AppState>,
+) -> Result<impl IntoResponse, AppError> {
+    let ret = state.get_judge_dispatch_metrics();
+    Ok((StatusCode::OK, Json(ret)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use anyhow::Result;
+    use axum::{body::Body, http::Request, middleware::from_fn_with_state, routing::get, Router};
+    use std::path::PathBuf;
+    use tower::ServiceExt;
+
+    fn test_state() -> Result<AppState> {
+        let config = crate::AppConfig {
+            server: crate::config::ServerConfig {
+                port: 0,
+                db_url: "postgres://localhost:5432/chat".to_string(),
+                base_dir: PathBuf::from("/tmp/chat"),
+            },
+            auth: crate::config::AuthConfig {
+                sk: include_str!("../../../chat_core/fixtures/encoding.pem").to_string(),
+                pk: include_str!("../../../chat_core/fixtures/decoding.pem").to_string(),
+            },
+            kafka: crate::config::KafkaConfig::default(),
+            ai_judge: crate::config::AiJudgeConfig {
+                internal_key: "secret-key".to_string(),
+                ..Default::default()
+            },
+        };
+        Ok(AppState::new_for_unit_test(config)?)
+    }
+
+    #[tokio::test]
+    async fn get_judge_dispatch_metrics_handler_should_require_internal_key_and_return_snapshot(
+    ) -> Result<()> {
+        let state = test_state()?;
+        let app = Router::new()
+            .route("/metrics", get(get_judge_dispatch_metrics_handler))
+            .layer(from_fn_with_state(
+                state.clone(),
+                crate::verify_ai_internal_key,
+            ))
+            .with_state(state);
+
+        let unauthorized = app
+            .clone()
+            .oneshot(Request::builder().uri("/metrics").body(Body::empty())?)
+            .await?;
+        assert_eq!(unauthorized.status(), StatusCode::UNAUTHORIZED);
+
+        let authorized = app
+            .oneshot(
+                Request::builder()
+                    .uri("/metrics")
+                    .header("x-ai-internal-key", "secret-key")
+                    .body(Body::empty())?,
+            )
+            .await?;
+        assert_eq!(authorized.status(), StatusCode::OK);
+
+        let body = axum::body::to_bytes(authorized.into_body(), usize::MAX).await?;
+        let payload: crate::GetJudgeDispatchMetricsOutput = serde_json::from_slice(&body)?;
+        assert_eq!(payload.tick_success_total, 0);
+        assert_eq!(payload.tick_error_total, 0);
+        assert_eq!(payload.failed_total, 0);
+        Ok(())
+    }
+}
