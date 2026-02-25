@@ -3,8 +3,13 @@ import tempfile
 import unittest
 from datetime import datetime, timezone
 from types import SimpleNamespace
+from unittest.mock import patch
 
 from app.rag_retriever import (
+    RAG_BACKEND_FILE,
+    RAG_BACKEND_MILVUS,
+    RagMilvusConfig,
+    parse_rag_backend,
     parse_source_whitelist,
     retrieve_contexts,
     summarize_retrieved_contexts,
@@ -59,6 +64,12 @@ def _build_request():
 
 
 class RagRetrieverTests(unittest.TestCase):
+    def test_parse_rag_backend_should_default_to_file(self) -> None:
+        self.assertEqual(parse_rag_backend(""), RAG_BACKEND_FILE)
+        self.assertEqual(parse_rag_backend(None), RAG_BACKEND_FILE)
+        self.assertEqual(parse_rag_backend("unknown"), RAG_BACKEND_FILE)
+        self.assertEqual(parse_rag_backend("MILVUS"), RAG_BACKEND_MILVUS)
+
     def test_parse_source_whitelist_should_normalize_and_deduplicate(self) -> None:
         ret = parse_source_whitelist(
             " https://a.com/x/ ; https://b.com/y \nhttps://a.com/x "
@@ -165,6 +176,63 @@ class RagRetrieverTests(unittest.TestCase):
         self.assertEqual(summary[0]["chunkId"], "topic-context-seed")
         self.assertIn("score", summary[0])
         self.assertIn("sourceUrl", summary[0])
+
+    @patch("app.rag_retriever._embed_query_with_openai")
+    @patch("app.rag_retriever._fetch_milvus_candidates")
+    def test_retrieve_contexts_milvus_should_use_backend_and_whitelist(
+        self,
+        mock_fetch_milvus_candidates,
+        mock_embed_query_with_openai,
+    ) -> None:
+        request = _build_request()
+        mock_embed_query_with_openai.return_value = [0.1, 0.2, 0.3]
+        mock_fetch_milvus_candidates.return_value = [
+            {
+                "distance": 0.91,
+                "entity": {
+                    "chunk_id": "milvus-ok",
+                    "title": "云顶前排版本分析",
+                    "source_url": "https://teamfighttactics.leagueoflegends.com/en-us/news/tft-14-5",
+                    "content": "前排羁绊在本版本仍旧具备较高承伤价值。",
+                },
+            },
+            {
+                "distance": 0.95,
+                "entity": {
+                    "chunk_id": "milvus-blocked",
+                    "title": "站外转载",
+                    "source_url": "https://example.com/tft",
+                    "content": "该内容应被白名单过滤。",
+                },
+            },
+        ]
+        contexts = retrieve_contexts(
+            request,
+            enabled=True,
+            knowledge_file="",
+            max_snippets=4,
+            max_chars_per_snippet=120,
+            query_message_limit=50,
+            backend=RAG_BACKEND_MILVUS,
+            milvus_config=RagMilvusConfig(
+                uri="http://milvus:19530",
+                collection="debate_knowledge",
+            ),
+            openai_api_key="sk-test",
+            openai_base_url="https://api.openai.com/v1",
+            openai_embedding_model="text-embedding-3-small",
+            openai_timeout_secs=8,
+            allowed_source_prefixes=parse_source_whitelist(
+                "https://teamfighttactics.leagueoflegends.com/en-us/news/"
+            ),
+        )
+
+        chunk_ids = [item.chunk_id for item in contexts]
+        self.assertEqual(chunk_ids[0], "topic-context-seed")
+        self.assertIn("milvus-ok", chunk_ids)
+        self.assertNotIn("milvus-blocked", chunk_ids)
+        mock_embed_query_with_openai.assert_called_once()
+        mock_fetch_milvus_candidates.assert_called_once()
 
 
 if __name__ == "__main__":

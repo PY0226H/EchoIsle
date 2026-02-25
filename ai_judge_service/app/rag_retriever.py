@@ -6,10 +6,14 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+import httpx
+
 if TYPE_CHECKING:
     from .models import JudgeDispatchRequest
 
 TOKEN_RE = re.compile(r"[A-Za-z0-9]+|[\u4e00-\u9fff]+")
+RAG_BACKEND_FILE = "file"
+RAG_BACKEND_MILVUS = "milvus"
 
 
 @dataclass(frozen=True)
@@ -38,11 +42,34 @@ class RetrievedContext:
         }
 
 
+@dataclass(frozen=True)
+class RagMilvusConfig:
+    uri: str
+    collection: str
+    token: str = ""
+    db_name: str = ""
+    vector_field: str = "embedding"
+    content_field: str = "content"
+    title_field: str = "title"
+    source_url_field: str = "source_url"
+    chunk_id_field: str = "chunk_id"
+    tags_field: str = "tags"
+    metric_type: str = "COSINE"
+    search_limit: int = 20
+
+
 def _safe_text(value: Any, *, max_len: int = 4000) -> str:
     text = str(value or "").strip()
     if not text:
         return ""
     return text[:max_len]
+
+
+def _safe_float(value: Any, *, default: float = 0.0) -> float:
+    try:
+        return float(value)
+    except Exception:
+        return default
 
 
 def _tokenize(text: str) -> set[str]:
@@ -115,7 +142,7 @@ def _load_knowledge_file(path: str) -> list[KnowledgeChunk]:
     return rows
 
 
-def _build_query_tokens(request: "JudgeDispatchRequest", query_message_limit: int) -> set[str]:
+def _build_query_text(request: "JudgeDispatchRequest", query_message_limit: int) -> str:
     topic = request.topic
     topic_text = " ".join(
         [
@@ -130,7 +157,11 @@ def _build_query_tokens(request: "JudgeDispatchRequest", query_message_limit: in
     msg_count = max(0, query_message_limit)
     selected_messages = request.messages if msg_count == 0 else request.messages[-msg_count:]
     message_text = " ".join(msg.content for msg in selected_messages)
-    return _tokenize(f"{topic_text}\n{message_text}")
+    return f"{topic_text}\n{message_text}"
+
+
+def _build_query_tokens(request: "JudgeDispatchRequest", query_message_limit: int) -> set[str]:
+    return _tokenize(_build_query_text(request, query_message_limit))
 
 
 def _score_chunk(chunk: KnowledgeChunk, query_tokens: set[str]) -> float:
@@ -170,6 +201,13 @@ def parse_source_whitelist(raw: str | None) -> tuple[str, ...]:
     return tuple(normalized)
 
 
+def parse_rag_backend(raw: str | None) -> str:
+    value = (raw or "").strip().lower()
+    if value == RAG_BACKEND_MILVUS:
+        return RAG_BACKEND_MILVUS
+    return RAG_BACKEND_FILE
+
+
 def _source_allowed(source_url: str, whitelist_prefixes: tuple[str, ...]) -> bool:
     if not whitelist_prefixes:
         return True
@@ -185,23 +223,134 @@ def _source_allowed(source_url: str, whitelist_prefixes: tuple[str, ...]) -> boo
     return False
 
 
-def retrieve_contexts(
+def _score_rank(metric_type: str, distance: float, rank: int) -> float:
+    if rank < 0:
+        rank = 0
+    metric = metric_type.strip().upper()
+    if metric in {"L2", "EUCLIDEAN"}:
+        return 1.0 / (1.0 + max(0.0, distance))
+    return max(0.0, distance) + (1.0 / (rank + 1000.0))
+
+
+def _embed_query_with_openai(
+    *,
+    query_text: str,
+    openai_api_key: str,
+    openai_base_url: str,
+    openai_embedding_model: str,
+    openai_timeout_secs: float,
+) -> list[float]:
+    if not query_text.strip() or not openai_api_key.strip():
+        return []
+
+    url = openai_base_url.rstrip("/") + "/embeddings"
+    headers = {
+        "Authorization": f"Bearer {openai_api_key}",
+        "Content-Type": "application/json",
+    }
+    body = {
+        "model": openai_embedding_model,
+        "input": query_text[:8000],
+    }
+    try:
+        with httpx.Client(timeout=max(1.0, openai_timeout_secs)) as client:
+            resp = client.post(url, headers=headers, json=body)
+        if resp.status_code // 100 != 2:
+            return []
+        payload = resp.json()
+        items = payload.get("data")
+        if not isinstance(items, list) or not items:
+            return []
+        embedding = items[0].get("embedding")
+        if not isinstance(embedding, list):
+            return []
+        out = [_safe_float(value) for value in embedding]
+        return out if out else []
+    except Exception:
+        return []
+
+
+def _fetch_milvus_candidates(
+    *,
+    query_embedding: list[float],
+    cfg: RagMilvusConfig,
+) -> list[dict[str, Any]]:
+    if not query_embedding:
+        return []
+    try:
+        from pymilvus import MilvusClient  # type: ignore
+    except Exception:
+        return []
+
+    try:
+        client = MilvusClient(
+            uri=cfg.uri,
+            token=cfg.token or None,
+            db_name=cfg.db_name or None,
+        )
+        raw = client.search(
+            collection_name=cfg.collection,
+            data=[query_embedding],
+            anns_field=cfg.vector_field,
+            limit=max(1, cfg.search_limit),
+            search_params={"metric_type": cfg.metric_type},
+            output_fields=[
+                cfg.chunk_id_field,
+                cfg.title_field,
+                cfg.source_url_field,
+                cfg.content_field,
+                cfg.tags_field,
+            ],
+        )
+    except Exception:
+        return []
+
+    if not isinstance(raw, list) or not raw:
+        return []
+    first = raw[0]
+    if not isinstance(first, list):
+        return []
+    return [row for row in first if isinstance(row, dict)]
+
+
+def _context_from_milvus_row(
+    row: dict[str, Any],
+    *,
+    cfg: RagMilvusConfig,
+    rank: int,
+    max_chars_per_snippet: int,
+) -> RetrievedContext | None:
+    entity = row.get("entity")
+    fields = entity if isinstance(entity, dict) else row
+    chunk_id = _safe_text(
+        fields.get(cfg.chunk_id_field) or row.get("id") or f"milvus-{rank + 1}",
+        max_len=128,
+    )
+    title = _safe_text(fields.get(cfg.title_field), max_len=300) or chunk_id
+    source_url = _safe_text(fields.get(cfg.source_url_field), max_len=1000)
+    content = _safe_text(fields.get(cfg.content_field), max_len=max_chars_per_snippet)
+    if not content:
+        return None
+    distance = _safe_float(row.get("distance"), default=0.0)
+    score = _score_rank(cfg.metric_type, distance, rank)
+    return RetrievedContext(
+        chunk_id=chunk_id,
+        title=title,
+        source_url=source_url,
+        content=content,
+        score=score,
+    )
+
+
+def _retrieve_contexts_from_file(
     request: "JudgeDispatchRequest",
     *,
-    enabled: bool,
     knowledge_file: str,
     max_snippets: int,
     max_chars_per_snippet: int,
     query_message_limit: int,
     allowed_source_prefixes: tuple[str, ...] = (),
 ) -> list[RetrievedContext]:
-    if not enabled:
-        return []
-
-    limit = max(0, max_snippets)
-    if limit == 0:
-        return []
-
     out: list[RetrievedContext] = []
     seen_chunk_ids: set[str] = set()
 
@@ -217,7 +366,7 @@ def retrieve_contexts(
             )
         )
         seen_chunk_ids.add("topic-context-seed")
-        if len(out) >= limit:
+        if len(out) >= max_snippets:
             return out
 
     chunks = _load_knowledge_file(knowledge_file)
@@ -245,10 +394,117 @@ def retrieve_contexts(
             continue
         out.append(item)
         seen_chunk_ids.add(item.chunk_id)
-        if len(out) >= limit:
+        if len(out) >= max_snippets:
+            break
+    return out
+
+
+def _retrieve_contexts_from_milvus(
+    request: "JudgeDispatchRequest",
+    *,
+    max_snippets: int,
+    max_chars_per_snippet: int,
+    query_message_limit: int,
+    allowed_source_prefixes: tuple[str, ...],
+    milvus_config: RagMilvusConfig,
+    openai_api_key: str,
+    openai_base_url: str,
+    openai_embedding_model: str,
+    openai_timeout_secs: float,
+) -> list[RetrievedContext]:
+    out: list[RetrievedContext] = []
+    seen_chunk_ids: set[str] = set()
+
+    context_seed = _safe_text(request.topic.context_seed, max_len=max_chars_per_snippet)
+    if context_seed:
+        out.append(
+            RetrievedContext(
+                chunk_id="topic-context-seed",
+                title="topic_context_seed",
+                source_url="request.topic.context_seed",
+                content=context_seed,
+                score=1.0,
+            )
+        )
+        seen_chunk_ids.add("topic-context-seed")
+        if len(out) >= max_snippets:
+            return out
+
+    query_text = _build_query_text(request, query_message_limit)
+    embedding = _embed_query_with_openai(
+        query_text=query_text,
+        openai_api_key=openai_api_key,
+        openai_base_url=openai_base_url,
+        openai_embedding_model=openai_embedding_model,
+        openai_timeout_secs=openai_timeout_secs,
+    )
+    rows = _fetch_milvus_candidates(query_embedding=embedding, cfg=milvus_config)
+    for rank, row in enumerate(rows):
+        item = _context_from_milvus_row(
+            row,
+            cfg=milvus_config,
+            rank=rank,
+            max_chars_per_snippet=max_chars_per_snippet,
+        )
+        if item is None:
+            continue
+        if not _source_allowed(item.source_url, allowed_source_prefixes):
+            continue
+        if item.chunk_id in seen_chunk_ids:
+            continue
+        out.append(item)
+        seen_chunk_ids.add(item.chunk_id)
+        if len(out) >= max_snippets:
             break
 
     return out
+
+
+def retrieve_contexts(
+    request: "JudgeDispatchRequest",
+    *,
+    enabled: bool,
+    knowledge_file: str,
+    max_snippets: int,
+    max_chars_per_snippet: int,
+    query_message_limit: int,
+    allowed_source_prefixes: tuple[str, ...] = (),
+    backend: str = RAG_BACKEND_FILE,
+    milvus_config: RagMilvusConfig | None = None,
+    openai_api_key: str = "",
+    openai_base_url: str = "https://api.openai.com/v1",
+    openai_embedding_model: str = "text-embedding-3-small",
+    openai_timeout_secs: float = 8.0,
+) -> list[RetrievedContext]:
+    if not enabled:
+        return []
+
+    limit = max(0, max_snippets)
+    if limit == 0:
+        return []
+
+    selected_backend = parse_rag_backend(backend)
+    if selected_backend == RAG_BACKEND_MILVUS and milvus_config is not None:
+        return _retrieve_contexts_from_milvus(
+            request,
+            max_snippets=limit,
+            max_chars_per_snippet=max_chars_per_snippet,
+            query_message_limit=query_message_limit,
+            allowed_source_prefixes=allowed_source_prefixes,
+            milvus_config=milvus_config,
+            openai_api_key=openai_api_key,
+            openai_base_url=openai_base_url,
+            openai_embedding_model=openai_embedding_model,
+            openai_timeout_secs=openai_timeout_secs,
+        )
+    return _retrieve_contexts_from_file(
+        request,
+        knowledge_file=knowledge_file,
+        max_snippets=limit,
+        max_chars_per_snippet=max_chars_per_snippet,
+        query_message_limit=query_message_limit,
+        allowed_source_prefixes=allowed_source_prefixes,
+    )
 
 
 def summarize_retrieved_contexts(

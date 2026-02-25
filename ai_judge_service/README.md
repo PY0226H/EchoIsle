@@ -1,6 +1,6 @@
 # AI Judge Service
 
-用于接收 `chat_server` 的评审派发请求，执行评审逻辑（`mock` 或 `openai` 多 Agent 流水线），并回调内部接口写入评审结果。
+用于接收 `chat_server` 的评审派发请求，执行评审逻辑（`mock` 或 `openai` 多 Agent 流水线），并回调内部接口写入评审结果。RAG 支持 `file` 与 `milvus` 两种后端。
 
 ## 目录结构
 
@@ -19,6 +19,12 @@ cd ai_judge_service
 python3 -m venv .venv
 .venv/bin/python -m pip install -r requirements.txt
 .venv/bin/python -m uvicorn app.main:app --host 0.0.0.0 --port 8787
+```
+
+如果启用 `AI_JUDGE_RAG_BACKEND=milvus`，需额外安装：
+
+```bash
+.venv/bin/python -m pip install pymilvus
 ```
 
 ## 环境变量
@@ -44,6 +50,20 @@ python3 -m venv .venv
 - `AI_JUDGE_RAG_MAX_CHARS_PER_SNIPPET`: 单片段最大字符数，默认 `280`
 - `AI_JUDGE_RAG_QUERY_MESSAGE_LIMIT`: 检索查询使用最近消息条数，默认 `80`
 - `AI_JUDGE_RAG_SOURCE_WHITELIST`: 允许知识来源的 URL 前缀列表（逗号/分号/换行分隔），默认 `https://teamfighttactics.leagueoflegends.com/en-us/news/`
+- `AI_JUDGE_RAG_BACKEND`: `file|milvus`，默认 `file`
+- `AI_JUDGE_RAG_OPENAI_EMBEDDING_MODEL`: Milvus 检索生成查询向量的 embedding 模型，默认 `text-embedding-3-small`
+- `AI_JUDGE_RAG_MILVUS_URI`: Milvus 连接地址（例如 `http://127.0.0.1:19530`）
+- `AI_JUDGE_RAG_MILVUS_TOKEN`: Milvus token（可空）
+- `AI_JUDGE_RAG_MILVUS_DB_NAME`: Milvus DB 名称（可空）
+- `AI_JUDGE_RAG_MILVUS_COLLECTION`: Milvus collection 名称
+- `AI_JUDGE_RAG_MILVUS_VECTOR_FIELD`: 向量字段名，默认 `embedding`
+- `AI_JUDGE_RAG_MILVUS_CONTENT_FIELD`: 文本内容字段名，默认 `content`
+- `AI_JUDGE_RAG_MILVUS_TITLE_FIELD`: 标题字段名，默认 `title`
+- `AI_JUDGE_RAG_MILVUS_SOURCE_URL_FIELD`: 来源 URL 字段名，默认 `source_url`
+- `AI_JUDGE_RAG_MILVUS_CHUNK_ID_FIELD`: chunk id 字段名，默认 `chunk_id`
+- `AI_JUDGE_RAG_MILVUS_TAGS_FIELD`: tags 字段名，默认 `tags`
+- `AI_JUDGE_RAG_MILVUS_METRIC_TYPE`: 向量距离类型，默认 `COSINE`
+- `AI_JUDGE_RAG_MILVUS_SEARCH_LIMIT`: Milvus 向量召回候选数，默认 `20`
 - `AI_JUDGE_STAGE_AGENT_MAX_CHUNKS`: 阶段 Agent 最大处理窗口数（超出取最近窗口），默认 `12`
 
 ## 知识文件格式（最小）

@@ -8,6 +8,9 @@ from fastapi import FastAPI, Header, HTTPException
 from .models import JudgeDispatchRequest, MarkJudgeJobFailedInput
 from .openai_judge import OpenAiJudgeConfig, build_report_with_openai
 from .rag_retriever import (
+    RAG_BACKEND_MILVUS,
+    RagMilvusConfig,
+    parse_rag_backend,
     parse_source_whitelist,
     retrieve_contexts,
     summarize_retrieved_contexts,
@@ -41,6 +44,20 @@ class Settings:
     rag_max_chars_per_snippet: int
     rag_query_message_limit: int
     rag_source_whitelist: tuple[str, ...]
+    rag_backend: str
+    rag_openai_embedding_model: str
+    rag_milvus_uri: str
+    rag_milvus_token: str
+    rag_milvus_db_name: str
+    rag_milvus_collection: str
+    rag_milvus_vector_field: str
+    rag_milvus_content_field: str
+    rag_milvus_title_field: str
+    rag_milvus_source_url_field: str
+    rag_milvus_chunk_id_field: str
+    rag_milvus_tags_field: str
+    rag_milvus_metric_type: str
+    rag_milvus_search_limit: int
     stage_agent_max_chunks: int
 
 
@@ -82,6 +99,26 @@ def _load_settings() -> Settings:
                 DEFAULT_RAG_SOURCE_WHITELIST,
             )
         ),
+        rag_backend=parse_rag_backend(os.getenv("AI_JUDGE_RAG_BACKEND", "file")),
+        rag_openai_embedding_model=os.getenv(
+            "AI_JUDGE_RAG_OPENAI_EMBEDDING_MODEL",
+            "text-embedding-3-small",
+        ),
+        rag_milvus_uri=os.getenv("AI_JUDGE_RAG_MILVUS_URI", ""),
+        rag_milvus_token=os.getenv("AI_JUDGE_RAG_MILVUS_TOKEN", ""),
+        rag_milvus_db_name=os.getenv("AI_JUDGE_RAG_MILVUS_DB_NAME", ""),
+        rag_milvus_collection=os.getenv("AI_JUDGE_RAG_MILVUS_COLLECTION", ""),
+        rag_milvus_vector_field=os.getenv("AI_JUDGE_RAG_MILVUS_VECTOR_FIELD", "embedding"),
+        rag_milvus_content_field=os.getenv("AI_JUDGE_RAG_MILVUS_CONTENT_FIELD", "content"),
+        rag_milvus_title_field=os.getenv("AI_JUDGE_RAG_MILVUS_TITLE_FIELD", "title"),
+        rag_milvus_source_url_field=os.getenv(
+            "AI_JUDGE_RAG_MILVUS_SOURCE_URL_FIELD",
+            "source_url",
+        ),
+        rag_milvus_chunk_id_field=os.getenv("AI_JUDGE_RAG_MILVUS_CHUNK_ID_FIELD", "chunk_id"),
+        rag_milvus_tags_field=os.getenv("AI_JUDGE_RAG_MILVUS_TAGS_FIELD", "tags"),
+        rag_milvus_metric_type=os.getenv("AI_JUDGE_RAG_MILVUS_METRIC_TYPE", "COSINE"),
+        rag_milvus_search_limit=int(os.getenv("AI_JUDGE_RAG_MILVUS_SEARCH_LIMIT", "20")),
         stage_agent_max_chunks=int(os.getenv("AI_JUDGE_STAGE_AGENT_MAX_CHUNKS", "12")),
     )
 
@@ -133,6 +170,27 @@ async def _build_report_by_runtime(
     effective_style_mode: str,
     style_mode_source: str,
 ):
+    milvus_config: RagMilvusConfig | None = None
+    if (
+        SETTINGS.rag_backend == RAG_BACKEND_MILVUS
+        and SETTINGS.rag_milvus_uri.strip()
+        and SETTINGS.rag_milvus_collection.strip()
+    ):
+        milvus_config = RagMilvusConfig(
+            uri=SETTINGS.rag_milvus_uri,
+            token=SETTINGS.rag_milvus_token,
+            db_name=SETTINGS.rag_milvus_db_name,
+            collection=SETTINGS.rag_milvus_collection,
+            vector_field=SETTINGS.rag_milvus_vector_field,
+            content_field=SETTINGS.rag_milvus_content_field,
+            title_field=SETTINGS.rag_milvus_title_field,
+            source_url_field=SETTINGS.rag_milvus_source_url_field,
+            chunk_id_field=SETTINGS.rag_milvus_chunk_id_field,
+            tags_field=SETTINGS.rag_milvus_tags_field,
+            metric_type=SETTINGS.rag_milvus_metric_type,
+            search_limit=SETTINGS.rag_milvus_search_limit,
+        )
+
     retrieved_contexts = retrieve_contexts(
         request,
         enabled=SETTINGS.rag_enabled,
@@ -141,10 +199,17 @@ async def _build_report_by_runtime(
         max_chars_per_snippet=SETTINGS.rag_max_chars_per_snippet,
         query_message_limit=SETTINGS.rag_query_message_limit,
         allowed_source_prefixes=SETTINGS.rag_source_whitelist,
+        backend=SETTINGS.rag_backend,
+        milvus_config=milvus_config,
+        openai_api_key=SETTINGS.openai_api_key,
+        openai_base_url=SETTINGS.openai_base_url,
+        openai_embedding_model=SETTINGS.rag_openai_embedding_model,
+        openai_timeout_secs=SETTINGS.openai_timeout_secs,
     )
 
     def apply_rag_payload_fields(report, *, used_by_model: bool) -> None:
         report.payload["ragEnabled"] = SETTINGS.rag_enabled
+        report.payload["ragBackend"] = SETTINGS.rag_backend
         report.payload["ragUsedByModel"] = used_by_model and bool(retrieved_contexts)
         report.payload["ragSnippetCount"] = len(retrieved_contexts)
         report.payload["ragSources"] = summarize_retrieved_contexts(retrieved_contexts)
