@@ -1,6 +1,7 @@
 use crate::{
-    AppError, AppState, CreateDebateMessageInput, JoinDebateSessionInput, ListDebateSessions,
-    ListDebateTopics, PinDebateMessageInput, RequestJudgeJobInput, SubmitDrawVoteInput,
+    AppError, AppState, CreateDebateMessageInput, GetJudgeReportQuery, JoinDebateSessionInput,
+    ListDebateSessions, ListDebateTopics, PinDebateMessageInput, RequestJudgeJobInput,
+    SubmitDrawVoteInput,
 };
 use axum::{
     extract::{Path, Query, State},
@@ -175,7 +176,8 @@ pub(crate) async fn request_judge_job_handler(
     get,
     path = "/api/debate/sessions/{id}/judge-report",
     params(
-        ("id" = u64, Path, description = "Debate session id")
+        ("id" = u64, Path, description = "Debate session id"),
+        GetJudgeReportQuery
     ),
     responses(
         (status = 200, description = "Judge report query result", body = crate::GetJudgeReportOutput),
@@ -189,8 +191,9 @@ pub(crate) async fn get_latest_judge_report_handler(
     Extension(user): Extension<User>,
     State(state): State<AppState>,
     Path(id): Path<u64>,
+    Query(input): Query<GetJudgeReportQuery>,
 ) -> Result<impl IntoResponse, AppError> {
-    let ret = state.get_latest_judge_report(id, &user).await?;
+    let ret = state.get_latest_judge_report(id, &user, input).await?;
     Ok((StatusCode::OK, Json(ret)))
 }
 

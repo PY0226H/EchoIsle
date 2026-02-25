@@ -6,7 +6,7 @@ use serde_json::Value;
 use sqlx::{FromRow, Postgres, Transaction};
 use std::collections::HashSet;
 use tracing::warn;
-use utoipa::ToSchema;
+use utoipa::{IntoParams, ToSchema};
 
 const STYLE_RATIONAL: &str = "rational";
 const STYLE_ENTERTAINING: &str = "entertaining";
@@ -19,6 +19,7 @@ const DRAW_VOTE_WINDOW_SECS: i64 = 300;
 const REMATCH_DELAY_SECS: i64 = 600;
 const REMATCH_MIN_DURATION_SECS: i64 = 900;
 const REMATCH_MAX_DURATION_SECS: i64 = 14_400;
+const MAX_STAGE_SUMMARY_COUNT: u32 = 200;
 
 #[derive(Debug, Clone, ToSchema, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -108,6 +109,12 @@ pub struct GetJudgeReportOutput {
     pub status: String,
     pub latest_job: Option<JudgeJobSnapshot>,
     pub report: Option<JudgeReportDetail>,
+}
+
+#[derive(Debug, Clone, IntoParams, ToSchema, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GetJudgeReportQuery {
+    pub max_stage_count: Option<u32>,
 }
 
 #[derive(Debug, Clone, ToSchema, Serialize, Deserialize)]
@@ -522,6 +529,10 @@ fn majority_resolution(agree_votes: i32, disagree_votes: i32) -> &'static str {
     }
 }
 
+fn normalize_stage_summary_limit(limit: Option<u32>) -> Option<i64> {
+    limit.map(|value| value.clamp(1, MAX_STAGE_SUMMARY_COUNT) as i64)
+}
+
 fn map_draw_vote_detail(
     vote: DrawVoteRow,
     stats: DrawVoteStatsRow,
@@ -721,6 +732,7 @@ impl AppState {
         &self,
         session_id: u64,
         user: &User,
+        query: GetJudgeReportQuery,
     ) -> Result<GetJudgeReportOutput, AppError> {
         let session_ws_id: Option<(i64,)> = sqlx::query_as(
             r#"
@@ -774,19 +786,38 @@ impl AppState {
         .await?;
 
         let report = if let Some(report) = report {
-            let stage_summaries: Vec<JudgeStageSummaryRow> = sqlx::query_as(
-                r#"
-                SELECT
-                    stage_no, from_message_id, to_message_id,
-                    pro_score, con_score, summary, created_at
-                FROM judge_stage_summaries
-                WHERE job_id = $1
-                ORDER BY stage_no ASC, created_at ASC
-                "#,
-            )
-            .bind(report.job_id)
-            .fetch_all(&self.pool)
-            .await?;
+            let stage_summaries: Vec<JudgeStageSummaryRow> =
+                if let Some(limit) = normalize_stage_summary_limit(query.max_stage_count) {
+                    sqlx::query_as(
+                        r#"
+                    SELECT
+                        stage_no, from_message_id, to_message_id,
+                        pro_score, con_score, summary, created_at
+                    FROM judge_stage_summaries
+                    WHERE job_id = $1
+                    ORDER BY stage_no ASC, created_at ASC
+                    LIMIT $2
+                    "#,
+                    )
+                    .bind(report.job_id)
+                    .bind(limit)
+                    .fetch_all(&self.pool)
+                    .await?
+                } else {
+                    sqlx::query_as(
+                        r#"
+                    SELECT
+                        stage_no, from_message_id, to_message_id,
+                        pro_score, con_score, summary, created_at
+                    FROM judge_stage_summaries
+                    WHERE job_id = $1
+                    ORDER BY stage_no ASC, created_at ASC
+                    "#,
+                    )
+                    .bind(report.job_id)
+                    .fetch_all(&self.pool)
+                    .await?
+                };
             Some(map_report_detail(
                 report,
                 stage_summaries.into_iter().map(map_stage_summary).collect(),
@@ -1849,7 +1880,13 @@ mod tests {
             .await?;
 
         let ret = state
-            .get_latest_judge_report(session_id as u64, &user)
+            .get_latest_judge_report(
+                session_id as u64,
+                &user,
+                GetJudgeReportQuery {
+                    max_stage_count: None,
+                },
+            )
             .await?;
         assert_eq!(ret.status, "pending");
         assert!(ret.latest_job.is_some());
@@ -1902,7 +1939,13 @@ mod tests {
         .await?;
 
         let ret = state
-            .get_latest_judge_report(session_id as u64, &user)
+            .get_latest_judge_report(
+                session_id as u64,
+                &user,
+                GetJudgeReportQuery {
+                    max_stage_count: None,
+                },
+            )
             .await?;
         assert_eq!(ret.status, "ready");
         let report = ret.report.expect("report should exist");
@@ -1967,7 +2010,13 @@ mod tests {
             .await?;
 
         let ret = state
-            .get_latest_judge_report(session_id as u64, &user)
+            .get_latest_judge_report(
+                session_id as u64,
+                &user,
+                GetJudgeReportQuery {
+                    max_stage_count: None,
+                },
+            )
             .await?;
         assert_eq!(ret.status, "ready");
         let report = ret.report.expect("report should exist");
@@ -1978,6 +2027,82 @@ mod tests {
         assert_eq!(report.stage_summaries[1].stage_no, 2);
         assert_eq!(report.stage_summaries[1].from_message_id, Some(101));
         assert_eq!(report.stage_summaries[1].to_message_id, Some(200));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn get_latest_judge_report_should_limit_stage_summaries_by_query() -> Result<()> {
+        let (_tdb, state) = AppState::new_for_test().await?;
+        let session_id = seed_topic_and_session(&state, 1, "closed").await?;
+        let user = state.find_user_by_id(1).await?.expect("user should exist");
+        let job_id = seed_running_judge_job(&state, session_id).await?;
+
+        state
+            .submit_judge_report(
+                job_id as u64,
+                SubmitJudgeReportInput {
+                    winner: "con".to_string(),
+                    pro_score: 70,
+                    con_score: 85,
+                    logic_pro: 72,
+                    logic_con: 84,
+                    evidence_pro: 69,
+                    evidence_con: 86,
+                    rebuttal_pro: 71,
+                    rebuttal_con: 83,
+                    clarity_pro: 68,
+                    clarity_con: 87,
+                    pro_summary: "pro".to_string(),
+                    con_summary: "con".to_string(),
+                    rationale: "rationale".to_string(),
+                    style_mode: Some("rational".to_string()),
+                    needs_draw_vote: false,
+                    rejudge_triggered: false,
+                    payload: serde_json::json!({"trace":"limit-stages"}),
+                    winner_first: Some("con".to_string()),
+                    winner_second: Some("con".to_string()),
+                    stage_summaries: vec![
+                        JudgeStageSummaryInput {
+                            stage_no: 1,
+                            from_message_id: Some(1),
+                            to_message_id: Some(100),
+                            pro_score: 70,
+                            con_score: 80,
+                            summary: serde_json::json!({"brief":"s1"}),
+                        },
+                        JudgeStageSummaryInput {
+                            stage_no: 2,
+                            from_message_id: Some(101),
+                            to_message_id: Some(200),
+                            pro_score: 71,
+                            con_score: 82,
+                            summary: serde_json::json!({"brief":"s2"}),
+                        },
+                        JudgeStageSummaryInput {
+                            stage_no: 3,
+                            from_message_id: Some(201),
+                            to_message_id: Some(300),
+                            pro_score: 72,
+                            con_score: 85,
+                            summary: serde_json::json!({"brief":"s3"}),
+                        },
+                    ],
+                },
+            )
+            .await?;
+
+        let ret = state
+            .get_latest_judge_report(
+                session_id as u64,
+                &user,
+                GetJudgeReportQuery {
+                    max_stage_count: Some(1),
+                },
+            )
+            .await?;
+        let report = ret.report.expect("report should exist");
+        assert_eq!(report.stage_summaries.len(), 1);
+        assert_eq!(report.stage_summaries[0].stage_no, 1);
         Ok(())
     }
 
