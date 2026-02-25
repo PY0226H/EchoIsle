@@ -18,10 +18,10 @@ pub use debate::{
 };
 pub use judge::{
     DrawVoteDetail, GetDrawVoteOutput, GetJudgeReportOutput, GetJudgeReportQuery, JudgeJobSnapshot,
-    JudgeRagMeta, JudgeRagSourceItem, JudgeReportDetail, JudgeStageSummaryDetail,
-    JudgeStageSummaryInput, MarkJudgeJobFailedInput, MarkJudgeJobFailedOutput,
-    RequestJudgeJobInput, RequestJudgeJobOutput, SubmitDrawVoteInput, SubmitDrawVoteOutput,
-    SubmitJudgeReportInput, SubmitJudgeReportOutput,
+    JudgeRagMeta, JudgeRagSourceItem, JudgeReportDetail, JudgeStageSummariesMeta,
+    JudgeStageSummaryDetail, JudgeStageSummaryInput, MarkJudgeJobFailedInput,
+    MarkJudgeJobFailedOutput, RequestJudgeJobInput, RequestJudgeJobOutput, SubmitDrawVoteInput,
+    SubmitDrawVoteOutput, SubmitJudgeReportInput, SubmitJudgeReportOutput,
 };
 pub(crate) use judge_dispatch::AiJudgeDispatchMetrics;
 pub use judge_dispatch::GetJudgeDispatchMetricsOutput;

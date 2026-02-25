@@ -99,6 +99,7 @@ pub struct JudgeReportDetail {
     pub rag: Option<JudgeRagMeta>,
     #[serde(default)]
     pub stage_summaries: Vec<JudgeStageSummaryDetail>,
+    pub stage_summaries_meta: Option<JudgeStageSummariesMeta>,
     pub created_at: DateTime<Utc>,
 }
 
@@ -180,6 +181,15 @@ pub struct JudgeStageSummaryDetail {
     pub con_score: i32,
     pub summary: Value,
     pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, ToSchema, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct JudgeStageSummariesMeta {
+    pub total_count: u32,
+    pub returned_count: u32,
+    pub truncated: bool,
+    pub max_stage_count: Option<u32>,
 }
 
 #[derive(Debug, Clone, ToSchema, Serialize, Deserialize)]
@@ -394,6 +404,7 @@ fn validate_non_empty_text(input: &str, field: &str, max_len: usize) -> Result<S
 fn map_report_detail(
     v: JudgeReportRow,
     stage_summaries: Vec<JudgeStageSummaryDetail>,
+    stage_summaries_meta: Option<JudgeStageSummariesMeta>,
 ) -> JudgeReportDetail {
     let rag = extract_rag_meta(&v.payload);
     JudgeReportDetail {
@@ -419,6 +430,7 @@ fn map_report_detail(
         payload: v.payload,
         rag,
         stage_summaries,
+        stage_summaries_meta,
         created_at: v.created_at,
     }
 }
@@ -786,10 +798,20 @@ impl AppState {
         .await?;
 
         let report = if let Some(report) = report {
-            let stage_summaries: Vec<JudgeStageSummaryRow> =
-                if let Some(limit) = normalize_stage_summary_limit(query.max_stage_count) {
-                    sqlx::query_as(
-                        r#"
+            let stage_limit = normalize_stage_summary_limit(query.max_stage_count);
+            let total_stage_count: i64 = sqlx::query_scalar(
+                r#"
+                SELECT COUNT(*)::bigint
+                FROM judge_stage_summaries
+                WHERE job_id = $1
+                "#,
+            )
+            .bind(report.job_id)
+            .fetch_one(&self.pool)
+            .await?;
+            let stage_summaries: Vec<JudgeStageSummaryRow> = if let Some(limit) = stage_limit {
+                sqlx::query_as(
+                    r#"
                     SELECT
                         stage_no, from_message_id, to_message_id,
                         pro_score, con_score, summary, created_at
@@ -798,14 +820,14 @@ impl AppState {
                     ORDER BY stage_no ASC, created_at ASC
                     LIMIT $2
                     "#,
-                    )
-                    .bind(report.job_id)
-                    .bind(limit)
-                    .fetch_all(&self.pool)
-                    .await?
-                } else {
-                    sqlx::query_as(
-                        r#"
+                )
+                .bind(report.job_id)
+                .bind(limit)
+                .fetch_all(&self.pool)
+                .await?
+            } else {
+                sqlx::query_as(
+                    r#"
                     SELECT
                         stage_no, from_message_id, to_message_id,
                         pro_score, con_score, summary, created_at
@@ -813,14 +835,27 @@ impl AppState {
                     WHERE job_id = $1
                     ORDER BY stage_no ASC, created_at ASC
                     "#,
-                    )
-                    .bind(report.job_id)
-                    .fetch_all(&self.pool)
-                    .await?
-                };
+                )
+                .bind(report.job_id)
+                .fetch_all(&self.pool)
+                .await?
+            };
+            let returned_count = u32::try_from(stage_summaries.len()).unwrap_or(u32::MAX);
+            let total_count = if total_stage_count <= 0 {
+                0
+            } else {
+                u32::try_from(total_stage_count).unwrap_or(u32::MAX)
+            };
+            let stage_summaries_meta = Some(JudgeStageSummariesMeta {
+                total_count,
+                returned_count,
+                truncated: returned_count < total_count,
+                max_stage_count: stage_limit.map(|value| value as u32),
+            });
             Some(map_report_detail(
                 report,
                 stage_summaries.into_iter().map(map_stage_summary).collect(),
+                stage_summaries_meta,
             ))
         } else {
             None
@@ -1953,6 +1988,13 @@ mod tests {
         assert_eq!(report.winner, "pro");
         assert_eq!(report.pro_score, 82);
         assert!(report.stage_summaries.is_empty());
+        let meta = report
+            .stage_summaries_meta
+            .expect("stage summaries meta should exist");
+        assert_eq!(meta.total_count, 0);
+        assert_eq!(meta.returned_count, 0);
+        assert!(!meta.truncated);
+        assert_eq!(meta.max_stage_count, None);
         Ok(())
     }
 
@@ -2027,6 +2069,13 @@ mod tests {
         assert_eq!(report.stage_summaries[1].stage_no, 2);
         assert_eq!(report.stage_summaries[1].from_message_id, Some(101));
         assert_eq!(report.stage_summaries[1].to_message_id, Some(200));
+        let meta = report
+            .stage_summaries_meta
+            .expect("stage summaries meta should exist");
+        assert_eq!(meta.total_count, 2);
+        assert_eq!(meta.returned_count, 2);
+        assert!(!meta.truncated);
+        assert_eq!(meta.max_stage_count, None);
         Ok(())
     }
 
@@ -2103,6 +2152,13 @@ mod tests {
         let report = ret.report.expect("report should exist");
         assert_eq!(report.stage_summaries.len(), 1);
         assert_eq!(report.stage_summaries[0].stage_no, 1);
+        let meta = report
+            .stage_summaries_meta
+            .expect("stage summaries meta should exist");
+        assert_eq!(meta.total_count, 3);
+        assert_eq!(meta.returned_count, 1);
+        assert!(meta.truncated);
+        assert_eq!(meta.max_stage_count, Some(1));
         Ok(())
     }
 
