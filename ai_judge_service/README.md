@@ -27,6 +27,28 @@ python3 -m venv .venv
 .venv/bin/python -m pip install pymilvus
 ```
 
+手工知识导入 Milvus（MVP 推荐）：
+
+```bash
+cd ai_judge_service
+.venv/bin/python scripts/import_knowledge_to_milvus.py \
+  --input-file ./knowledge.json \
+  --milvus-uri http://127.0.0.1:19530 \
+  --milvus-collection debate_knowledge \
+  --openai-api-key "$OPENAI_API_KEY"
+```
+
+如果需要脚本自动尝试创建 collection（仅适用于你的 Milvus 配置允许该简化创建方式）：
+
+```bash
+.venv/bin/python scripts/import_knowledge_to_milvus.py \
+  --input-file ./knowledge.json \
+  --milvus-uri http://127.0.0.1:19530 \
+  --milvus-collection debate_knowledge \
+  --openai-api-key "$OPENAI_API_KEY" \
+  --ensure-collection
+```
+
 ## 环境变量
 
 - `AI_JUDGE_INTERNAL_KEY`: 与 `chat_server.ai_judge.internal_key` 保持一致

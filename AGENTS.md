@@ -8,6 +8,7 @@ A skill is a set of local instructions to follow that is stored in a `SKILL.md` 
 - post-module-interview-journal: Generate interview-ready development records after each module implementation. Use when a turn includes feature/module code changes and you need to update development log, troubleshooting log, and interview Q&A materials. (file: /Users/panyihang/Documents/aicomm/skills/post-module-interview-journal/SKILL.md)
 - post-module-explanation-journal: Generate deep Chinese explanation documents for newly added or modified module code and write a new file under `docs/explanation` after each module change. Use when a turn includes module-level implementation/refactor/fix and explanation assets must be updated for learning/interview review. (file: /Users/panyihang/Documents/aicomm/skills/post-module-explanation-journal/SKILL.md)
 - python-venv-guard: Enforce Python virtual environment usage before any Python command, and forbid global python/pip usage. Use whenever a turn includes Python dependency install, Python test run, Python script execution, or service startup. (file: /Users/panyihang/Documents/aicomm/skills/python-venv-guard/SKILL.md)
+- pre-module-mvp-plan-guard: Before starting each development module, read the productization MVP plan, verify planned work alignment, and update the plan document with a pre-development alignment record. (file: /Users/panyihang/Documents/aicomm/skills/pre-module-mvp-plan-guard/SKILL.md)
 
 ### How to use skills
 - Discovery: The list above is the skills available in this session (name + description + file path). Skill bodies live on disk at the listed paths.
@@ -31,6 +32,12 @@ A skill is a set of local instructions to follow that is stored in a `SKILL.md` 
 - For any turn that runs Python commands in this repository, run `python-venv-guard` first.
 - Never run Python with global interpreters (`python`, `python3`, `pip`, `pip3`) for project tasks.
 - Always use project virtual environment interpreter directly (for this repo: `/Users/panyihang/Documents/aicomm/ai_judge_service/.venv/bin/python`).
+
+### Mandatory pre-development hook
+- For any turn that starts module-level implementation/refactor/fix in this repository, run `pre-module-mvp-plan-guard` before coding.
+- The pre-development hook must read `/Users/panyihang/Documents/aicomm/docs/产品化开发计划-在线辩论AI裁判平台.md`.
+- It must verify that the target module is within MVP roadmap scope; if off-road, record adjustment reason and update the plan doc first.
+- It must append an alignment record in the plan doc before coding starts.
 
 ### Mandatory post-module hook
 - For any turn that includes module-level code implementation/refactor/fix in this repository, run `post-module-test-guard` after coding and before final verification sign-off.
