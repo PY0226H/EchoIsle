@@ -2,10 +2,10 @@ use anyhow::Result;
 use axum::Router;
 use chat_server::{
     AppState, CreateDebateMessageInput, DebateMessage, DebateSessionSummary, DebateTopic,
-    GetJudgeReportOutput, JoinDebateSessionOutput, OpsCreateDebateSessionInput,
+    GetDrawVoteOutput, GetJudgeReportOutput, JoinDebateSessionOutput, OpsCreateDebateSessionInput,
     OpsCreateDebateTopicInput, OpsUpdateDebateSessionInput, PinDebateMessageInput,
-    PinDebateMessageOutput, RequestJudgeJobInput, RequestJudgeJobOutput, SubmitJudgeReportInput,
-    VerifyIapOrderInput, VerifyIapOrderOutput,
+    PinDebateMessageOutput, RequestJudgeJobInput, RequestJudgeJobOutput, SubmitDrawVoteInput,
+    SubmitDrawVoteOutput, SubmitJudgeReportInput, VerifyIapOrderInput, VerifyIapOrderOutput,
 };
 use reqwest::{Client, StatusCode};
 use serde::de::DeserializeOwned;
@@ -209,6 +209,225 @@ async fn debate_mvp_signoff_should_cover_core_flow() -> Result<()> {
     assert_eq!(report.status, "ready");
     let detail = report.report.expect("judge report should exist");
     assert_eq!(detail.winner, "pro");
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn debate_mvp_signoff_should_cover_draw_vote_and_rematch_flow() -> Result<()> {
+    let (_tdb, state) = AppState::new_for_test().await?;
+    let server = TestServer::new(state.clone()).await?;
+
+    let now_ms = SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis();
+    let workspace = format!("mvp-draw-signoff-{now_ms}");
+
+    let owner = server
+        .signup(
+            &workspace,
+            "Owner Draw",
+            &format!("owner-draw-{now_ms}@acme.org"),
+            "123456",
+        )
+        .await?;
+    let user2 = server
+        .signup(
+            &workspace,
+            "User Draw 2",
+            &format!("u2-draw-{now_ms}@acme.org"),
+            "123456",
+        )
+        .await?;
+    let user3 = server
+        .signup(
+            &workspace,
+            "User Draw 3",
+            &format!("u3-draw-{now_ms}@acme.org"),
+            "123456",
+        )
+        .await?;
+
+    let topic: DebateTopic = owner
+        .post(
+            "/api/debate/ops/topics",
+            &OpsCreateDebateTopicInput {
+                title: "平局投票是否应该开启二番战".to_string(),
+                description: "测试 draw vote 到 rematch 的完整闭环。".to_string(),
+                category: "game".to_string(),
+                stance_pro: "应该开启".to_string(),
+                stance_con: "不应开启".to_string(),
+                context_seed: Some("MVP draw vote signoff seed".to_string()),
+                is_active: true,
+            },
+            StatusCode::CREATED,
+        )
+        .await?;
+
+    let session: DebateSessionSummary = owner
+        .post(
+            "/api/debate/ops/sessions",
+            &OpsCreateDebateSessionInput {
+                topic_id: topic.id as u64,
+                status: Some("open".to_string()),
+                scheduled_start_at: "2099-02-01T00:00:00Z".parse()?,
+                end_at: "2099-02-01T01:00:00Z".parse()?,
+                max_participants_per_side: Some(500),
+            },
+            StatusCode::CREATED,
+        )
+        .await?;
+
+    let _: JoinDebateSessionOutput = owner
+        .post(
+            format!("/api/debate/sessions/{}/join", session.id).as_str(),
+            &serde_json::json!({ "side": "pro" }),
+            StatusCode::OK,
+        )
+        .await?;
+    let _: JoinDebateSessionOutput = user2
+        .post(
+            format!("/api/debate/sessions/{}/join", session.id).as_str(),
+            &serde_json::json!({ "side": "con" }),
+            StatusCode::OK,
+        )
+        .await?;
+    let _: JoinDebateSessionOutput = user3
+        .post(
+            format!("/api/debate/sessions/{}/join", session.id).as_str(),
+            &serde_json::json!({ "side": "con" }),
+            StatusCode::OK,
+        )
+        .await?;
+
+    let _: DebateMessage = owner
+        .post(
+            format!("/api/debate/sessions/{}/messages", session.id).as_str(),
+            &CreateDebateMessageInput {
+                content: "这条消息用于触发判决流程。".to_string(),
+            },
+            StatusCode::CREATED,
+        )
+        .await?;
+
+    let _: DebateSessionSummary = owner
+        .put(
+            format!("/api/debate/ops/sessions/{}", session.id).as_str(),
+            &OpsUpdateDebateSessionInput {
+                status: Some("closed".to_string()),
+                scheduled_start_at: None,
+                end_at: None,
+                max_participants_per_side: None,
+            },
+            StatusCode::OK,
+        )
+        .await?;
+
+    let job: RequestJudgeJobOutput = owner
+        .post(
+            format!("/api/debate/sessions/{}/judge/jobs", session.id).as_str(),
+            &RequestJudgeJobInput {
+                style_mode: None,
+                allow_rejudge: false,
+            },
+            StatusCode::ACCEPTED,
+        )
+        .await?;
+    assert_eq!(job.status, "running");
+
+    let _ = state
+        .submit_judge_report(
+            job.job_id,
+            SubmitJudgeReportInput {
+                winner: "pro".to_string(),
+                pro_score: 82,
+                con_score: 82,
+                logic_pro: 82,
+                logic_con: 82,
+                evidence_pro: 82,
+                evidence_con: 82,
+                rebuttal_pro: 82,
+                rebuttal_con: 82,
+                clarity_pro: 82,
+                clarity_con: 82,
+                pro_summary: "双方表现接近。".to_string(),
+                con_summary: "双方表现接近。".to_string(),
+                rationale: "触发平局投票流程验证。".to_string(),
+                style_mode: Some("rational".to_string()),
+                needs_draw_vote: true,
+                rejudge_triggered: false,
+                payload: serde_json::json!({"source":"mvp-draw-signoff-test"}),
+                winner_first: Some("pro".to_string()),
+                winner_second: Some("pro".to_string()),
+                stage_summaries: vec![],
+            },
+        )
+        .await?;
+
+    let vote_before: GetDrawVoteOutput = owner
+        .get(
+            format!("/api/debate/sessions/{}/draw-vote", session.id).as_str(),
+            StatusCode::OK,
+        )
+        .await?;
+    assert_eq!(vote_before.status, "open");
+    let vote_detail_before = vote_before.vote.expect("draw vote should exist");
+    assert_eq!(vote_detail_before.eligible_voters, 3);
+    assert_eq!(vote_detail_before.required_voters, 3);
+
+    let _: SubmitDrawVoteOutput = owner
+        .post(
+            format!("/api/debate/sessions/{}/draw-vote/ballots", session.id).as_str(),
+            &SubmitDrawVoteInput { agree_draw: false },
+            StatusCode::OK,
+        )
+        .await?;
+    let _: SubmitDrawVoteOutput = user2
+        .post(
+            format!("/api/debate/sessions/{}/draw-vote/ballots", session.id).as_str(),
+            &SubmitDrawVoteInput { agree_draw: false },
+            StatusCode::OK,
+        )
+        .await?;
+    let final_vote_submit: SubmitDrawVoteOutput = user3
+        .post(
+            format!("/api/debate/sessions/{}/draw-vote/ballots", session.id).as_str(),
+            &SubmitDrawVoteInput { agree_draw: true },
+            StatusCode::OK,
+        )
+        .await?;
+    assert_eq!(final_vote_submit.status, "decided");
+    assert_eq!(final_vote_submit.vote.resolution, "open_rematch");
+    assert_eq!(final_vote_submit.vote.agree_votes, 1);
+    assert_eq!(final_vote_submit.vote.disagree_votes, 2);
+    let rematch_session_id = final_vote_submit
+        .vote
+        .rematch_session_id
+        .expect("open_rematch should create rematch session");
+
+    let vote_after: GetDrawVoteOutput = owner
+        .get(
+            format!("/api/debate/sessions/{}/draw-vote", session.id).as_str(),
+            StatusCode::OK,
+        )
+        .await?;
+    assert_eq!(vote_after.status, "decided");
+    let vote_detail_after = vote_after.vote.expect("draw vote should still exist");
+    assert_eq!(vote_detail_after.resolution, "open_rematch");
+    assert_eq!(
+        vote_detail_after.rematch_session_id,
+        Some(rematch_session_id)
+    );
+
+    let sessions_after: Vec<DebateSessionSummary> = owner
+        .get(
+            format!("/api/debate/sessions?topicId={}&limit=200", topic.id).as_str(),
+            StatusCode::OK,
+        )
+        .await?;
+    let rematch = sessions_after
+        .iter()
+        .find(|item| item.id as u64 == rematch_session_id)
+        .expect("rematch session should be queryable via sessions API");
+    assert_eq!(rematch.status, "scheduled");
 
     Ok(())
 }
