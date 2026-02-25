@@ -85,7 +85,60 @@
             </div>
             <div class="text-gray-700">style: {{ judgeReport.styleMode }} · reportId: {{ judgeReport.reportId }}</div>
             <div v-if="judgeReport.needsDrawVote" class="text-amber-700">
-              当前判决需要平局投票，请进入判决详情页处理投票。
+              当前判决需要平局投票，可在下方直接投票，或进入判决详情页查看完整信息。
+            </div>
+          </div>
+
+          <div v-if="showDrawVoteCard" class="border rounded p-3 bg-amber-50 text-sm space-y-2">
+            <div class="flex items-center justify-between gap-2">
+              <div class="font-semibold text-amber-900">平局投票</div>
+              <button
+                @click="refreshDrawVote"
+                :disabled="drawVoteLoading || voteSubmitting"
+                class="px-2 py-1 text-xs rounded border bg-white hover:bg-gray-100 disabled:opacity-50"
+              >
+                {{ drawVoteLoading ? '刷新中...' : '刷新投票状态' }}
+              </button>
+            </div>
+
+            <div v-if="!drawVote" class="text-xs text-gray-700">
+              当前没有可用的平局投票信息。
+            </div>
+
+            <template v-else>
+              <div class="grid grid-cols-2 md:grid-cols-4 gap-2 text-xs text-gray-700">
+                <div>状态：<span :class="drawVoteStatusClass">{{ drawVoteStatus }}</span></div>
+                <div>参与/门槛：{{ drawVote.participatedVoters }} / {{ drawVote.requiredVoters }}</div>
+                <div>同意/不同意：{{ drawVote.agreeVotes }} / {{ drawVote.disagreeVotes }}</div>
+                <div>我的投票：{{ drawVoteChoiceText(drawVote.myVote) }}</div>
+              </div>
+              <div class="text-xs text-gray-700">
+                投票截止：{{ formatDateTime(drawVote.votingEndsAt) }}
+              </div>
+              <div v-if="canSubmitDrawVote" class="flex flex-wrap gap-2">
+                <button
+                  @click="submitDrawVote(true)"
+                  :disabled="voteSubmitting"
+                  class="px-3 py-1.5 text-xs rounded bg-green-600 text-white disabled:opacity-50"
+                >
+                  {{ voteSubmitting ? '提交中...' : '同意平局（不二番战）' }}
+                </button>
+                <button
+                  @click="submitDrawVote(false)"
+                  :disabled="voteSubmitting"
+                  class="px-3 py-1.5 text-xs rounded bg-orange-600 text-white disabled:opacity-50"
+                >
+                  {{ voteSubmitting ? '提交中...' : '不同意平局（开启二番战）' }}
+                </button>
+              </div>
+              <div v-else class="text-xs text-gray-700">
+                {{ drawVoteResolutionText(drawVote.resolution) }}
+                <span v-if="drawVote.rematchSessionId">，二番战 session: {{ drawVote.rematchSessionId }}</span>
+              </div>
+            </template>
+
+            <div v-if="drawVoteErrorText" class="text-xs text-red-700">
+              {{ drawVoteErrorText }}
             </div>
           </div>
 
@@ -192,8 +245,14 @@
 import Sidebar from '../components/Sidebar.vue';
 import { getNotifyBase } from '../utils';
 import {
+  drawVoteChoiceText as drawVoteChoiceTextLabel,
+  drawVoteResolutionText as drawVoteResolutionTextLabel,
+} from '../judge-report-utils';
+import {
   buildDebateRoomWsUrl,
+  canSubmitDrawVote as canSubmitDrawVoteNow,
   extractDebateRoomEvent,
+  normalizeDrawVoteStatus,
   normalizeJudgeReportStatus,
   parseDebateRoomWsMessage,
   shouldPollJudgeReportStatus,
@@ -239,6 +298,10 @@ export default {
       judgeRequesting: false,
       judgeErrorText: '',
       judgeResult: null,
+      drawVoteData: null,
+      drawVoteLoading: false,
+      voteSubmitting: false,
+      drawVoteErrorText: '',
       allowRejudge: false,
       judgePollTimer: null,
       destroyed: false,
@@ -256,6 +319,30 @@ export default {
     },
     judgeReport() {
       return this.judgeResult?.report || null;
+    },
+    drawVote() {
+      return this.drawVoteData?.vote || null;
+    },
+    drawVoteStatus() {
+      return normalizeDrawVoteStatus(this.drawVote?.status);
+    },
+    drawVoteStatusClass() {
+      if (this.drawVoteStatus === 'open') {
+        return 'text-amber-700';
+      }
+      if (this.drawVoteStatus === 'decided') {
+        return 'text-green-700';
+      }
+      if (this.drawVoteStatus === 'expired') {
+        return 'text-gray-700';
+      }
+      return 'text-gray-700';
+    },
+    showDrawVoteCard() {
+      return !!(this.judgeReport?.needsDrawVote || this.drawVote);
+    },
+    canSubmitDrawVote() {
+      return canSubmitDrawVoteNow(this.drawVote) && !this.voteSubmitting;
     },
     judgeStatusClass() {
       if (this.judgeStatus === 'ready') {
@@ -284,6 +371,12 @@ export default {
       }
       const date = new Date(value);
       return Number.isNaN(date.getTime()) ? '-' : date.toLocaleString();
+    },
+    drawVoteChoiceText(myVote) {
+      return drawVoteChoiceTextLabel(myVote);
+    },
+    drawVoteResolutionText(resolution) {
+      return drawVoteResolutionTextLabel(resolution);
     },
     isOwnMessage(message) {
       return Number(message.userId) === Number(this.userId);
@@ -347,6 +440,7 @@ export default {
       }
       if (event === 'DebateJudgeReportReady' || event === 'DebateDrawVoteResolved') {
         this.refreshJudgeReport({ silent: true });
+        this.refreshDrawVote({ silent: true });
       }
     },
     clearJudgePollTimer() {
@@ -380,6 +474,9 @@ export default {
           stageOffset: 0,
         });
         this.judgeResult = payload || null;
+        if (normalizeJudgeReportStatus(payload?.status) === 'ready' || this.drawVoteData?.vote) {
+          this.refreshDrawVote({ silent: true });
+        }
         if (shouldPollJudgeReportStatus(payload?.status)) {
           this.scheduleJudgePoll(8000);
         } else {
@@ -394,6 +491,52 @@ export default {
         if (!silent) {
           this.judgeLoading = false;
         }
+      }
+    },
+    async refreshDrawVote({ silent = false } = {}) {
+      if (!this.sessionId) {
+        return;
+      }
+      if (!silent) {
+        this.drawVoteLoading = true;
+      }
+      this.drawVoteErrorText = '';
+      try {
+        const payload = await this.$store.dispatch('fetchDrawVoteStatus', {
+          sessionId: this.sessionId,
+        });
+        this.drawVoteData = payload || null;
+      } catch (error) {
+        if (!silent) {
+          this.drawVoteErrorText = error?.response?.data?.error || error?.message || '刷新投票状态失败';
+        }
+      } finally {
+        if (!silent) {
+          this.drawVoteLoading = false;
+        }
+      }
+    },
+    async submitDrawVote(agreeDraw) {
+      if (!this.canSubmitDrawVote) {
+        return;
+      }
+      this.voteSubmitting = true;
+      this.drawVoteErrorText = '';
+      try {
+        const payload = await this.$store.dispatch('submitDrawVote', {
+          sessionId: this.sessionId,
+          agreeDraw,
+        });
+        this.drawVoteData = {
+          sessionId: payload.sessionId,
+          status: payload.status,
+          vote: payload.vote,
+        };
+        await this.refreshJudgeReport({ silent: true });
+      } catch (error) {
+        this.drawVoteErrorText = error?.response?.data?.error || error?.message || '提交投票失败';
+      } finally {
+        this.voteSubmitting = false;
       }
     },
     async requestJudgeJob() {

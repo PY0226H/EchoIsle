@@ -1,5 +1,6 @@
 const DEFAULT_NOTIFY_BASE = 'http://localhost:6687/events';
 const KNOWN_JUDGE_REPORT_STATUS = new Set(['ready', 'pending', 'failed', 'absent']);
+const KNOWN_DRAW_VOTE_STATUS = new Set(['open', 'decided', 'expired', 'absent']);
 
 function toWsProtocol(protocol) {
   if (protocol === 'https:') {
@@ -88,4 +89,26 @@ export function normalizeJudgeReportStatus(status) {
 
 export function shouldPollJudgeReportStatus(status) {
   return normalizeJudgeReportStatus(status) === 'pending';
+}
+
+export function normalizeDrawVoteStatus(status) {
+  const normalized = String(status || '').trim().toLowerCase();
+  if (!KNOWN_DRAW_VOTE_STATUS.has(normalized)) {
+    return 'absent';
+  }
+  return normalized;
+}
+
+export function canSubmitDrawVote(vote, nowMs = Date.now()) {
+  if (!vote) {
+    return false;
+  }
+  if (normalizeDrawVoteStatus(vote.status) !== 'open') {
+    return false;
+  }
+  const endsAtMs = new Date(vote.votingEndsAt || '').getTime();
+  if (!Number.isFinite(endsAtMs)) {
+    return true;
+  }
+  return nowMs < endsAtMs;
 }

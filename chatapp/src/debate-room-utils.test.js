@@ -1,7 +1,9 @@
 import assert from 'node:assert/strict';
 import {
   buildDebateRoomWsUrl,
+  canSubmitDrawVote,
   extractDebateRoomEvent,
+  normalizeDrawVoteStatus,
   normalizeJudgeReportStatus,
   parseDebateRoomWsMessage,
   shouldPollJudgeReportStatus,
@@ -61,3 +63,16 @@ assert.equal(normalizeJudgeReportStatus('unknown-status'), 'absent');
 assert.equal(normalizeJudgeReportStatus(null), 'absent');
 assert.equal(shouldPollJudgeReportStatus('pending'), true);
 assert.equal(shouldPollJudgeReportStatus('ready'), false);
+
+assert.equal(normalizeDrawVoteStatus('open'), 'open');
+assert.equal(normalizeDrawVoteStatus('DECIDED'), 'decided');
+assert.equal(normalizeDrawVoteStatus('invalid'), 'absent');
+assert.equal(
+  canSubmitDrawVote({ status: 'open', votingEndsAt: '2026-02-26T00:00:00Z' }, Date.parse('2026-02-25T00:00:00Z')),
+  true,
+);
+assert.equal(
+  canSubmitDrawVote({ status: 'open', votingEndsAt: '2026-02-24T00:00:00Z' }, Date.parse('2026-02-25T00:00:00Z')),
+  false,
+);
+assert.equal(canSubmitDrawVote({ status: 'decided' }), false);
