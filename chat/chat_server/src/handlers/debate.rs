@@ -246,3 +246,117 @@ pub(crate) async fn submit_draw_vote_handler(
     let ret = state.submit_draw_vote(id, &user, input).await?;
     Ok((StatusCode::OK, Json(ret)))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use anyhow::Result;
+    use chrono::{Duration, Utc};
+    use http_body_util::BodyExt;
+    use std::sync::Arc;
+
+    async fn seed_topic_and_session(state: &AppState, ws_id: i64, status: &str) -> Result<i64> {
+        let topic_id: (i64,) = sqlx::query_as(
+            r#"
+            INSERT INTO debate_topics(ws_id, title, description, category, stance_pro, stance_con, is_active, created_by)
+            VALUES ($1, 'topic-handler', 'desc', 'game', 'pro', 'con', true, 1)
+            RETURNING id
+            "#,
+        )
+        .bind(ws_id)
+        .fetch_one(&state.pool)
+        .await?;
+
+        let now = Utc::now();
+        let session_id: (i64,) = sqlx::query_as(
+            r#"
+            INSERT INTO debate_sessions(
+                ws_id, topic_id, status, scheduled_start_at, actual_start_at, end_at, max_participants_per_side
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, 500)
+            RETURNING id
+            "#,
+        )
+        .bind(ws_id)
+        .bind(topic_id.0)
+        .bind(status)
+        .bind(now - Duration::minutes(20))
+        .bind(now - Duration::minutes(15))
+        .bind(now - Duration::minutes(1))
+        .fetch_one(&state.pool)
+        .await?;
+
+        Ok(session_id.0)
+    }
+
+    async fn join_user_to_session(state: &AppState, session_id: i64, user_id: i64) -> Result<()> {
+        sqlx::query(
+            r#"
+            INSERT INTO session_participants(session_id, user_id, side)
+            VALUES ($1, $2, 'pro')
+            "#,
+        )
+        .bind(session_id)
+        .bind(user_id)
+        .execute(&state.pool)
+        .await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn request_judge_job_handler_should_return_style_mode_source() -> Result<()> {
+        let (_tdb, state) = AppState::new_for_test().await?;
+        let session_id = seed_topic_and_session(&state, 1, "judging").await?;
+        join_user_to_session(&state, session_id, 1).await?;
+        let user = state.find_user_by_id(1).await?.expect("user should exist");
+
+        let response = request_judge_job_handler(
+            Extension(user),
+            State(state),
+            Path(session_id as u64),
+            Json(RequestJudgeJobInput {
+                style_mode: Some("mixed".to_string()),
+                allow_rejudge: false,
+            }),
+        )
+        .await?
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+        let body = response.into_body().collect().await?.to_bytes();
+        let ret: serde_json::Value = serde_json::from_slice(&body)?;
+        assert_eq!(ret["styleMode"], "rational");
+        assert_eq!(ret["styleModeSource"], "system_config");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn request_judge_job_handler_should_ignore_request_style_mode() -> Result<()> {
+        let (_tdb, mut state) = AppState::new_for_test().await?;
+        let inner = Arc::get_mut(&mut state.inner).expect("state should be unique");
+        inner.config.ai_judge.style_mode = "entertaining".to_string();
+
+        let session_id = seed_topic_and_session(&state, 1, "closed").await?;
+        join_user_to_session(&state, session_id, 1).await?;
+        let user = state.find_user_by_id(1).await?.expect("user should exist");
+
+        let response = request_judge_job_handler(
+            Extension(user),
+            State(state),
+            Path(session_id as u64),
+            Json(RequestJudgeJobInput {
+                style_mode: Some("rational".to_string()),
+                allow_rejudge: false,
+            }),
+        )
+        .await?
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+        let body = response.into_body().collect().await?.to_bytes();
+        let ret: serde_json::Value = serde_json::from_slice(&body)?;
+        assert_eq!(ret["styleMode"], "entertaining");
+        assert_eq!(ret["styleModeSource"], "system_config");
+        Ok(())
+    }
+}
