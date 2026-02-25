@@ -35,6 +35,66 @@
         {{ errorText }}
       </div>
 
+      <div class="px-5 pt-4">
+        <div class="bg-white border rounded-lg p-4 space-y-3">
+          <div class="flex items-start justify-between gap-3">
+            <div>
+              <div class="text-xs uppercase text-gray-500">AI Judge</div>
+              <div class="text-sm text-gray-700">
+                status:
+                <span class="font-semibold" :class="judgeStatusClass">{{ judgeStatus }}</span>
+              </div>
+            </div>
+            <div class="flex gap-2">
+              <button
+                @click="refreshJudgeReport"
+                :disabled="judgeLoading"
+                class="px-3 py-1.5 text-xs rounded border bg-white hover:bg-gray-100 disabled:opacity-50"
+              >
+                {{ judgeLoading ? '刷新中...' : '刷新状态' }}
+              </button>
+              <button
+                @click="requestJudgeJob"
+                :disabled="judgeRequesting"
+                class="px-3 py-1.5 text-xs rounded bg-purple-600 text-white disabled:opacity-50"
+              >
+                {{ judgeRequesting ? '请求中...' : '发起 AI 判决' }}
+              </button>
+              <button
+                @click="openJudgeReportPage"
+                class="px-3 py-1.5 text-xs rounded border bg-white hover:bg-gray-100"
+              >
+                打开判决详情页
+              </button>
+            </div>
+          </div>
+
+          <label class="inline-flex items-center gap-2 text-xs text-gray-700">
+            <input v-model="allowRejudge" type="checkbox" class="rounded border-gray-300" />
+            允许重判（allowRejudge）
+          </label>
+
+          <div v-if="judgeLatestJob" class="text-xs text-gray-600">
+            latest job: #{{ judgeLatestJob.jobId }} · {{ judgeLatestJob.status }} ·
+            {{ formatDateTime(judgeLatestJob.requestedAt) }}
+          </div>
+
+          <div v-if="judgeReport" class="border rounded p-3 bg-gray-50 text-sm space-y-1">
+            <div class="font-semibold text-gray-900">
+              最新结果：{{ judgeReport.winner }}（Pro {{ judgeReport.proScore }} / Con {{ judgeReport.conScore }}）
+            </div>
+            <div class="text-gray-700">style: {{ judgeReport.styleMode }} · reportId: {{ judgeReport.reportId }}</div>
+            <div v-if="judgeReport.needsDrawVote" class="text-amber-700">
+              当前判决需要平局投票，请进入判决详情页处理投票。
+            </div>
+          </div>
+
+          <div v-if="judgeErrorText" class="text-xs text-red-700">
+            {{ judgeErrorText }}
+          </div>
+        </div>
+      </div>
+
       <div class="px-5 py-3">
         <div class="text-xs uppercase text-gray-500 mb-2">置顶消息</div>
         <div v-if="pins.length === 0" class="text-sm text-gray-500 bg-white rounded border p-3">
@@ -134,7 +194,9 @@ import { getNotifyBase } from '../utils';
 import {
   buildDebateRoomWsUrl,
   extractDebateRoomEvent,
+  normalizeJudgeReportStatus,
   parseDebateRoomWsMessage,
+  shouldPollJudgeReportStatus,
 } from '../debate-room-utils';
 
 function normalizeMessage(raw) {
@@ -173,12 +235,39 @@ export default {
       ws: null,
       wsConnected: false,
       wsReconnectTimer: null,
+      judgeLoading: false,
+      judgeRequesting: false,
+      judgeErrorText: '',
+      judgeResult: null,
+      allowRejudge: false,
+      judgePollTimer: null,
       destroyed: false,
     };
   },
   computed: {
     userId() {
       return this.$store.state.user?.id || null;
+    },
+    judgeStatus() {
+      return normalizeJudgeReportStatus(this.judgeResult?.status);
+    },
+    judgeLatestJob() {
+      return this.judgeResult?.latestJob || null;
+    },
+    judgeReport() {
+      return this.judgeResult?.report || null;
+    },
+    judgeStatusClass() {
+      if (this.judgeStatus === 'ready') {
+        return 'text-green-700';
+      }
+      if (this.judgeStatus === 'pending') {
+        return 'text-amber-700';
+      }
+      if (this.judgeStatus === 'failed') {
+        return 'text-red-700';
+      }
+      return 'text-gray-700';
     },
   },
   methods: {
@@ -254,7 +343,85 @@ export default {
       }
       if (event === 'DebateMessagePinned') {
         this.refreshPins();
+        return;
       }
+      if (event === 'DebateJudgeReportReady' || event === 'DebateDrawVoteResolved') {
+        this.refreshJudgeReport({ silent: true });
+      }
+    },
+    clearJudgePollTimer() {
+      if (this.judgePollTimer) {
+        clearTimeout(this.judgePollTimer);
+        this.judgePollTimer = null;
+      }
+    },
+    scheduleJudgePoll(delayMs = 8000) {
+      this.clearJudgePollTimer();
+      if (this.destroyed) {
+        return;
+      }
+      this.judgePollTimer = setTimeout(() => {
+        this.judgePollTimer = null;
+        this.refreshJudgeReport({ silent: true });
+      }, Math.max(1000, Number(delayMs) || 0));
+    },
+    async refreshJudgeReport({ silent = false } = {}) {
+      if (!this.sessionId) {
+        return;
+      }
+      if (!silent) {
+        this.judgeLoading = true;
+      }
+      this.judgeErrorText = '';
+      try {
+        const payload = await this.$store.dispatch('fetchJudgeReport', {
+          sessionId: this.sessionId,
+          maxStageCount: 1,
+          stageOffset: 0,
+        });
+        this.judgeResult = payload || null;
+        if (shouldPollJudgeReportStatus(payload?.status)) {
+          this.scheduleJudgePoll(8000);
+        } else {
+          this.clearJudgePollTimer();
+        }
+      } catch (error) {
+        if (!silent) {
+          this.judgeErrorText = error?.response?.data?.error || error?.message || '查询判决状态失败';
+        }
+        this.scheduleJudgePoll(10000);
+      } finally {
+        if (!silent) {
+          this.judgeLoading = false;
+        }
+      }
+    },
+    async requestJudgeJob() {
+      if (!this.sessionId) {
+        return;
+      }
+      this.judgeRequesting = true;
+      this.judgeErrorText = '';
+      try {
+        await this.$store.dispatch('requestJudgeJob', {
+          sessionId: this.sessionId,
+          allowRejudge: this.allowRejudge,
+        });
+        await this.refreshJudgeReport({ silent: true });
+      } catch (error) {
+        this.judgeErrorText = error?.response?.data?.error || error?.message || '发起判决失败';
+      } finally {
+        this.judgeRequesting = false;
+      }
+    },
+    async openJudgeReportPage() {
+      if (!this.sessionId) {
+        return;
+      }
+      await this.$router.push({
+        path: '/judge-report',
+        query: { sessionId: String(this.sessionId) },
+      });
     },
     clearWsReconnectTimer() {
       if (this.wsReconnectTimer) {
@@ -396,6 +563,7 @@ export default {
     try {
       this.parseSessionId();
       await this.refreshRoom();
+      await this.refreshJudgeReport({ silent: true });
       await this.connectRoomWs();
     } catch (error) {
       this.errorText = error?.message || '初始化失败';
@@ -403,6 +571,7 @@ export default {
   },
   beforeUnmount() {
     this.destroyed = true;
+    this.clearJudgePollTimer();
     this.disconnectWs();
   },
 };

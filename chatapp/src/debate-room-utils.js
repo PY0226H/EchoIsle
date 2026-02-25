@@ -1,4 +1,5 @@
 const DEFAULT_NOTIFY_BASE = 'http://localhost:6687/events';
+const KNOWN_JUDGE_REPORT_STATUS = new Set(['ready', 'pending', 'failed', 'absent']);
 
 function toWsProtocol(protocol) {
   if (protocol === 'https:') {
@@ -75,4 +76,16 @@ export function extractDebateRoomEvent(message, expectedEventName = '') {
     return null;
   }
   return payload;
+}
+
+export function normalizeJudgeReportStatus(status) {
+  const normalized = String(status || '').trim().toLowerCase();
+  if (!KNOWN_JUDGE_REPORT_STATUS.has(normalized)) {
+    return 'absent';
+  }
+  return normalized;
+}
+
+export function shouldPollJudgeReportStatus(status) {
+  return normalizeJudgeReportStatus(status) === 'pending';
 }

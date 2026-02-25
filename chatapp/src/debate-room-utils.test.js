@@ -2,7 +2,9 @@ import assert from 'node:assert/strict';
 import {
   buildDebateRoomWsUrl,
   extractDebateRoomEvent,
+  normalizeJudgeReportStatus,
   parseDebateRoomWsMessage,
+  shouldPollJudgeReportStatus,
 } from './debate-room-utils.js';
 
 const wsUrl = buildDebateRoomWsUrl({
@@ -52,3 +54,10 @@ assert.equal(extractDebateRoomEvent(roomEvent, 'DebateMessagePinned'), null);
 assert.equal(parseDebateRoomWsMessage('{'), null);
 assert.equal(parseDebateRoomWsMessage(''), null);
 assert.equal(parseDebateRoomWsMessage('[]'), null);
+
+assert.equal(normalizeJudgeReportStatus('ready'), 'ready');
+assert.equal(normalizeJudgeReportStatus('PENDING'), 'pending');
+assert.equal(normalizeJudgeReportStatus('unknown-status'), 'absent');
+assert.equal(normalizeJudgeReportStatus(null), 'absent');
+assert.equal(shouldPollJudgeReportStatus('pending'), true);
+assert.equal(shouldPollJudgeReportStatus('ready'), false);

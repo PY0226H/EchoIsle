@@ -482,6 +482,14 @@ export default {
       this.handleDrawVoteResolvedEvent(event);
     },
   },
+  async mounted() {
+    const sessionId = normalizeSessionId(this.$route?.query?.sessionId);
+    if (!sessionId) {
+      return;
+    }
+    this.sessionIdInput = String(sessionId);
+    await this.loadReport();
+  },
   beforeUnmount() {
     this.clearAutoRefreshTimer();
   },

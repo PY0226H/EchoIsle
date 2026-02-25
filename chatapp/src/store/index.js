@@ -358,6 +358,27 @@ export default createStore({
       );
       return response.data;
     },
+    async requestJudgeJob({ state }, { sessionId, allowRejudge = false, styleMode = null } = {}) {
+      if (!sessionId) {
+        throw new Error('sessionId is required');
+      }
+      const payload = {
+        allowRejudge: !!allowRejudge,
+      };
+      if (styleMode != null && String(styleMode).trim()) {
+        payload.styleMode = String(styleMode).trim();
+      }
+      const response = await network(
+        this,
+        'post',
+        `/debate/sessions/${sessionId}/judge/jobs`,
+        payload,
+        {
+          Authorization: `Bearer ${state.token}`,
+        },
+      );
+      return response.data;
+    },
     async listDebateTopics({ state }, payload = {}) {
       const suffix = buildQueryString({
         category: payload.category,
