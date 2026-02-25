@@ -141,6 +141,8 @@ pub(crate) async fn pin_debate_message_handler(
 }
 
 /// Request an AI judge job for a debate session.
+/// Note: `styleMode` in request body is kept for compatibility and no longer controls behavior.
+/// Effective style is decided by server-side `ai_judge.style_mode` config and returned in `styleModeSource`.
 #[utoipa::path(
     post,
     path = "/api/debate/sessions/{id}/judge/jobs",

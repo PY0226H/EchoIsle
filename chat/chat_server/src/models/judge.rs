@@ -11,6 +11,9 @@ use utoipa::ToSchema;
 const STYLE_RATIONAL: &str = "rational";
 const STYLE_ENTERTAINING: &str = "entertaining";
 const STYLE_MIXED: &str = "mixed";
+const STYLE_SOURCE_SYSTEM_CONFIG: &str = "system_config";
+const STYLE_SOURCE_SYSTEM_CONFIG_FALLBACK_DEFAULT: &str = "system_config_fallback_default";
+const STYLE_SOURCE_EXISTING_RUNNING_JOB: &str = "existing_running_job";
 const DRAW_VOTE_THRESHOLD_PERCENT: i32 = 70;
 const DRAW_VOTE_WINDOW_SECS: i64 = 300;
 const REMATCH_DELAY_SECS: i64 = 600;
@@ -20,6 +23,8 @@ const REMATCH_MAX_DURATION_SECS: i64 = 14_400;
 #[derive(Debug, Clone, ToSchema, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RequestJudgeJobInput {
+    /// Deprecated for decision making. Server keeps this for compatibility but now enforces
+    /// `ai_judge.style_mode` from system config.
     pub style_mode: Option<String>,
     #[serde(default)]
     pub allow_rejudge: bool,
@@ -32,6 +37,7 @@ pub struct RequestJudgeJobOutput {
     pub job_id: u64,
     pub status: String,
     pub style_mode: String,
+    pub style_mode_source: String,
     pub rejudge_triggered: bool,
     pub requested_at: DateTime<Utc>,
     pub newly_created: bool,
@@ -407,16 +413,20 @@ impl AppState {
         input: RequestJudgeJobInput,
     ) -> Result<RequestJudgeJobOutput, AppError> {
         let configured_style_mode = self.config.ai_judge.style_mode.clone();
-        let style_mode = match normalize_style_mode(Some(configured_style_mode.clone())) {
-            Ok(mode) => mode,
-            Err(_) => {
-                warn!(
-                    configured_style_mode,
-                    "invalid ai_judge.style_mode config, fallback to rational"
-                );
-                STYLE_RATIONAL.to_string()
-            }
-        };
+        let (style_mode, style_mode_source) =
+            match normalize_style_mode(Some(configured_style_mode.clone())) {
+                Ok(mode) => (mode, STYLE_SOURCE_SYSTEM_CONFIG),
+                Err(_) => {
+                    warn!(
+                        configured_style_mode,
+                        "invalid ai_judge.style_mode config, fallback to rational"
+                    );
+                    (
+                        STYLE_RATIONAL.to_string(),
+                        STYLE_SOURCE_SYSTEM_CONFIG_FALLBACK_DEFAULT,
+                    )
+                }
+            };
         let mut tx = self.pool.begin().await?;
 
         let Some(session): Option<DebateSessionForJudge> = sqlx::query_as(
@@ -486,6 +496,7 @@ impl AppState {
                 job_id: job.id as u64,
                 status: job.status,
                 style_mode: job.style_mode,
+                style_mode_source: STYLE_SOURCE_EXISTING_RUNNING_JOB.to_string(),
                 rejudge_triggered: job.rejudge_triggered,
                 requested_at: job.requested_at,
                 newly_created: false,
@@ -559,6 +570,7 @@ impl AppState {
             job_id: job.id as u64,
             status: job.status,
             style_mode: job.style_mode,
+            style_mode_source: style_mode_source.to_string(),
             rejudge_triggered: job.rejudge_triggered,
             requested_at: job.requested_at,
             newly_created: true,
@@ -1466,6 +1478,7 @@ mod tests {
 
         assert!(ret.newly_created);
         assert_eq!(ret.style_mode, "rational");
+        assert_eq!(ret.style_mode_source, "system_config");
         assert_eq!(ret.status, "running");
         Ok(())
     }
@@ -1501,6 +1514,10 @@ mod tests {
         assert!(first.newly_created);
         assert!(!second.newly_created);
         assert_eq!(first.job_id, second.job_id);
+        assert_eq!(first.style_mode, "rational");
+        assert_eq!(first.style_mode_source, "system_config");
+        assert_eq!(second.style_mode, "rational");
+        assert_eq!(second.style_mode_source, "existing_running_job");
         Ok(())
     }
 
@@ -1527,6 +1544,7 @@ mod tests {
             .await?;
 
         assert_eq!(ret.style_mode, "entertaining");
+        assert_eq!(ret.style_mode_source, "system_config");
         Ok(())
     }
 
@@ -1553,6 +1571,7 @@ mod tests {
             .await?;
 
         assert_eq!(ret.style_mode, "rational");
+        assert_eq!(ret.style_mode_source, "system_config_fallback_default");
         Ok(())
     }
 
