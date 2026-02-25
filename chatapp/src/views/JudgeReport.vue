@@ -30,6 +30,33 @@
           {{ errorText }}
         </div>
 
+        <div class="bg-white rounded-lg border p-4">
+          <div class="text-xs uppercase text-gray-500 mb-2">Realtime Refresh</div>
+          <div class="grid grid-cols-2 md:grid-cols-4 gap-3 text-sm">
+            <div>
+              <div class="text-xs uppercase text-gray-500">Events</div>
+              <div class="font-semibold text-gray-900">{{ realtimeStats.receivedEvents }}</div>
+            </div>
+            <div>
+              <div class="text-xs uppercase text-gray-500">Success</div>
+              <div class="font-semibold text-green-700">{{ realtimeStats.refreshSuccess }}</div>
+            </div>
+            <div>
+              <div class="text-xs uppercase text-gray-500">Failure</div>
+              <div class="font-semibold text-red-700">{{ realtimeStats.refreshFailure }}</div>
+            </div>
+            <div>
+              <div class="text-xs uppercase text-gray-500">Retry</div>
+              <div class="font-semibold text-amber-700">{{ realtimeStats.retryTriggered }}</div>
+            </div>
+          </div>
+          <div class="text-xs text-gray-500 mt-2">
+            lastEvent: {{ realtimeStats.lastEventType || '-' }} |
+            lastRefreshAt: {{ formatDateTime(realtimeStats.lastRefreshAt) }} |
+            lastError: {{ realtimeStats.lastError || '-' }}
+          </div>
+        </div>
+
         <div v-if="reportData" class="space-y-4">
           <div class="bg-white rounded-lg border p-4">
             <div class="flex items-center justify-between">
@@ -219,6 +246,11 @@ import {
   mergeJudgeReportWindow,
   normalizeSessionId,
 } from '../judge-report-utils';
+import {
+  AUTO_REFRESH_MAX_ATTEMPTS,
+  calcAutoRefreshDelayMs,
+  shouldRetryAutoRefresh,
+} from '../realtime-refresh-utils';
 
 export default {
   components: {
@@ -236,6 +268,15 @@ export default {
       autoRefreshBusy: false,
       errorText: '',
       windowSize: 3,
+      realtimeStats: {
+        receivedEvents: 0,
+        refreshSuccess: 0,
+        refreshFailure: 0,
+        retryTriggered: 0,
+        lastEventType: '',
+        lastRefreshAt: null,
+        lastError: '',
+      },
     };
   },
   computed: {
@@ -300,6 +341,17 @@ export default {
     errorMessage(err) {
       return err?.response?.data?.error || err?.message || '请求失败';
     },
+    wait(ms) {
+      return new Promise((resolve) => {
+        setTimeout(resolve, Math.max(0, Number(ms) || 0));
+      });
+    },
+    patchRealtimeStats(delta) {
+      this.realtimeStats = {
+        ...this.realtimeStats,
+        ...delta,
+      };
+    },
     currentSessionId() {
       if (this.reportData?.sessionId) {
         return Number(this.reportData.sessionId);
@@ -324,7 +376,7 @@ export default {
         }
       }
     },
-    async fetchReportForSession(sessionId, { silent = false } = {}) {
+    async fetchReportForSession(sessionId, { silent = false, throwOnError = false } = {}) {
       if (!silent) {
         this.loading = true;
         this.errorText = '';
@@ -345,6 +397,9 @@ export default {
         }
       } catch (err) {
         if (silent) {
+          if (throwOnError) {
+            throw err;
+          }
           console.warn('silent judge report refresh failed:', err);
         } else {
           this.errorText = this.errorMessage(err);
@@ -355,13 +410,46 @@ export default {
         }
       }
     },
-    async reloadFromRealtimeEvent(sessionId) {
+    async runAutoRefreshWithRetry(sessionId, sourceEventType) {
+      let lastErr = null;
+      for (let attempt = 1; attempt <= AUTO_REFRESH_MAX_ATTEMPTS; attempt += 1) {
+        const delayMs = calcAutoRefreshDelayMs(attempt);
+        if (delayMs > 0) {
+          this.patchRealtimeStats({
+            retryTriggered: this.realtimeStats.retryTriggered + 1,
+          });
+          await this.wait(delayMs);
+        }
+        try {
+          await this.fetchReportForSession(sessionId, { silent: true, throwOnError: true });
+          this.patchRealtimeStats({
+            refreshSuccess: this.realtimeStats.refreshSuccess + 1,
+            lastRefreshAt: Date.now(),
+            lastError: '',
+            lastEventType: sourceEventType,
+          });
+          return;
+        } catch (err) {
+          lastErr = err;
+          if (attempt >= AUTO_REFRESH_MAX_ATTEMPTS || !shouldRetryAutoRefresh(err)) {
+            break;
+          }
+        }
+      }
+      this.patchRealtimeStats({
+        refreshFailure: this.realtimeStats.refreshFailure + 1,
+        lastRefreshAt: Date.now(),
+        lastEventType: sourceEventType,
+        lastError: this.errorMessage(lastErr),
+      });
+    },
+    async reloadFromRealtimeEvent(sessionId, sourceEventType) {
       if (this.autoRefreshBusy || this.loading || this.loadingMore || this.voteSubmitting) {
         return;
       }
       this.autoRefreshBusy = true;
       try {
-        await this.fetchReportForSession(sessionId, { silent: true });
+        await this.runAutoRefreshWithRetry(sessionId, sourceEventType);
       } finally {
         this.autoRefreshBusy = false;
       }
@@ -371,14 +459,22 @@ export default {
         return;
       }
       const sessionId = Number(event.sessionId);
-      this.reloadFromRealtimeEvent(sessionId);
+      this.patchRealtimeStats({
+        receivedEvents: this.realtimeStats.receivedEvents + 1,
+        lastEventType: 'DebateJudgeReportReady',
+      });
+      this.reloadFromRealtimeEvent(sessionId, 'DebateJudgeReportReady');
     },
     handleDrawVoteResolvedEvent(event) {
       if (!this.shouldHandleSessionEvent(event)) {
         return;
       }
       const sessionId = Number(event.sessionId);
-      this.reloadFromRealtimeEvent(sessionId);
+      this.patchRealtimeStats({
+        receivedEvents: this.realtimeStats.receivedEvents + 1,
+        lastEventType: 'DebateDrawVoteResolved',
+      });
+      this.reloadFromRealtimeEvent(sessionId, 'DebateDrawVoteResolved');
     },
     async submitVote(agreeDraw) {
       if (!this.canSubmitVote) return;
