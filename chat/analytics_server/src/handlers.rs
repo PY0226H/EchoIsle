@@ -14,6 +14,8 @@ use serde::{Deserialize, Serialize};
 use tracing::info;
 use utoipa::{IntoParams, ToSchema};
 
+const SUMMARY_CACHE_TTL_MS: i64 = 5_000;
+
 /// Update the agent by id.
 #[utoipa::path(
     post,
@@ -87,6 +89,21 @@ fn normalize_limit(v: Option<u32>) -> u32 {
     v.unwrap_or(20).clamp(1, 200)
 }
 
+fn build_summary_cache_key(hours: u32, limit: u32, debate_session_id: Option<u64>) -> String {
+    match debate_session_id {
+        Some(session_id) => format!("h={hours}|l={limit}|sid={session_id}"),
+        None => format!("h={hours}|l={limit}|sid=*"),
+    }
+}
+
+fn is_cache_fresh(cached_at_ms: i64, now_ms: i64, ttl_ms: i64) -> bool {
+    if ttl_ms <= 0 {
+        return false;
+    }
+    let age_ms = now_ms.saturating_sub(cached_at_ms);
+    age_ms >= 0 && age_ms <= ttl_ms
+}
+
 /// Query aggregated quality metrics for judge realtime refresh pipeline.
 #[utoipa::path(
     get,
@@ -109,6 +126,14 @@ pub(crate) async fn get_judge_refresh_summary_handler(
     let hours = normalize_hours(input.hours);
     let limit = normalize_limit(input.limit);
     let session_filter = input.debate_session_id.map(|v| v.to_string());
+    let cache_key = build_summary_cache_key(hours, limit, input.debate_session_id);
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    if let Some(entry) = state.judge_refresh_summary_cache.get(&cache_key) {
+        let (cached_at_ms, payload) = entry.value();
+        if is_cache_fresh(*cached_at_ms, now_ms, SUMMARY_CACHE_TTL_MS) {
+            return Ok(Json(payload.clone()));
+        }
+    }
 
     let mut sql = format!(
         r#"
@@ -154,11 +179,15 @@ LIMIT {}
         rows.push(row);
     }
 
-    Ok(Json(GetJudgeRefreshSummaryOutput {
+    let output = GetJudgeRefreshSummaryOutput {
         window_hours: hours,
         limit,
         rows,
-    }))
+    };
+    state
+        .judge_refresh_summary_cache
+        .insert(cache_key, (now_ms, output.clone()));
+    Ok(Json(output))
 }
 
 #[cfg(test)]
@@ -179,5 +208,26 @@ mod tests {
         assert_eq!(normalize_limit(Some(0)), 1);
         assert_eq!(normalize_limit(Some(1)), 1);
         assert_eq!(normalize_limit(Some(999)), 200);
+    }
+
+    #[test]
+    fn build_summary_cache_key_should_include_dimensions() {
+        assert_eq!(
+            build_summary_cache_key(24, 20, None),
+            "h=24|l=20|sid=*".to_string()
+        );
+        assert_eq!(
+            build_summary_cache_key(24, 20, Some(42)),
+            "h=24|l=20|sid=42".to_string()
+        );
+    }
+
+    #[test]
+    fn is_cache_fresh_should_follow_ttl_boundary() {
+        assert!(!is_cache_fresh(1000, 2000, 0));
+        assert!(is_cache_fresh(1000, 1500, 500));
+        assert!(is_cache_fresh(1000, 1000, 500));
+        assert!(!is_cache_fresh(1000, 1501, 500));
+        assert!(!is_cache_fresh(2000, 1000, 500));
     }
 }

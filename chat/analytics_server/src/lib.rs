@@ -16,7 +16,9 @@ use chat_core::{
     DecodingKey, User,
 };
 use clickhouse::Client;
-use handlers::{create_event_handler, get_judge_refresh_summary_handler};
+use handlers::{
+    create_event_handler, get_judge_refresh_summary_handler, GetJudgeRefreshSummaryOutput,
+};
 use openapi::OpenApiRouter as _;
 use std::{fmt, ops::Deref, sync::Arc};
 use tokio::fs;
@@ -42,6 +44,8 @@ pub struct AppStateInner {
     pub(crate) dk: DecodingKey,
     pub(crate) client: Client,
     pub(crate) sessions: Arc<DashMap<String, (String, i64)>>,
+    pub(crate) judge_refresh_summary_cache:
+        Arc<DashMap<String, (i64, GetJudgeRefreshSummaryOutput)>>,
 }
 
 pub async fn get_router(state: AppState) -> Result<Router, AppError> {
@@ -107,12 +111,14 @@ impl AppState {
         }
         // TODO: load sessions from db
         let sessions = Arc::new(DashMap::new());
+        let judge_refresh_summary_cache = Arc::new(DashMap::new());
         Ok(Self {
             inner: Arc::new(AppStateInner {
                 config,
                 dk,
                 client,
                 sessions,
+                judge_refresh_summary_cache,
             }),
         })
     }
