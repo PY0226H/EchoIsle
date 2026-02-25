@@ -20,6 +20,7 @@ const REMATCH_DELAY_SECS: i64 = 600;
 const REMATCH_MIN_DURATION_SECS: i64 = 900;
 const REMATCH_MAX_DURATION_SECS: i64 = 14_400;
 const MAX_STAGE_SUMMARY_COUNT: u32 = 200;
+const MAX_STAGE_SUMMARY_OFFSET: u32 = 10_000;
 
 #[derive(Debug, Clone, ToSchema, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -116,6 +117,7 @@ pub struct GetJudgeReportOutput {
 #[serde(rename_all = "camelCase")]
 pub struct GetJudgeReportQuery {
     pub max_stage_count: Option<u32>,
+    pub stage_offset: Option<u32>,
 }
 
 #[derive(Debug, Clone, ToSchema, Serialize, Deserialize)]
@@ -188,7 +190,10 @@ pub struct JudgeStageSummaryDetail {
 pub struct JudgeStageSummariesMeta {
     pub total_count: u32,
     pub returned_count: u32,
+    pub stage_offset: u32,
     pub truncated: bool,
+    pub has_more: bool,
+    pub next_offset: Option<u32>,
     pub max_stage_count: Option<u32>,
 }
 
@@ -545,6 +550,10 @@ fn normalize_stage_summary_limit(limit: Option<u32>) -> Option<i64> {
     limit.map(|value| value.clamp(1, MAX_STAGE_SUMMARY_COUNT) as i64)
 }
 
+fn normalize_stage_summary_offset(offset: Option<u32>) -> i64 {
+    offset.unwrap_or(0).clamp(0, MAX_STAGE_SUMMARY_OFFSET) as i64
+}
+
 fn map_draw_vote_detail(
     vote: DrawVoteRow,
     stats: DrawVoteStatsRow,
@@ -799,6 +808,7 @@ impl AppState {
 
         let report = if let Some(report) = report {
             let stage_limit = normalize_stage_summary_limit(query.max_stage_count);
+            let stage_offset = normalize_stage_summary_offset(query.stage_offset);
             let total_stage_count: i64 = sqlx::query_scalar(
                 r#"
                 SELECT COUNT(*)::bigint
@@ -818,11 +828,12 @@ impl AppState {
                     FROM judge_stage_summaries
                     WHERE job_id = $1
                     ORDER BY stage_no ASC, created_at ASC
-                    LIMIT $2
+                    LIMIT $2 OFFSET $3
                     "#,
                 )
                 .bind(report.job_id)
                 .bind(limit)
+                .bind(stage_offset)
                 .fetch_all(&self.pool)
                 .await?
             } else {
@@ -834,9 +845,11 @@ impl AppState {
                     FROM judge_stage_summaries
                     WHERE job_id = $1
                     ORDER BY stage_no ASC, created_at ASC
+                    OFFSET $2
                     "#,
                 )
                 .bind(report.job_id)
+                .bind(stage_offset)
                 .fetch_all(&self.pool)
                 .await?
             };
@@ -846,10 +859,17 @@ impl AppState {
             } else {
                 u32::try_from(total_stage_count).unwrap_or(u32::MAX)
             };
+            let stage_offset_u32 = u32::try_from(stage_offset).unwrap_or(u32::MAX);
+            let effective_offset = stage_offset_u32.min(total_count);
+            let consumed = effective_offset.saturating_add(returned_count);
+            let has_more = consumed < total_count;
             let stage_summaries_meta = Some(JudgeStageSummariesMeta {
                 total_count,
                 returned_count,
-                truncated: returned_count < total_count,
+                stage_offset: effective_offset,
+                truncated: has_more,
+                has_more,
+                next_offset: if has_more { Some(consumed) } else { None },
                 max_stage_count: stage_limit.map(|value| value as u32),
             });
             Some(map_report_detail(
@@ -1736,6 +1756,28 @@ mod tests {
         assert_eq!(meta.sources[1].source_url, "https://bar.example/b");
     }
 
+    #[test]
+    fn normalize_stage_summary_limit_should_clamp_into_range() {
+        assert_eq!(normalize_stage_summary_limit(None), None);
+        assert_eq!(normalize_stage_summary_limit(Some(0)), Some(1));
+        assert_eq!(normalize_stage_summary_limit(Some(1)), Some(1));
+        assert_eq!(
+            normalize_stage_summary_limit(Some(MAX_STAGE_SUMMARY_COUNT + 10)),
+            Some(MAX_STAGE_SUMMARY_COUNT as i64)
+        );
+    }
+
+    #[test]
+    fn normalize_stage_summary_offset_should_clamp_into_range() {
+        assert_eq!(normalize_stage_summary_offset(None), 0);
+        assert_eq!(normalize_stage_summary_offset(Some(0)), 0);
+        assert_eq!(normalize_stage_summary_offset(Some(2)), 2);
+        assert_eq!(
+            normalize_stage_summary_offset(Some(MAX_STAGE_SUMMARY_OFFSET + 10)),
+            MAX_STAGE_SUMMARY_OFFSET as i64
+        );
+    }
+
     #[tokio::test]
     async fn request_judge_job_should_create_running_job_with_default_style() -> Result<()> {
         let (_tdb, state) = AppState::new_for_test().await?;
@@ -1920,6 +1962,7 @@ mod tests {
                 &user,
                 GetJudgeReportQuery {
                     max_stage_count: None,
+                    stage_offset: None,
                 },
             )
             .await?;
@@ -1979,6 +2022,7 @@ mod tests {
                 &user,
                 GetJudgeReportQuery {
                     max_stage_count: None,
+                    stage_offset: None,
                 },
             )
             .await?;
@@ -1993,7 +2037,10 @@ mod tests {
             .expect("stage summaries meta should exist");
         assert_eq!(meta.total_count, 0);
         assert_eq!(meta.returned_count, 0);
+        assert_eq!(meta.stage_offset, 0);
         assert!(!meta.truncated);
+        assert!(!meta.has_more);
+        assert_eq!(meta.next_offset, None);
         assert_eq!(meta.max_stage_count, None);
         Ok(())
     }
@@ -2057,6 +2104,7 @@ mod tests {
                 &user,
                 GetJudgeReportQuery {
                     max_stage_count: None,
+                    stage_offset: None,
                 },
             )
             .await?;
@@ -2074,7 +2122,10 @@ mod tests {
             .expect("stage summaries meta should exist");
         assert_eq!(meta.total_count, 2);
         assert_eq!(meta.returned_count, 2);
+        assert_eq!(meta.stage_offset, 0);
         assert!(!meta.truncated);
+        assert!(!meta.has_more);
+        assert_eq!(meta.next_offset, None);
         assert_eq!(meta.max_stage_count, None);
         Ok(())
     }
@@ -2146,6 +2197,7 @@ mod tests {
                 &user,
                 GetJudgeReportQuery {
                     max_stage_count: Some(1),
+                    stage_offset: None,
                 },
             )
             .await?;
@@ -2157,7 +2209,97 @@ mod tests {
             .expect("stage summaries meta should exist");
         assert_eq!(meta.total_count, 3);
         assert_eq!(meta.returned_count, 1);
+        assert_eq!(meta.stage_offset, 0);
         assert!(meta.truncated);
+        assert!(meta.has_more);
+        assert_eq!(meta.next_offset, Some(1));
+        assert_eq!(meta.max_stage_count, Some(1));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn get_latest_judge_report_should_apply_stage_offset() -> Result<()> {
+        let (_tdb, state) = AppState::new_for_test().await?;
+        let session_id = seed_topic_and_session(&state, 1, "closed").await?;
+        let user = state.find_user_by_id(1).await?.expect("user should exist");
+        let job_id = seed_running_judge_job(&state, session_id).await?;
+
+        state
+            .submit_judge_report(
+                job_id as u64,
+                SubmitJudgeReportInput {
+                    winner: "pro".to_string(),
+                    pro_score: 88,
+                    con_score: 77,
+                    logic_pro: 87,
+                    logic_con: 76,
+                    evidence_pro: 89,
+                    evidence_con: 78,
+                    rebuttal_pro: 86,
+                    rebuttal_con: 75,
+                    clarity_pro: 90,
+                    clarity_con: 79,
+                    pro_summary: "pro".to_string(),
+                    con_summary: "con".to_string(),
+                    rationale: "rationale".to_string(),
+                    style_mode: Some("rational".to_string()),
+                    needs_draw_vote: false,
+                    rejudge_triggered: false,
+                    payload: serde_json::json!({"trace":"offset-stages"}),
+                    winner_first: Some("pro".to_string()),
+                    winner_second: Some("pro".to_string()),
+                    stage_summaries: vec![
+                        JudgeStageSummaryInput {
+                            stage_no: 1,
+                            from_message_id: Some(1),
+                            to_message_id: Some(100),
+                            pro_score: 85,
+                            con_score: 76,
+                            summary: serde_json::json!({"brief":"s1"}),
+                        },
+                        JudgeStageSummaryInput {
+                            stage_no: 2,
+                            from_message_id: Some(101),
+                            to_message_id: Some(200),
+                            pro_score: 88,
+                            con_score: 77,
+                            summary: serde_json::json!({"brief":"s2"}),
+                        },
+                        JudgeStageSummaryInput {
+                            stage_no: 3,
+                            from_message_id: Some(201),
+                            to_message_id: Some(300),
+                            pro_score: 89,
+                            con_score: 78,
+                            summary: serde_json::json!({"brief":"s3"}),
+                        },
+                    ],
+                },
+            )
+            .await?;
+
+        let ret = state
+            .get_latest_judge_report(
+                session_id as u64,
+                &user,
+                GetJudgeReportQuery {
+                    max_stage_count: Some(1),
+                    stage_offset: Some(1),
+                },
+            )
+            .await?;
+        let report = ret.report.expect("report should exist");
+        assert_eq!(report.stage_summaries.len(), 1);
+        assert_eq!(report.stage_summaries[0].stage_no, 2);
+        let meta = report
+            .stage_summaries_meta
+            .expect("stage summaries meta should exist");
+        assert_eq!(meta.total_count, 3);
+        assert_eq!(meta.returned_count, 1);
+        assert_eq!(meta.stage_offset, 1);
+        assert!(meta.truncated);
+        assert!(meta.has_more);
+        assert_eq!(meta.next_offset, Some(2));
         assert_eq!(meta.max_stage_count, Some(1));
         Ok(())
     }
