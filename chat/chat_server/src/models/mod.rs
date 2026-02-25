@@ -28,7 +28,8 @@ pub(crate) use judge_dispatch::AiJudgeDispatchMetrics;
 pub use judge_dispatch::GetJudgeDispatchMetricsOutput;
 pub use messages::{CreateMessage, ListMessages};
 pub use payment::{
-    IapProduct, ListIapProducts, ListWalletLedger, VerifyIapOrderInput, VerifyIapOrderOutput,
+    GetIapOrderByTransaction, GetIapOrderByTransactionOutput, IapOrderSnapshot, IapProduct,
+    ListIapProducts, ListWalletLedger, VerifyIapOrderInput, VerifyIapOrderOutput,
     WalletBalanceOutput, WalletLedgerItem,
 };
 use serde::{Deserialize, Serialize};

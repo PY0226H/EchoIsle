@@ -107,6 +107,10 @@ pub async fn get_router(state: AppState) -> Result<Router, AppError> {
         );
     let pay = Router::new()
         .route("/iap/products", get(list_iap_products_handler))
+        .route(
+            "/iap/orders/by-transaction",
+            get(get_iap_order_by_transaction_handler),
+        )
         .route("/iap/verify", post(verify_iap_order_handler))
         .route("/wallet", get(get_wallet_balance_handler))
         .route("/wallet/ledger", get(list_wallet_ledger_handler));

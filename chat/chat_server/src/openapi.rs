@@ -2,7 +2,8 @@ use crate::handlers::*;
 use crate::{
     AppState, CreateChat, CreateDebateMessageInput, CreateMessage, CreateUser, DebateMessage,
     DebatePinnedMessage, DebateSessionSummary, DebateTopic, DrawVoteDetail, ErrorOutput,
-    GetDrawVoteOutput, GetJudgeDispatchMetricsOutput, GetJudgeReportOutput, GetJudgeReportQuery,
+    GetDrawVoteOutput, GetIapOrderByTransaction, GetIapOrderByTransactionOutput,
+    GetJudgeDispatchMetricsOutput, GetJudgeReportOutput, GetJudgeReportQuery, IapOrderSnapshot,
     IapProduct, JoinDebateSessionInput, JoinDebateSessionOutput, JudgeJobSnapshot, JudgeRagMeta,
     JudgeRagSourceItem, JudgeReportDetail, JudgeStageSummariesMeta, JudgeStageSummaryDetail,
     JudgeStageSummaryInput, ListDebateMessages, ListDebatePinnedMessages, ListDebateSessions,
@@ -47,6 +48,7 @@ pub(crate) trait OpenApiRouter {
             mark_judge_job_failed_handler,
             get_judge_dispatch_metrics_handler,
             list_iap_products_handler,
+            get_iap_order_by_transaction_handler,
             verify_iap_order_handler,
             get_wallet_balance_handler,
             list_wallet_ledger_handler,
@@ -74,7 +76,8 @@ pub(crate) trait OpenApiRouter {
                 SubmitJudgeReportInput, SubmitJudgeReportOutput, JudgeStageSummaryInput,
                 MarkJudgeJobFailedInput, MarkJudgeJobFailedOutput,
                 GetJudgeDispatchMetricsOutput,
-                IapProduct, ListIapProducts, VerifyIapOrderInput, VerifyIapOrderOutput,
+                IapProduct, ListIapProducts, GetIapOrderByTransaction, IapOrderSnapshot,
+                GetIapOrderByTransactionOutput, VerifyIapOrderInput, VerifyIapOrderOutput,
                 WalletBalanceOutput, ListWalletLedger, WalletLedgerItem,
                 SigninUser, CreateUser, CreateChat, CreateMessage, ListMessages, AuthOutput, AccessTicketsOutput, ErrorOutput
             ),

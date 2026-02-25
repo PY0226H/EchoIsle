@@ -49,6 +49,31 @@ pub struct VerifyIapOrderOutput {
     pub wallet_balance: i64,
 }
 
+#[derive(Debug, Clone, IntoParams, ToSchema, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GetIapOrderByTransaction {
+    pub transaction_id: String,
+}
+
+#[derive(Debug, Clone, ToSchema, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct IapOrderSnapshot {
+    pub order_id: u64,
+    pub status: String,
+    pub verify_mode: String,
+    pub verify_reason: Option<String>,
+    pub product_id: String,
+    pub coins: i32,
+    pub credited: bool,
+}
+
+#[derive(Debug, Clone, ToSchema, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GetIapOrderByTransactionOutput {
+    pub found: bool,
+    pub order: Option<IapOrderSnapshot>,
+}
+
 #[derive(Debug, Clone, ToSchema, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WalletBalanceOutput {
@@ -87,6 +112,19 @@ struct IapOrderRow {
     verify_mode: String,
     verify_reason: Option<String>,
     coins: i32,
+}
+
+#[derive(Debug, Clone, FromRow)]
+struct IapOrderSnapshotRow {
+    id: i64,
+    ws_id: i64,
+    user_id: i64,
+    product_id: String,
+    status: String,
+    verify_mode: String,
+    verify_reason: Option<String>,
+    coins: i32,
+    credited: bool,
 }
 
 fn default_true() -> bool {
@@ -410,6 +448,68 @@ async fn wallet_balance_in_tx(
 
 #[allow(dead_code)]
 impl AppState {
+    pub async fn get_iap_order_by_transaction(
+        &self,
+        user: &User,
+        input: GetIapOrderByTransaction,
+    ) -> Result<GetIapOrderByTransactionOutput, AppError> {
+        validate_identifier(&input.transaction_id, "transaction_id", 128)?;
+        let transaction_id = input.transaction_id.trim();
+        let row: Option<IapOrderSnapshotRow> = sqlx::query_as(
+            r#"
+            SELECT
+                io.id,
+                io.ws_id,
+                io.user_id,
+                io.product_id,
+                io.status,
+                io.verify_mode,
+                io.verify_reason,
+                io.coins,
+                EXISTS (
+                    SELECT 1
+                    FROM wallet_ledger wl
+                    WHERE wl.order_id = io.id
+                      AND wl.ws_id = io.ws_id
+                      AND wl.user_id = io.user_id
+                      AND wl.entry_type = 'iap_credit'
+                ) AS credited
+            FROM iap_orders io
+            WHERE io.platform = 'apple_iap'
+              AND io.transaction_id = $1
+            LIMIT 1
+            "#,
+        )
+        .bind(transaction_id)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        let Some(row) = row else {
+            return Ok(GetIapOrderByTransactionOutput {
+                found: false,
+                order: None,
+            });
+        };
+        if row.ws_id != user.ws_id || row.user_id != user.id {
+            return Err(AppError::PaymentConflict(
+                "transaction_id already belongs to another user".to_string(),
+            ));
+        }
+
+        Ok(GetIapOrderByTransactionOutput {
+            found: true,
+            order: Some(IapOrderSnapshot {
+                order_id: row.id as u64,
+                status: row.status,
+                verify_mode: row.verify_mode,
+                verify_reason: row.verify_reason,
+                product_id: row.product_id,
+                coins: row.coins,
+                credited: row.credited,
+            }),
+        })
+    }
+
     pub async fn list_iap_products(
         &self,
         input: ListIapProducts,
@@ -940,6 +1040,88 @@ mod tests {
             .verify_iap_order(&user2, verify_input("tx-replay-1", "mock_ok_receipt"))
             .await
             .expect_err("cross user replay should fail");
+        assert!(matches!(err, AppError::PaymentConflict(_)));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn get_iap_order_by_transaction_should_return_not_found_for_missing_tx() -> Result<()> {
+        let (_tdb, state) = AppState::new_for_test().await?;
+        let user = state
+            .find_user_by_id(1)
+            .await?
+            .expect("user id 1 should exist");
+        let out = state
+            .get_iap_order_by_transaction(
+                &user,
+                GetIapOrderByTransaction {
+                    transaction_id: "tx-not-exist-1".to_string(),
+                },
+            )
+            .await?;
+        assert!(!out.found);
+        assert!(out.order.is_none());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn get_iap_order_by_transaction_should_return_verified_snapshot() -> Result<()> {
+        let (_tdb, state) = AppState::new_for_test().await?;
+        let user = state
+            .find_user_by_id(1)
+            .await?
+            .expect("user id 1 should exist");
+
+        state
+            .verify_iap_order(
+                &user,
+                verify_input("tx-query-verified-1", "mock_ok_receipt"),
+            )
+            .await?;
+
+        let out = state
+            .get_iap_order_by_transaction(
+                &user,
+                GetIapOrderByTransaction {
+                    transaction_id: "tx-query-verified-1".to_string(),
+                },
+            )
+            .await?;
+        assert!(out.found);
+        let order = out.order.expect("order should exist");
+        assert_eq!(order.status, "verified");
+        assert_eq!(order.product_id, "com.aicomm.coins.60");
+        assert!(order.credited);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn get_iap_order_by_transaction_should_return_conflict_for_other_user() -> Result<()> {
+        let (_tdb, state) = AppState::new_for_test().await?;
+        let user1 = state
+            .find_user_by_id(1)
+            .await?
+            .expect("user id 1 should exist");
+        let user2 = state
+            .find_user_by_id(2)
+            .await?
+            .expect("user id 2 should exist");
+
+        state
+            .verify_iap_order(
+                &user1,
+                verify_input("tx-query-conflict-1", "mock_ok_receipt"),
+            )
+            .await?;
+        let err = state
+            .get_iap_order_by_transaction(
+                &user2,
+                GetIapOrderByTransaction {
+                    transaction_id: "tx-query-conflict-1".to_string(),
+                },
+            )
+            .await
+            .expect_err("cross user query should fail");
         assert!(matches!(err, AppError::PaymentConflict(_)));
         Ok(())
     }

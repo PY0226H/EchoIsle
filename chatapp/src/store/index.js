@@ -503,6 +503,18 @@ export default createStore({
       );
       return response.data;
     },
+    async getIapOrderByTransaction({ state }, { transactionId } = {}) {
+      if (!transactionId || !String(transactionId).trim()) {
+        throw new Error('transactionId is required');
+      }
+      const suffix = buildQueryString({
+        transactionId: String(transactionId).trim(),
+      });
+      const response = await network(this, 'get', `/pay/iap/orders/by-transaction${suffix}`, null, {
+        Authorization: `Bearer ${state.token}`,
+      });
+      return response.data;
+    },
     async fetchWalletBalance({ state }) {
       const response = await network(this, 'get', '/pay/wallet', null, {
         Authorization: `Bearer ${state.token}`,

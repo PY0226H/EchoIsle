@@ -337,6 +337,30 @@ export default {
         return false;
       }
     },
+    async reconcilePendingItem(item, { silent = false } = {}) {
+      const payload = await this.$store.dispatch('getIapOrderByTransaction', {
+        transactionId: item.transactionId,
+      });
+      const order = payload?.order || null;
+      if (!payload?.found || !order) {
+        return false;
+      }
+      this.syncPendingQueue(
+        settlePendingIapSuccess(this.pendingQueue, item.transactionId),
+      );
+      if (order.status === 'verified') {
+        await Promise.all([this.refreshWallet(), this.refreshLedger()]);
+        if (!silent) {
+          this.successText = `交易已在服务端验单成功并入账：tx=${item.transactionId}`;
+          this.errorText = '';
+        }
+        return true;
+      }
+      if (!silent) {
+        this.errorText = `交易已在服务端落单且状态为 ${order.status}，已移出待重试队列`;
+      }
+      return true;
+    },
     async quickMockVerify(product) {
       this.prepareMockPayload(product);
       await this.submitVerify();
@@ -426,6 +450,17 @@ export default {
       }
       this.markRetrying(item.transactionId, true);
       try {
+        try {
+          const settled = await this.reconcilePendingItem(item, { silent });
+          if (settled) {
+            return true;
+          }
+        } catch (error) {
+          if (!silent) {
+            const errorText = error?.response?.data?.error || error?.message || 'query iap order failed';
+            this.errorText = `对账查询失败，回退到重试验单：${errorText}`;
+          }
+        }
         return await this.verifyAndSettlePurchase(item, {
           queueOnFailure: true,
           silent,

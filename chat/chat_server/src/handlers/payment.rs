@@ -1,4 +1,7 @@
-use crate::{AppError, AppState, ListIapProducts, ListWalletLedger, VerifyIapOrderInput};
+use crate::{
+    AppError, AppState, GetIapOrderByTransaction, ListIapProducts, ListWalletLedger,
+    VerifyIapOrderInput,
+};
 use axum::{
     extract::{Query, State},
     http::StatusCode,
@@ -50,6 +53,30 @@ pub(crate) async fn verify_iap_order_handler(
     Json(input): Json<VerifyIapOrderInput>,
 ) -> Result<impl IntoResponse, AppError> {
     let ret = state.verify_iap_order(&user, input).await?;
+    Ok((StatusCode::OK, Json(ret)))
+}
+
+/// Query existing IAP order by transaction id for current user.
+#[utoipa::path(
+    get,
+    path = "/api/pay/iap/orders/by-transaction",
+    params(
+        GetIapOrderByTransaction
+    ),
+    responses(
+        (status = 200, description = "Order query result", body = crate::GetIapOrderByTransactionOutput),
+        (status = 409, description = "Transaction belongs to another user", body = ErrorOutput),
+    ),
+    security(
+        ("token" = [])
+    )
+)]
+pub(crate) async fn get_iap_order_by_transaction_handler(
+    Extension(user): Extension<User>,
+    State(state): State<AppState>,
+    Query(input): Query<GetIapOrderByTransaction>,
+) -> Result<impl IntoResponse, AppError> {
+    let ret = state.get_iap_order_by_transaction(&user, input).await?;
     Ok((StatusCode::OK, Json(ret)))
 }
 
