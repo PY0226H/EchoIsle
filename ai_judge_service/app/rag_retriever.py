@@ -150,6 +150,41 @@ def _score_chunk(chunk: KnowledgeChunk, query_tokens: set[str]) -> float:
     return coverage * 0.75 + density * 0.25
 
 
+def parse_source_whitelist(raw: str | None) -> tuple[str, ...]:
+    text = (raw or "").strip()
+    if not text:
+        return tuple()
+
+    parts = re.split(r"[,\n;]+", text)
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for part in parts:
+        item = part.strip().rstrip("/")
+        if not item:
+            continue
+        lowered = item.lower()
+        if lowered in seen:
+            continue
+        seen.add(lowered)
+        normalized.append(item)
+    return tuple(normalized)
+
+
+def _source_allowed(source_url: str, whitelist_prefixes: tuple[str, ...]) -> bool:
+    if not whitelist_prefixes:
+        return True
+    source = (source_url or "").strip().lower()
+    if not source:
+        return False
+    for prefix in whitelist_prefixes:
+        prefix_norm = prefix.strip().lower().rstrip("/")
+        if not prefix_norm:
+            continue
+        if source == prefix_norm or source.startswith(prefix_norm + "/"):
+            return True
+    return False
+
+
 def retrieve_contexts(
     request: "JudgeDispatchRequest",
     *,
@@ -158,6 +193,7 @@ def retrieve_contexts(
     max_snippets: int,
     max_chars_per_snippet: int,
     query_message_limit: int,
+    allowed_source_prefixes: tuple[str, ...] = (),
 ) -> list[RetrievedContext]:
     if not enabled:
         return []
@@ -188,6 +224,8 @@ def retrieve_contexts(
     query_tokens = _build_query_tokens(request, query_message_limit)
     ranked: list[RetrievedContext] = []
     for chunk in chunks:
+        if not _source_allowed(chunk.source_url, allowed_source_prefixes):
+            continue
         score = _score_chunk(chunk, query_tokens)
         if score <= 0:
             continue

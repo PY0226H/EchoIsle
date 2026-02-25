@@ -4,7 +4,11 @@ import unittest
 from datetime import datetime, timezone
 from types import SimpleNamespace
 
-from app.rag_retriever import retrieve_contexts, summarize_retrieved_contexts
+from app.rag_retriever import (
+    parse_source_whitelist,
+    retrieve_contexts,
+    summarize_retrieved_contexts,
+)
 
 
 def _build_request():
@@ -55,6 +59,12 @@ def _build_request():
 
 
 class RagRetrieverTests(unittest.TestCase):
+    def test_parse_source_whitelist_should_normalize_and_deduplicate(self) -> None:
+        ret = parse_source_whitelist(
+            " https://a.com/x/ ; https://b.com/y \nhttps://a.com/x "
+        )
+        self.assertEqual(ret, ("https://a.com/x", "https://b.com/y"))
+
     def test_retrieve_contexts_should_rank_relevant_chunks_and_keep_context_seed(self) -> None:
         request = _build_request()
         chunks = [
@@ -89,6 +99,44 @@ class RagRetrieverTests(unittest.TestCase):
         self.assertEqual(contexts[0].chunk_id, "topic-context-seed")
         self.assertEqual(contexts[1].chunk_id, "tft-frontline")
         self.assertLessEqual(len(contexts[1].content), 120)
+
+    def test_retrieve_contexts_should_filter_non_whitelisted_sources(self) -> None:
+        request = _build_request()
+        chunks = [
+            {
+                "chunkId": "allowed",
+                "title": "云顶之弈新闻",
+                "sourceUrl": "https://teamfighttactics.leagueoflegends.com/en-us/news/game-updates-14-3",
+                "content": "前排羁绊在该版本增强。",
+                "tags": ["tft", "news"],
+            },
+            {
+                "chunkId": "blocked",
+                "title": "其他站点新闻",
+                "sourceUrl": "https://example.com/tft-news",
+                "content": "同样提到前排增强。",
+                "tags": ["tft"],
+            },
+        ]
+        with tempfile.NamedTemporaryFile(mode="w+", suffix=".json", encoding="utf-8") as f:
+            json.dump(chunks, f, ensure_ascii=False)
+            f.flush()
+            contexts = retrieve_contexts(
+                request,
+                enabled=True,
+                knowledge_file=f.name,
+                max_snippets=5,
+                max_chars_per_snippet=120,
+                query_message_limit=50,
+                allowed_source_prefixes=parse_source_whitelist(
+                    "https://teamfighttactics.leagueoflegends.com/en-us/news/"
+                ),
+            )
+
+        chunk_ids = [item.chunk_id for item in contexts]
+        self.assertIn("topic-context-seed", chunk_ids)
+        self.assertIn("allowed", chunk_ids)
+        self.assertNotIn("blocked", chunk_ids)
 
     def test_retrieve_contexts_should_return_empty_when_disabled(self) -> None:
         request = _build_request()

@@ -17,9 +17,8 @@
 ```bash
 cd ai_judge_service
 python3 -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
-uvicorn app.main:app --host 0.0.0.0 --port 8787
+.venv/bin/python -m pip install -r requirements.txt
+.venv/bin/python -m uvicorn app.main:app --host 0.0.0.0 --port 8787
 ```
 
 ## 环境变量
@@ -44,6 +43,7 @@ uvicorn app.main:app --host 0.0.0.0 --port 8787
 - `AI_JUDGE_RAG_MAX_SNIPPETS`: 检索片段上限，默认 `4`
 - `AI_JUDGE_RAG_MAX_CHARS_PER_SNIPPET`: 单片段最大字符数，默认 `280`
 - `AI_JUDGE_RAG_QUERY_MESSAGE_LIMIT`: 检索查询使用最近消息条数，默认 `80`
+- `AI_JUDGE_RAG_SOURCE_WHITELIST`: 允许知识来源的 URL 前缀列表（逗号/分号/换行分隔），默认 `https://teamfighttactics.leagueoflegends.com/en-us/news/`
 
 ## 知识文件格式（最小）
 
@@ -67,5 +67,5 @@ uvicorn app.main:app --host 0.0.0.0 --port 8787
 
 ```bash
 cd ai_judge_service
-python3 -m unittest discover -s tests -p "test_*.py" -v
+.venv/bin/python -m unittest discover -s tests -p "test_*.py" -v
 ```

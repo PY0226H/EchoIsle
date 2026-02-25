@@ -7,9 +7,15 @@ from fastapi import FastAPI, Header, HTTPException
 
 from .models import JudgeDispatchRequest, MarkJudgeJobFailedInput
 from .openai_judge import OpenAiJudgeConfig, build_report_with_openai
-from .rag_retriever import retrieve_contexts, summarize_retrieved_contexts
+from .rag_retriever import (
+    parse_source_whitelist,
+    retrieve_contexts,
+    summarize_retrieved_contexts,
+)
 from .runtime_policy import PROVIDER_OPENAI, normalize_provider, parse_env_bool, should_use_openai
 from .scoring import build_report, resolve_effective_style_mode
+
+DEFAULT_RAG_SOURCE_WHITELIST = "https://teamfighttactics.leagueoflegends.com/en-us/news/"
 
 
 @dataclass(frozen=True)
@@ -34,6 +40,7 @@ class Settings:
     rag_max_snippets: int
     rag_max_chars_per_snippet: int
     rag_query_message_limit: int
+    rag_source_whitelist: tuple[str, ...]
 
 
 def _load_settings() -> Settings:
@@ -68,6 +75,12 @@ def _load_settings() -> Settings:
         rag_max_snippets=int(os.getenv("AI_JUDGE_RAG_MAX_SNIPPETS", "4")),
         rag_max_chars_per_snippet=int(os.getenv("AI_JUDGE_RAG_MAX_CHARS_PER_SNIPPET", "280")),
         rag_query_message_limit=int(os.getenv("AI_JUDGE_RAG_QUERY_MESSAGE_LIMIT", "80")),
+        rag_source_whitelist=parse_source_whitelist(
+            os.getenv(
+                "AI_JUDGE_RAG_SOURCE_WHITELIST",
+                DEFAULT_RAG_SOURCE_WHITELIST,
+            )
+        ),
     )
 
 
@@ -125,7 +138,16 @@ async def _build_report_by_runtime(
         max_snippets=SETTINGS.rag_max_snippets,
         max_chars_per_snippet=SETTINGS.rag_max_chars_per_snippet,
         query_message_limit=SETTINGS.rag_query_message_limit,
+        allowed_source_prefixes=SETTINGS.rag_source_whitelist,
     )
+
+    def apply_rag_payload_fields(report, *, used_by_model: bool) -> None:
+        report.payload["ragEnabled"] = SETTINGS.rag_enabled
+        report.payload["ragUsedByModel"] = used_by_model and bool(retrieved_contexts)
+        report.payload["ragSnippetCount"] = len(retrieved_contexts)
+        report.payload["ragSources"] = summarize_retrieved_contexts(retrieved_contexts)
+        report.payload["ragSourceWhitelist"] = list(SETTINGS.rag_source_whitelist)
+
     if should_use_openai(SETTINGS.provider, SETTINGS.openai_api_key):
         cfg = OpenAiJudgeConfig(
             api_key=SETTINGS.openai_api_key,
@@ -136,7 +158,7 @@ async def _build_report_by_runtime(
             max_retries=SETTINGS.openai_max_retries,
         )
         try:
-            return await build_report_with_openai(
+            report = await build_report_with_openai(
                 request=request,
                 effective_style_mode=effective_style_mode,
                 style_mode_source=style_mode_source,
@@ -150,21 +172,17 @@ async def _build_report_by_runtime(
             report.payload["provider"] = "ai-judge-service-mock-fallback"
             report.payload["fallbackFrom"] = "openai"
             report.payload["fallbackReason"] = str(err)[:500]
-            report.payload["ragEnabled"] = SETTINGS.rag_enabled
-            report.payload["ragUsedByModel"] = False
-            report.payload["ragSnippetCount"] = len(retrieved_contexts)
-            report.payload["ragSources"] = summarize_retrieved_contexts(retrieved_contexts)
+            apply_rag_payload_fields(report, used_by_model=False)
             return report
+        apply_rag_payload_fields(report, used_by_model=True)
+        return report
 
     report = build_report(request, system_style_mode=SETTINGS.judge_style_mode)
     if SETTINGS.provider == PROVIDER_OPENAI and not SETTINGS.openai_api_key.strip():
         report.payload["provider"] = "ai-judge-service-mock-missing-openai-key"
         report.payload["fallbackFrom"] = "openai"
         report.payload["fallbackReason"] = "missing OPENAI_API_KEY"
-    report.payload["ragEnabled"] = SETTINGS.rag_enabled
-    report.payload["ragUsedByModel"] = False
-    report.payload["ragSnippetCount"] = len(retrieved_contexts)
-    report.payload["ragSources"] = summarize_retrieved_contexts(retrieved_contexts)
+    apply_rag_payload_fields(report, used_by_model=False)
     return report
 
 
