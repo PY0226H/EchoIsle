@@ -6,11 +6,13 @@ import {
   DEFAULT_PENDING_IAP_RETRY_POLICY,
   DEFAULT_PENDING_IAP_RETENTION_POLICY,
   filterRetryablePendingIap,
+  isPendingIapMaxAttemptsReached,
   isPendingIapRetryable,
   PENDING_IAP_STORAGE_KEY,
   normalizePendingIapItem,
   readPendingIapQueue,
   registerPendingIapFailure,
+  resetPendingIapRetry,
   sanitizePendingIapQueue,
   settlePendingIapSuccess,
   upsertPendingIap,
@@ -126,6 +128,7 @@ test('isPendingIapRetryable should respect cooldown and maxAttempts', () => {
     nextRetryAt: now,
   }));
   assert.equal(isPendingIapRetryable(exhausted, now + 1, retryPolicy), false);
+  assert.equal(isPendingIapMaxAttemptsReached(exhausted, retryPolicy), true);
 });
 
 test('filterRetryablePendingIap should return only due transactions', () => {
@@ -162,6 +165,32 @@ test('registerPendingIapFailure should set nextRetryAt null when max attempts re
   assert.equal(second[0].attempts, 2);
   assert.equal(second[0].nextRetryAt, null);
   assert.equal(isPendingIapRetryable(second[0], now + 1_001, retryPolicy), false);
+});
+
+test('resetPendingIapRetry should recover exhausted transaction to retryable state', () => {
+  const retryPolicy = { baseDelayMs: 100, maxDelayMs: 500, maxAttempts: 2 };
+  const now = 50_000;
+  const exhausted = registerPendingIapFailure(
+    registerPendingIapFailure(
+      [],
+      buildItem({ transactionId: 'tx-recover' }),
+      'first fail',
+      now,
+      retryPolicy,
+    ),
+    buildItem({ transactionId: 'tx-recover' }),
+    'second fail',
+    now + 1_000,
+    retryPolicy,
+  );
+  assert.equal(isPendingIapRetryable(exhausted[0], now + 1_001, retryPolicy), false);
+
+  const recovered = resetPendingIapRetry(exhausted, 'tx-recover', now + 2_000, retryPolicy);
+  assert.equal(recovered.length, 1);
+  assert.equal(recovered[0].attempts, 0);
+  assert.equal(recovered[0].nextRetryAt, now + 2_000);
+  assert.equal(recovered[0].lastError, null);
+  assert.equal(isPendingIapRetryable(recovered[0], now + 2_000, retryPolicy), true);
 });
 
 test('settlePendingIapSuccess should remove transaction', () => {

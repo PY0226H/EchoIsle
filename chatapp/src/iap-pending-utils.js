@@ -191,8 +191,7 @@ export function isPendingIapRetryable(item, nowMs = Date.now(), retryPolicy = {}
   if (!normalized) {
     return false;
   }
-  const { maxAttempts } = normalizeRetryPolicy(retryPolicy);
-  if (normalized.attempts >= maxAttempts) {
+  if (isPendingIapMaxAttemptsReached(normalized, retryPolicy)) {
     return false;
   }
   if (normalized.nextRetryAt == null) {
@@ -201,10 +200,49 @@ export function isPendingIapRetryable(item, nowMs = Date.now(), retryPolicy = {}
   return normalized.nextRetryAt <= nowMs;
 }
 
+export function isPendingIapMaxAttemptsReached(item, retryPolicy = {}) {
+  const normalized = normalizePendingIapItem(item);
+  if (!normalized) {
+    return false;
+  }
+  const { maxAttempts } = normalizeRetryPolicy(retryPolicy);
+  return normalized.attempts >= maxAttempts;
+}
+
 export function filterRetryablePendingIap(queue, nowMs = Date.now(), retryPolicy = {}) {
   return sanitizePendingIapQueue(queue, nowMs).filter((item) => (
     isPendingIapRetryable(item, nowMs, retryPolicy)
   ));
+}
+
+export function resetPendingIapRetry(
+  queue,
+  transactionId,
+  nowMs = Date.now(),
+  retryPolicy = {},
+) {
+  const tx = toNonEmptyString(transactionId);
+  const current = sanitizePendingIapQueue(queue, nowMs);
+  if (!tx) {
+    return current;
+  }
+  const target = current.find((item) => item.transactionId === tx);
+  if (!target) {
+    return current;
+  }
+  const nextItem = {
+    ...target,
+    attempts: 0,
+    updatedAt: nowMs,
+    nextRetryAt: nowMs,
+    lastError: `manually reset at ${new Date(nowMs).toISOString()}`,
+  };
+  if (isPendingIapMaxAttemptsReached(target, retryPolicy)) {
+    nextItem.lastError = null;
+  }
+  const next = current.filter((item) => item.transactionId !== tx);
+  next.push(nextItem);
+  return sanitizePendingIapQueue(next, nowMs);
 }
 
 export function readPendingIapQueue(storage = globalThis?.localStorage) {

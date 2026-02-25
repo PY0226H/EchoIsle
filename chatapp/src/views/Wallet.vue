@@ -147,13 +147,22 @@
                 (maxAttempts={{ pendingRetryPolicy.maxAttempts }})
               </span>
             </div>
-            <button
-              @click="retryAllPending"
-              :disabled="retryingAll || pendingQueue.length === 0"
-              class="px-3 py-1.5 text-xs rounded border bg-white hover:bg-gray-100 disabled:opacity-50"
-            >
-              {{ retryingAll ? '重试中...' : '重试全部' }}
-            </button>
+            <div class="flex items-center gap-2">
+              <button
+                @click="recoverAllExhaustedPending"
+                :disabled="retryingAll || exhaustedPendingCount === 0"
+                class="px-3 py-1.5 text-xs rounded border bg-white hover:bg-gray-100 disabled:opacity-50"
+              >
+                恢复已达上限({{ exhaustedPendingCount }})
+              </button>
+              <button
+                @click="retryAllPending"
+                :disabled="retryingAll || pendingQueue.length === 0"
+                class="px-3 py-1.5 text-xs rounded border bg-white hover:bg-gray-100 disabled:opacity-50"
+              >
+                {{ retryingAll ? '重试中...' : '重试全部' }}
+              </button>
+            </div>
           </div>
           <div v-if="pendingQueue.length === 0" class="text-sm text-gray-600">
             当前没有待重试交易。
@@ -181,13 +190,23 @@
                     <span class="font-semibold">lastError:</span> {{ item.lastError }}
                   </div>
                 </div>
-                <button
-                  @click="retryPendingItem(item)"
-                  :disabled="isRetryingItem(item.transactionId) || !isPendingRetryable(item)"
-                  class="px-2 py-1 text-xs rounded bg-blue-600 text-white disabled:opacity-50"
-                >
-                  {{ isRetryingItem(item.transactionId) ? '重试中...' : '重试' }}
-                </button>
+                <div class="flex flex-col gap-1">
+                  <button
+                    @click="retryPendingItem(item)"
+                    :disabled="isRetryingItem(item.transactionId) || !isPendingRetryable(item)"
+                    class="px-2 py-1 text-xs rounded bg-blue-600 text-white disabled:opacity-50"
+                  >
+                    {{ isRetryingItem(item.transactionId) ? '重试中...' : '重试' }}
+                  </button>
+                  <button
+                    v-if="isPendingExhausted(item)"
+                    @click="recoverPendingItem(item)"
+                    :disabled="isRetryingItem(item.transactionId)"
+                    class="px-2 py-1 text-xs rounded border bg-white hover:bg-gray-100 disabled:opacity-50"
+                  >
+                    恢复重试
+                  </button>
+                </div>
               </div>
             </div>
           </div>
@@ -239,9 +258,11 @@ import { isTauriRuntime, purchaseIapViaTauri } from '../iap-bridge';
 import {
   DEFAULT_PENDING_IAP_RETRY_POLICY,
   filterRetryablePendingIap,
+  isPendingIapMaxAttemptsReached,
   isPendingIapRetryable,
   readPendingIapQueue,
   registerPendingIapFailure,
+  resetPendingIapRetry,
   settlePendingIapSuccess,
   writePendingIapQueue,
 } from '../iap-pending-utils';
@@ -272,6 +293,11 @@ export default {
         receiptData: '',
       },
     };
+  },
+  computed: {
+    exhaustedPendingCount() {
+      return this.pendingQueue.filter((item) => this.isPendingExhausted(item)).length;
+    },
   },
   methods: {
     formatDateTime(value) {
@@ -325,17 +351,54 @@ export default {
     isPendingRetryable(item, nowMs = Date.now()) {
       return isPendingIapRetryable(item, nowMs, this.pendingRetryPolicy);
     },
+    isPendingExhausted(item) {
+      return isPendingIapMaxAttemptsReached(item, this.pendingRetryPolicy);
+    },
     pendingRetryStatusText(item, nowMs = Date.now()) {
-      const maxAttempts = Number(this.pendingRetryPolicy?.maxAttempts || 0);
-      const attempts = Number(item?.attempts || 0);
-      if (attempts >= maxAttempts) {
-        return `已达最大重试次数(${maxAttempts})`;
+      if (this.isPendingExhausted(item)) {
+        return `已达最大重试次数(${this.pendingRetryPolicy.maxAttempts})`;
       }
       const nextRetryAt = Number(item?.nextRetryAt);
       if (Number.isFinite(nextRetryAt) && nextRetryAt > nowMs) {
         return '冷却中';
       }
       return '可重试';
+    },
+    recoverPendingItem(item) {
+      if (!item?.transactionId) {
+        return;
+      }
+      this.syncPendingQueue(
+        resetPendingIapRetry(
+          this.pendingQueue,
+          item.transactionId,
+          Date.now(),
+          this.pendingRetryPolicy,
+        ),
+      );
+      this.successText = `已恢复重试：tx=${item.transactionId}`;
+      this.errorText = '';
+    },
+    recoverAllExhaustedPending() {
+      const recoverCount = this.exhaustedPendingCount;
+      if (recoverCount === 0) {
+        return;
+      }
+      let nextQueue = [...this.pendingQueue];
+      for (const item of this.pendingQueue) {
+        if (!this.isPendingExhausted(item)) {
+          continue;
+        }
+        nextQueue = resetPendingIapRetry(
+          nextQueue,
+          item.transactionId,
+          Date.now(),
+          this.pendingRetryPolicy,
+        );
+      }
+      this.syncPendingQueue(nextQueue);
+      this.successText = `已恢复 ${recoverCount} 条达到上限的交易`;
+      this.errorText = '';
     },
     async verifyAndSettlePurchase(purchase, { queueOnFailure = true, silent = false } = {}) {
       try {
