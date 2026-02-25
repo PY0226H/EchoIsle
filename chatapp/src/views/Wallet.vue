@@ -141,7 +141,12 @@
 
         <div class="bg-white border rounded-lg p-4 space-y-3">
           <div class="flex items-center justify-between">
-            <div class="text-sm font-semibold text-gray-900">待重试交易队列</div>
+            <div class="text-sm font-semibold text-gray-900">
+              待重试交易队列
+              <span class="text-xs font-normal text-gray-500">
+                (maxAttempts={{ pendingRetryPolicy.maxAttempts }})
+              </span>
+            </div>
             <button
               @click="retryAllPending"
               :disabled="retryingAll || pendingQueue.length === 0"
@@ -165,13 +170,20 @@
                   <div><span class="font-semibold">product:</span> {{ item.productId }}</div>
                   <div><span class="font-semibold">attempts:</span> {{ item.attempts }}</div>
                   <div><span class="font-semibold">updated:</span> {{ formatDateTime(item.updatedAt) }}</div>
+                  <div><span class="font-semibold">nextRetryAt:</span> {{ formatDateTime(item.nextRetryAt) }}</div>
+                  <div
+                    class="font-semibold"
+                    :class="isPendingRetryable(item) ? 'text-emerald-700' : 'text-amber-700'"
+                  >
+                    {{ pendingRetryStatusText(item) }}
+                  </div>
                   <div v-if="item.lastError" class="text-red-700">
                     <span class="font-semibold">lastError:</span> {{ item.lastError }}
                   </div>
                 </div>
                 <button
                   @click="retryPendingItem(item)"
-                  :disabled="isRetryingItem(item.transactionId)"
+                  :disabled="isRetryingItem(item.transactionId) || !isPendingRetryable(item)"
                   class="px-2 py-1 text-xs rounded bg-blue-600 text-white disabled:opacity-50"
                 >
                   {{ isRetryingItem(item.transactionId) ? '重试中...' : '重试' }}
@@ -225,6 +237,9 @@
 import Sidebar from '../components/Sidebar.vue';
 import { isTauriRuntime, purchaseIapViaTauri } from '../iap-bridge';
 import {
+  DEFAULT_PENDING_IAP_RETRY_POLICY,
+  filterRetryablePendingIap,
+  isPendingIapRetryable,
   readPendingIapQueue,
   registerPendingIapFailure,
   settlePendingIapSuccess,
@@ -244,6 +259,7 @@ export default {
       successText: '',
       tauriReady: false,
       pendingQueue: [],
+      pendingRetryPolicy: { ...DEFAULT_PENDING_IAP_RETRY_POLICY },
       retryingMap: {},
       retryingAll: false,
       walletBalance: 0,
@@ -306,6 +322,21 @@ export default {
     isRetryingItem(transactionId) {
       return !!this.retryingMap[transactionId];
     },
+    isPendingRetryable(item, nowMs = Date.now()) {
+      return isPendingIapRetryable(item, nowMs, this.pendingRetryPolicy);
+    },
+    pendingRetryStatusText(item, nowMs = Date.now()) {
+      const maxAttempts = Number(this.pendingRetryPolicy?.maxAttempts || 0);
+      const attempts = Number(item?.attempts || 0);
+      if (attempts >= maxAttempts) {
+        return `已达最大重试次数(${maxAttempts})`;
+      }
+      const nextRetryAt = Number(item?.nextRetryAt);
+      if (Number.isFinite(nextRetryAt) && nextRetryAt > nowMs) {
+        return '冷却中';
+      }
+      return '可重试';
+    },
     async verifyAndSettlePurchase(purchase, { queueOnFailure = true, silent = false } = {}) {
       try {
         const result = await this.$store.dispatch('verifyIapOrder', {
@@ -325,8 +356,15 @@ export default {
       } catch (error) {
         const errorText = error?.response?.data?.error || error?.message || 'verify failed';
         if (queueOnFailure) {
+          const nowMs = Date.now();
           this.syncPendingQueue(
-            registerPendingIapFailure(this.pendingQueue, purchase, errorText),
+            registerPendingIapFailure(
+              this.pendingQueue,
+              purchase,
+              errorText,
+              nowMs,
+              this.pendingRetryPolicy,
+            ),
           );
         }
         if (!silent) {
@@ -448,6 +486,12 @@ export default {
       if (!item?.transactionId || this.isRetryingItem(item.transactionId)) {
         return false;
       }
+      if (!this.isPendingRetryable(item)) {
+        if (!silent) {
+          this.errorText = `交易暂不可重试：tx=${item.transactionId}，${this.pendingRetryStatusText(item)}`;
+        }
+        return false;
+      }
       this.markRetrying(item.transactionId, true);
       try {
         try {
@@ -478,8 +522,14 @@ export default {
       this.successText = '';
       let successCount = 0;
       let failedCount = 0;
-      const snapshot = [...this.pendingQueue];
-      for (const item of snapshot) {
+      const nowMs = Date.now();
+      const retryableItems = filterRetryablePendingIap(
+        this.pendingQueue,
+        nowMs,
+        this.pendingRetryPolicy,
+      );
+      const skippedCount = Math.max(0, this.pendingQueue.length - retryableItems.length);
+      for (const item of retryableItems) {
         const ok = await this.retryPendingItem(item, { silent: true });
         if (ok) {
           successCount += 1;
@@ -487,10 +537,11 @@ export default {
           failedCount += 1;
         }
       }
+      const suffix = skippedCount > 0 ? `，跳过 ${skippedCount}` : '';
       if (failedCount > 0) {
-        this.errorText = `队列重试完成：成功 ${successCount}，失败 ${failedCount}（失败交易仍保留在队列中）`;
+        this.errorText = `队列重试完成：成功 ${successCount}，失败 ${failedCount}${suffix}（失败交易仍保留在队列中）`;
       } else {
-        this.successText = `队列重试完成：全部成功（${successCount}）`;
+        this.successText = `队列重试完成：全部成功（${successCount}${suffix}）`;
       }
       this.retryingAll = false;
     },

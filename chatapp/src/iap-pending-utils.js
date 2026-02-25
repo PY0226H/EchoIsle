@@ -1,8 +1,55 @@
 const PENDING_IAP_STORAGE_KEY = 'aicomm.pendingIapQueue.v1';
+const DEFAULT_PENDING_IAP_RETRY_POLICY = Object.freeze({
+  baseDelayMs: 30_000,
+  maxDelayMs: 30 * 60_000,
+  maxAttempts: 6,
+});
 
 function toNonEmptyString(value) {
   const normalized = String(value || '').trim();
   return normalized || '';
+}
+
+function normalizePositiveInt(value, fallback, { min = 1, max = Number.MAX_SAFE_INTEGER } = {}) {
+  const raw = Number(value);
+  if (!Number.isFinite(raw)) {
+    return fallback;
+  }
+  return Math.min(max, Math.max(min, Math.floor(raw)));
+}
+
+function normalizeRetryPolicy(policy = {}) {
+  const baseDelayMs = normalizePositiveInt(
+    policy.baseDelayMs,
+    DEFAULT_PENDING_IAP_RETRY_POLICY.baseDelayMs,
+    { min: 1, max: 24 * 60 * 60_000 },
+  );
+  const maxDelayMs = normalizePositiveInt(
+    policy.maxDelayMs,
+    DEFAULT_PENDING_IAP_RETRY_POLICY.maxDelayMs,
+    { min: baseDelayMs, max: 7 * 24 * 60 * 60_000 },
+  );
+  const maxAttempts = normalizePositiveInt(
+    policy.maxAttempts,
+    DEFAULT_PENDING_IAP_RETRY_POLICY.maxAttempts,
+    { min: 1, max: 100 },
+  );
+  return {
+    baseDelayMs,
+    maxDelayMs,
+    maxAttempts,
+  };
+}
+
+export function computePendingIapRetryDelayMs(attempts, retryPolicy = {}) {
+  const { baseDelayMs, maxDelayMs } = normalizeRetryPolicy(retryPolicy);
+  const normalizedAttempts = normalizePositiveInt(attempts, 1);
+  const exp = Math.max(0, normalizedAttempts - 1);
+  const rawDelay = baseDelayMs * (2 ** exp);
+  if (!Number.isFinite(rawDelay)) {
+    return maxDelayMs;
+  }
+  return Math.min(maxDelayMs, Math.floor(rawDelay));
 }
 
 export function normalizePendingIapItem(raw, nowMs = Date.now()) {
@@ -21,6 +68,15 @@ export function normalizePendingIapItem(raw, nowMs = Date.now()) {
   const updatedAtRaw = Number(raw.updatedAt);
   const createdAt = Number.isFinite(createdAtRaw) ? Math.floor(createdAtRaw) : nowMs;
   const updatedAt = Number.isFinite(updatedAtRaw) ? Math.floor(updatedAtRaw) : createdAt;
+  let nextRetryAt = updatedAt;
+  if (raw.nextRetryAt === null) {
+    nextRetryAt = null;
+  } else {
+    const nextRetryAtRaw = Number(raw.nextRetryAt);
+    if (Number.isFinite(nextRetryAtRaw)) {
+      nextRetryAt = Math.max(0, Math.floor(nextRetryAtRaw));
+    }
+  }
   const attemptsRaw = Number(raw.attempts);
   const attempts = Number.isFinite(attemptsRaw) ? Math.max(0, Math.floor(attemptsRaw)) : 0;
   const lastError = toNonEmptyString(raw.lastError) || null;
@@ -32,6 +88,7 @@ export function normalizePendingIapItem(raw, nowMs = Date.now()) {
     source,
     createdAt,
     updatedAt,
+    nextRetryAt,
     attempts,
     lastError,
   };
@@ -64,20 +121,32 @@ export function upsertPendingIap(queue, payload, nowMs = Date.now()) {
   return sanitizePendingIapQueue(next, nowMs);
 }
 
-export function registerPendingIapFailure(queue, payload, errorMessage, nowMs = Date.now()) {
+export function registerPendingIapFailure(
+  queue,
+  payload,
+  errorMessage,
+  nowMs = Date.now(),
+  retryPolicyInput = {},
+) {
   const normalized = normalizePendingIapItem(payload, nowMs);
   if (!normalized) {
     return sanitizePendingIapQueue(queue, nowMs);
   }
   const current = sanitizePendingIapQueue(queue, nowMs);
   const existing = current.find((item) => item.transactionId === normalized.transactionId) || null;
+  const retryPolicy = normalizeRetryPolicy(retryPolicyInput);
   const err = toNonEmptyString(errorMessage) || 'verify failed';
+  const attempts = (existing?.attempts ?? 0) + 1;
+  const maxAttemptsReached = attempts >= retryPolicy.maxAttempts;
   const nextItem = {
     ...normalized,
     createdAt: existing?.createdAt ?? normalized.createdAt,
-    attempts: (existing?.attempts ?? 0) + 1,
+    attempts,
     updatedAt: nowMs,
-    lastError: err,
+    nextRetryAt: maxAttemptsReached
+      ? null
+      : nowMs + computePendingIapRetryDelayMs(attempts, retryPolicy),
+    lastError: maxAttemptsReached ? `${err} (max attempts reached)` : err,
   };
   const next = current.filter((item) => item.transactionId !== normalized.transactionId);
   next.push(nextItem);
@@ -90,6 +159,27 @@ export function settlePendingIapSuccess(queue, transactionId, nowMs = Date.now()
     return sanitizePendingIapQueue(queue, nowMs);
   }
   return sanitizePendingIapQueue(queue, nowMs).filter((item) => item.transactionId !== tx);
+}
+
+export function isPendingIapRetryable(item, nowMs = Date.now(), retryPolicy = {}) {
+  const normalized = normalizePendingIapItem(item, nowMs);
+  if (!normalized) {
+    return false;
+  }
+  const { maxAttempts } = normalizeRetryPolicy(retryPolicy);
+  if (normalized.attempts >= maxAttempts) {
+    return false;
+  }
+  if (normalized.nextRetryAt == null) {
+    return false;
+  }
+  return normalized.nextRetryAt <= nowMs;
+}
+
+export function filterRetryablePendingIap(queue, nowMs = Date.now(), retryPolicy = {}) {
+  return sanitizePendingIapQueue(queue, nowMs).filter((item) => (
+    isPendingIapRetryable(item, nowMs, retryPolicy)
+  ));
 }
 
 export function readPendingIapQueue(storage = globalThis?.localStorage) {
@@ -116,4 +206,4 @@ export function writePendingIapQueue(queue, storage = globalThis?.localStorage) 
   storage.setItem(PENDING_IAP_STORAGE_KEY, JSON.stringify(normalized));
 }
 
-export { PENDING_IAP_STORAGE_KEY };
+export { PENDING_IAP_STORAGE_KEY, DEFAULT_PENDING_IAP_RETRY_POLICY };

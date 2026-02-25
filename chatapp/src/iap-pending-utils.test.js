@@ -2,6 +2,10 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
+  computePendingIapRetryDelayMs,
+  DEFAULT_PENDING_IAP_RETRY_POLICY,
+  filterRetryablePendingIap,
+  isPendingIapRetryable,
   PENDING_IAP_STORAGE_KEY,
   normalizePendingIapItem,
   readPendingIapQueue,
@@ -40,13 +44,91 @@ test('sanitizePendingIapQueue should dedupe by transaction and keep latest updat
 });
 
 test('registerPendingIapFailure should upsert and increment attempts', () => {
-  const first = registerPendingIapFailure([], buildItem({ transactionId: 'tx-a' }), 'network');
+  const now = 1_700_000_000_000;
+  const first = registerPendingIapFailure(
+    [],
+    buildItem({ transactionId: 'tx-a' }),
+    'network',
+    now,
+  );
   assert.equal(first.length, 1);
   assert.equal(first[0].attempts, 1);
-  const second = registerPendingIapFailure(first, buildItem({ transactionId: 'tx-a' }), 'timeout');
+  assert.equal(first[0].nextRetryAt, now + DEFAULT_PENDING_IAP_RETRY_POLICY.baseDelayMs);
+  const second = registerPendingIapFailure(
+    first,
+    buildItem({ transactionId: 'tx-a' }),
+    'timeout',
+    now + 1_000,
+  );
   assert.equal(second.length, 1);
   assert.equal(second[0].attempts, 2);
   assert.equal(second[0].lastError, 'timeout');
+  assert.equal(second[0].nextRetryAt, now + 1_000 + (2 * DEFAULT_PENDING_IAP_RETRY_POLICY.baseDelayMs));
+});
+
+test('computePendingIapRetryDelayMs should grow exponentially and cap by maxDelay', () => {
+  const policy = { baseDelayMs: 100, maxDelayMs: 500, maxAttempts: 9 };
+  assert.equal(computePendingIapRetryDelayMs(1, policy), 100);
+  assert.equal(computePendingIapRetryDelayMs(2, policy), 200);
+  assert.equal(computePendingIapRetryDelayMs(3, policy), 400);
+  assert.equal(computePendingIapRetryDelayMs(4, policy), 500);
+});
+
+test('isPendingIapRetryable should respect cooldown and maxAttempts', () => {
+  const now = 10_000;
+  const retryPolicy = { baseDelayMs: 100, maxDelayMs: 1_000, maxAttempts: 3 };
+  const item = normalizePendingIapItem(buildItem({
+    transactionId: 'tx-cooldown',
+    attempts: 1,
+    updatedAt: now,
+    nextRetryAt: now + 99,
+  }));
+  assert.equal(isPendingIapRetryable(item, now, retryPolicy), false);
+  assert.equal(isPendingIapRetryable(item, now + 100, retryPolicy), true);
+
+  const exhausted = normalizePendingIapItem(buildItem({
+    transactionId: 'tx-exhausted',
+    attempts: 3,
+    updatedAt: now,
+    nextRetryAt: now,
+  }));
+  assert.equal(isPendingIapRetryable(exhausted, now + 1, retryPolicy), false);
+});
+
+test('filterRetryablePendingIap should return only due transactions', () => {
+  const now = 20_000;
+  const retryPolicy = { baseDelayMs: 100, maxDelayMs: 10_000, maxAttempts: 4 };
+  const queue = [
+    buildItem({ transactionId: 'tx-due', attempts: 1, nextRetryAt: now }),
+    buildItem({ transactionId: 'tx-wait', attempts: 1, nextRetryAt: now + 10 }),
+    buildItem({ transactionId: 'tx-max', attempts: 4, nextRetryAt: now }),
+  ];
+  const retryable = filterRetryablePendingIap(queue, now, retryPolicy);
+  assert.equal(retryable.length, 1);
+  assert.equal(retryable[0].transactionId, 'tx-due');
+});
+
+test('registerPendingIapFailure should set nextRetryAt null when max attempts reached', () => {
+  const retryPolicy = { baseDelayMs: 100, maxDelayMs: 500, maxAttempts: 2 };
+  const now = 30_000;
+  const first = registerPendingIapFailure(
+    [],
+    buildItem({ transactionId: 'tx-limit' }),
+    'network',
+    now,
+    retryPolicy,
+  );
+  const second = registerPendingIapFailure(
+    first,
+    buildItem({ transactionId: 'tx-limit' }),
+    'still failed',
+    now + 1_000,
+    retryPolicy,
+  );
+  assert.equal(second.length, 1);
+  assert.equal(second[0].attempts, 2);
+  assert.equal(second[0].nextRetryAt, null);
+  assert.equal(isPendingIapRetryable(second[0], now + 1_001, retryPolicy), false);
 });
 
 test('settlePendingIapSuccess should remove transaction', () => {
