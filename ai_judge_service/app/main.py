@@ -6,7 +6,9 @@ import httpx
 from fastapi import FastAPI, Header, HTTPException
 
 from .models import JudgeDispatchRequest, MarkJudgeJobFailedInput
-from .scoring import build_report
+from .openai_judge import OpenAiJudgeConfig, build_report_with_openai
+from .runtime_policy import PROVIDER_OPENAI, normalize_provider, parse_env_bool, should_use_openai
+from .scoring import build_report, resolve_effective_style_mode
 
 
 @dataclass(frozen=True)
@@ -18,9 +20,18 @@ class Settings:
     callback_timeout_secs: float
     process_delay_ms: int
     judge_style_mode: str
+    provider: str
+    openai_api_key: str
+    openai_model: str
+    openai_base_url: str
+    openai_timeout_secs: float
+    openai_temperature: float
+    openai_max_retries: int
+    openai_fallback_to_mock: bool
 
 
 def _load_settings() -> Settings:
+    provider = normalize_provider(os.getenv("AI_JUDGE_PROVIDER", "mock"))
     return Settings(
         ai_internal_key=os.getenv("AI_JUDGE_INTERNAL_KEY", "dev-ai-internal-key"),
         chat_server_base_url=os.getenv("CHAT_SERVER_BASE_URL", "http://127.0.0.1:6688"),
@@ -35,11 +46,22 @@ def _load_settings() -> Settings:
         callback_timeout_secs=float(os.getenv("CALLBACK_TIMEOUT_SECONDS", "8")),
         process_delay_ms=int(os.getenv("JUDGE_PROCESS_DELAY_MS", "0")),
         judge_style_mode=os.getenv("JUDGE_STYLE_MODE", "rational"),
+        provider=provider,
+        openai_api_key=os.getenv("OPENAI_API_KEY", ""),
+        openai_model=os.getenv("AI_JUDGE_OPENAI_MODEL", "gpt-4.1-mini"),
+        openai_base_url=os.getenv("AI_JUDGE_OPENAI_BASE_URL", "https://api.openai.com/v1").rstrip("/"),
+        openai_timeout_secs=float(os.getenv("AI_JUDGE_OPENAI_TIMEOUT_SECONDS", "25")),
+        openai_temperature=float(os.getenv("AI_JUDGE_OPENAI_TEMPERATURE", "0.1")),
+        openai_max_retries=int(os.getenv("AI_JUDGE_OPENAI_MAX_RETRIES", "2")),
+        openai_fallback_to_mock=parse_env_bool(
+            os.getenv("AI_JUDGE_OPENAI_FALLBACK_TO_MOCK"),
+            default=True,
+        ),
     )
 
 
 SETTINGS = _load_settings()
-app = FastAPI(title="AI Judge Service (Mock)", version="0.1.0")
+app = FastAPI(title="AI Judge Service", version="0.2.0")
 
 
 def _join_url(base: str, path: str) -> str:
@@ -80,6 +102,44 @@ async def _callback_failed(job_id: int, error_message: str) -> None:
         raise RuntimeError(f"failed callback failed: status={resp.status_code}, body={resp.text}")
 
 
+async def _build_report_by_runtime(
+    request: JudgeDispatchRequest,
+    effective_style_mode: str,
+    style_mode_source: str,
+):
+    if should_use_openai(SETTINGS.provider, SETTINGS.openai_api_key):
+        cfg = OpenAiJudgeConfig(
+            api_key=SETTINGS.openai_api_key,
+            model=SETTINGS.openai_model,
+            base_url=SETTINGS.openai_base_url,
+            timeout_secs=SETTINGS.openai_timeout_secs,
+            temperature=SETTINGS.openai_temperature,
+            max_retries=SETTINGS.openai_max_retries,
+        )
+        try:
+            return await build_report_with_openai(
+                request=request,
+                effective_style_mode=effective_style_mode,
+                style_mode_source=style_mode_source,
+                cfg=cfg,
+            )
+        except Exception as err:
+            if not SETTINGS.openai_fallback_to_mock:
+                raise RuntimeError(f"openai runtime failed: {err}") from err
+            report = build_report(request, system_style_mode=SETTINGS.judge_style_mode)
+            report.payload["provider"] = "ai-judge-service-mock-fallback"
+            report.payload["fallbackFrom"] = "openai"
+            report.payload["fallbackReason"] = str(err)[:500]
+            return report
+
+    report = build_report(request, system_style_mode=SETTINGS.judge_style_mode)
+    if SETTINGS.provider == PROVIDER_OPENAI and not SETTINGS.openai_api_key.strip():
+        report.payload["provider"] = "ai-judge-service-mock-missing-openai-key"
+        report.payload["fallbackFrom"] = "openai"
+        report.payload["fallbackReason"] = "missing OPENAI_API_KEY"
+    return report
+
+
 @app.get("/healthz")
 async def healthz() -> dict[str, bool]:
     return {"ok": True}
@@ -98,7 +158,27 @@ async def dispatch_judge_job(
         await _callback_failed(request.job.job_id, "empty debate messages, cannot judge")
         return {"accepted": True, "jobId": request.job.job_id, "status": "marked_failed"}
 
-    report = build_report(request, system_style_mode=SETTINGS.judge_style_mode)
+    effective_style_mode, style_mode_source = resolve_effective_style_mode(
+        request.job.style_mode,
+        SETTINGS.judge_style_mode,
+    )
+    try:
+        report = await _build_report_by_runtime(
+            request,
+            effective_style_mode=effective_style_mode,
+            style_mode_source=style_mode_source,
+        )
+    except Exception as err:
+        error_message = f"judge runtime failed: {err}"
+        try:
+            await _callback_failed(request.job.job_id, error_message)
+        except Exception as callback_err:  # pragma: no cover
+            raise HTTPException(
+                status_code=502,
+                detail=f"runtime failed and callback_failed failed: {callback_err}",
+            ) from callback_err
+        return {"accepted": True, "jobId": request.job.job_id, "status": "marked_failed"}
+
     try:
         await _callback_report(request.job.job_id, report.model_dump(mode="json"))
     except Exception as err:  # pragma: no cover
@@ -109,4 +189,5 @@ async def dispatch_judge_job(
         "jobId": request.job.job_id,
         "winner": report.winner,
         "needsDrawVote": report.needs_draw_vote,
+        "provider": report.payload.get("provider"),
     }
