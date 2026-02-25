@@ -1,7 +1,7 @@
 use crate::{AppError, AppState};
 use chrono::{DateTime, Utc};
 use reqwest::Client;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use sqlx::FromRow;
 use tracing::warn;
 
@@ -106,6 +106,14 @@ struct AiJudgeDispatchMessage {
     created_at: DateTime<Utc>,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AiJudgeDispatchResponse {
+    accepted: Option<bool>,
+    job_id: Option<u64>,
+    status: Option<String>,
+}
+
 fn build_dispatch_url(base: &str, path: &str) -> String {
     let base = base.trim_end_matches('/');
     let path = path.trim_start_matches('/');
@@ -121,6 +129,37 @@ fn sanitize_error_message(err: &str) -> String {
         return ret.to_string();
     }
     ret.chars().take(DISPATCH_ERROR_MAX_LEN).collect()
+}
+
+fn validate_dispatch_response(body: &str, expected_job_id: u64) -> Result<(), AppError> {
+    let trimmed = body.trim();
+    if trimmed.is_empty() {
+        return Ok(());
+    }
+
+    // Backward compatibility: old AI judge mock may return free-form json body.
+    let parsed: AiJudgeDispatchResponse = match serde_json::from_str(trimmed) {
+        Ok(v) => v,
+        Err(_) => return Ok(()),
+    };
+
+    if parsed.accepted == Some(false) {
+        return Err(AppError::DebateConflict(format!(
+            "dispatch response rejected: accepted=false, status={}",
+            parsed.status.unwrap_or_else(|| "unknown".to_string())
+        )));
+    }
+
+    if let Some(job_id) = parsed.job_id {
+        if job_id != expected_job_id {
+            return Err(AppError::DebateConflict(format!(
+                "dispatch response job_id mismatch: expected={}, got={}",
+                expected_job_id, job_id
+            )));
+        }
+    }
+
+    Ok(())
 }
 
 impl AppState {
@@ -359,6 +398,8 @@ impl AppState {
             .await
             .map_err(|e| AppError::AnyError(e.into()))?;
         if resp.status().is_success() {
+            let body = resp.text().await.unwrap_or_default();
+            validate_dispatch_response(&body, payload.job.job_id)?;
             Ok(())
         } else {
             let status = resp.status();
@@ -542,6 +583,22 @@ mod tests {
         Ok((format!("http://{}", addr), hit_count))
     }
 
+    async fn spawn_mock_dispatch_server_with_json(response: Value) -> Result<String> {
+        let app = Router::new().route(
+            "/internal/judge/dispatch",
+            post(move |Json(_payload): Json<Value>| {
+                let response = response.clone();
+                async move { (axum::http::StatusCode::OK, Json(response)) }
+            }),
+        );
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        let addr = listener.local_addr()?;
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        Ok(format!("http://{}", addr))
+    }
+
     async fn seed_messages(state: &AppState, session_id: i64, count: i64) -> Result<()> {
         for idx in 0..count {
             sqlx::query(
@@ -697,6 +754,88 @@ mod tests {
         Ok(())
     }
 
+    #[tokio::test]
+    async fn dispatch_pending_judge_jobs_once_should_mark_failed_when_response_rejected(
+    ) -> Result<()> {
+        let (_tdb, mut state) = AppState::new_for_test().await?;
+        let inner = Arc::get_mut(&mut state.inner).expect("state should be unique");
+        inner.config.ai_judge.dispatch_max_attempts = 1;
+        inner.config.ai_judge.dispatch_timeout_ms = 1_000;
+        inner.config.ai_judge.dispatch_lock_secs = 1;
+        inner.config.ai_judge.dispatch_batch_size = 20;
+        inner.config.ai_judge.service_base_url =
+            spawn_mock_dispatch_server_with_json(serde_json::json!({
+                "accepted": false,
+                "status": "marked_failed"
+            }))
+            .await?;
+        inner.config.ai_judge.dispatch_path = "/internal/judge/dispatch".to_string();
+
+        let session_id = seed_topic_and_session(&state, 1, "judging").await?;
+        let job_id = seed_running_job(&state, session_id, 0, None).await?;
+
+        let tick = state.dispatch_pending_judge_jobs_once().await?;
+        assert_eq!(tick.claimed, 1);
+        assert_eq!(tick.dispatched, 0);
+        assert_eq!(tick.failed, 1);
+        assert_eq!(tick.marked_failed, 1);
+
+        let row: (String, Option<String>) = sqlx::query_as(
+            r#"
+            SELECT status, error_message
+            FROM judge_jobs
+            WHERE id = $1
+            "#,
+        )
+        .bind(job_id)
+        .fetch_one(&state.pool)
+        .await?;
+        assert_eq!(row.0, "failed");
+        assert!(row.1.unwrap_or_default().contains("accepted=false"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn dispatch_pending_judge_jobs_once_should_mark_failed_when_response_job_id_mismatch(
+    ) -> Result<()> {
+        let (_tdb, mut state) = AppState::new_for_test().await?;
+        let inner = Arc::get_mut(&mut state.inner).expect("state should be unique");
+        inner.config.ai_judge.dispatch_max_attempts = 1;
+        inner.config.ai_judge.dispatch_timeout_ms = 1_000;
+        inner.config.ai_judge.dispatch_lock_secs = 1;
+        inner.config.ai_judge.dispatch_batch_size = 20;
+        inner.config.ai_judge.service_base_url =
+            spawn_mock_dispatch_server_with_json(serde_json::json!({
+                "accepted": true,
+                "jobId": 999999_u64
+            }))
+            .await?;
+        inner.config.ai_judge.dispatch_path = "/internal/judge/dispatch".to_string();
+
+        let session_id = seed_topic_and_session(&state, 1, "judging").await?;
+        let job_id = seed_running_job(&state, session_id, 0, None).await?;
+
+        let tick = state.dispatch_pending_judge_jobs_once().await?;
+        assert_eq!(tick.claimed, 1);
+        assert_eq!(tick.dispatched, 0);
+        assert_eq!(tick.failed, 1);
+        assert_eq!(tick.marked_failed, 1);
+
+        let row: (String, Option<String>) = sqlx::query_as(
+            r#"
+            SELECT status, error_message
+            FROM judge_jobs
+            WHERE id = $1
+            "#,
+        )
+        .bind(job_id)
+        .fetch_one(&state.pool)
+        .await?;
+        assert_eq!(row.0, "failed");
+        assert!(row.1.unwrap_or_default().contains("job_id mismatch"));
+        Ok(())
+    }
+
     #[test]
     fn build_dispatch_url_should_join_base_and_path() {
         assert_eq!(
@@ -707,5 +846,26 @@ mod tests {
             build_dispatch_url("http://127.0.0.1:8787", "internal/judge/dispatch"),
             "http://127.0.0.1:8787/internal/judge/dispatch"
         );
+    }
+
+    #[test]
+    fn validate_dispatch_response_should_allow_legacy_or_empty_body() {
+        assert!(validate_dispatch_response("", 1).is_ok());
+        assert!(validate_dispatch_response("{\"ok\":true}", 1).is_ok());
+        assert!(validate_dispatch_response("not-json", 1).is_ok());
+    }
+
+    #[test]
+    fn validate_dispatch_response_should_reject_accepted_false() {
+        let err = validate_dispatch_response(r#"{"accepted":false,"status":"marked_failed"}"#, 42)
+            .expect_err("should reject");
+        assert!(err.to_string().contains("accepted=false"));
+    }
+
+    #[test]
+    fn validate_dispatch_response_should_reject_job_id_mismatch() {
+        let err = validate_dispatch_response(r#"{"accepted":true,"jobId":99}"#, 42)
+            .expect_err("should reject mismatch");
+        assert!(err.to_string().contains("job_id mismatch"));
     }
 }
