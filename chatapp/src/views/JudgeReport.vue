@@ -387,11 +387,18 @@ export default {
         this.patchRealtimeStats({
           coalescedEvents: this.realtimeStats.coalescedEvents + 1,
         });
+        this.pendingAutoRefresh = {
+          ...this.pendingAutoRefresh,
+          sourceEventType,
+          coalescedCount: Number(this.pendingAutoRefresh.coalescedCount || 0) + 1,
+        };
+      } else {
+        this.pendingAutoRefresh = {
+          sessionId,
+          sourceEventType,
+          coalescedCount: 0,
+        };
       }
-      this.pendingAutoRefresh = {
-        sessionId,
-        sourceEventType,
-      };
       this.maybeFlushPendingAutoRefresh();
     },
     maybeFlushPendingAutoRefresh() {
@@ -475,6 +482,8 @@ export default {
       }
       const pending = this.pendingAutoRefresh;
       this.pendingAutoRefresh = null;
+      let retryCountInRun = 0;
+      let lastRunErrorMessage = '';
       this.autoRefreshBusy = true;
       try {
         const result = await runAutoRefreshWithRetry({
@@ -482,6 +491,7 @@ export default {
           sourceEventType: pending.sourceEventType,
           shouldRetry: shouldRetryAutoRefresh,
           onRetry: () => {
+            retryCountInRun += 1;
             this.patchRealtimeStats({
               retryTriggered: this.realtimeStats.retryTriggered + 1,
             });
@@ -495,21 +505,41 @@ export default {
             });
           },
           onFailure: (v) => {
+            lastRunErrorMessage = this.errorMessage(v.error);
             this.patchRealtimeStats({
               refreshFailure: this.realtimeStats.refreshFailure + 1,
               lastRefreshAt: v.at,
               lastEventType: pending.sourceEventType,
-              lastError: this.errorMessage(v.error),
+              lastError: lastRunErrorMessage,
             });
           },
         });
         this.lastAutoRefreshAt = result.at || Date.now();
+        this.emitRealtimeTelemetry({
+          pending,
+          result,
+          retryCountInRun,
+          errorMessage: lastRunErrorMessage,
+        });
       } finally {
         this.autoRefreshBusy = false;
         if (this.pendingAutoRefresh) {
           this.maybeFlushPendingAutoRefresh();
         }
       }
+    },
+    emitRealtimeTelemetry({ pending, result, retryCountInRun, errorMessage }) {
+      this.$store.dispatch('judgeRealtimeRefresh', {
+        debateSessionId: String(pending.sessionId),
+        sourceEventType: pending.sourceEventType,
+        result: result.ok ? 'success' : 'failure',
+        attempts: result.attempt,
+        retryCount: retryCountInRun,
+        coalescedEvents: Number(pending.coalescedCount || 0),
+        errorMessage: result.ok ? '' : errorMessage,
+      }).catch((err) => {
+        console.warn('report judge realtime refresh analytics failed:', err);
+      });
     },
     handleJudgeReportReadyEvent(event) {
       if (!this.shouldHandleSessionEvent(event)) {

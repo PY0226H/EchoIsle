@@ -136,6 +136,37 @@ export async function sendNavigationEvent(context, token, from, to) {
     await sendEvent(event, token);
 }
 
+export async function sendJudgeRealtimeRefreshEvent(
+    context,
+    token,
+    {
+        debateSessionId,
+        sourceEventType,
+        result,
+        attempts,
+        retryCount,
+        coalescedEvents,
+        errorMessage,
+    },
+) {
+    const event = create(AnalyticsEventSchema, {
+        context,
+        eventType: {
+            case: "judgeRealtimeRefresh",
+            value: {
+                debateSessionId: String(debateSessionId || ""),
+                sourceEventType: String(sourceEventType || ""),
+                result: String(result || ""),
+                attempts: Number(attempts || 0),
+                retryCount: Number(retryCount || 0),
+                coalescedEvents: Number(coalescedEvents || 0),
+                errorMessage: String(errorMessage || ""),
+            },
+        },
+    });
+    await sendEvent(event, token);
+}
+
 async function sendEvent(event, token) {
     console.log("event:", event);
     try {

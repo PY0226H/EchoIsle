@@ -40,7 +40,15 @@ CREATE TABLE analytics.analytics_events(
     chat_left_id Nullable(String),
     -- NavigationEvent
     navigation_from Nullable(String),
-    navigation_to Nullable(String)) ENGINE = MergeTree()
+    navigation_to Nullable(String),
+    -- JudgeRealtimeRefreshEvent
+    judge_refresh_debate_session_id Nullable(String),
+    judge_refresh_source_event_type Nullable(String),
+    judge_refresh_result Nullable(String),
+    judge_refresh_attempts Nullable(Int32),
+    judge_refresh_retry_count Nullable(Int32),
+    judge_refresh_coalesced_events Nullable(Int32),
+    judge_refresh_error_message Nullable(String)) ENGINE = MergeTree()
 ORDER BY
     (
         event_type,
@@ -175,3 +183,16 @@ INSERT INTO analytics.analytics_events(client_id, session_id, app_version, syste
 INSERT INTO analytics.analytics_events(client_id, session_id, app_version, system_os, system_arch, system_locale, system_timezone, user_id, client_ts, server_ts, event_type, navigation_from, navigation_to)
     VALUES ('client_005', 'session_005', '1.0.4', 'Android', 'arm64-v8a', 'es-ES', 'Europe/Madrid', 'user_789', now(), now(), 'Navigation', '/home', '/chat');
 
+-- Insert sample data for JudgeRealtimeRefreshEvent
+INSERT INTO analytics.analytics_events(
+    client_id, session_id, app_version, system_os, system_arch, system_locale, system_timezone,
+    user_id, client_ts, server_ts, event_type,
+    judge_refresh_debate_session_id, judge_refresh_source_event_type, judge_refresh_result,
+    judge_refresh_attempts, judge_refresh_retry_count, judge_refresh_coalesced_events, judge_refresh_error_message
+)
+VALUES (
+    'client_006', 'session_006', '1.0.5', 'iOS', 'arm64', 'zh-CN', 'Asia/Shanghai',
+    'user_900', now(), now(), 'judge_realtime_refresh',
+    '123', 'DebateDrawVoteResolved', 'success',
+    2, 1, 3, ''
+);

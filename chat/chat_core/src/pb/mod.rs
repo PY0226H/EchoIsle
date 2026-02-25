@@ -38,3 +38,9 @@ impl From<NavigationEvent> for EventType {
         EventType::Navigation(event)
     }
 }
+
+impl From<JudgeRealtimeRefreshEvent> for EventType {
+    fn from(event: JudgeRealtimeRefreshEvent) -> Self {
+        EventType::JudgeRealtimeRefresh(event)
+    }
+}

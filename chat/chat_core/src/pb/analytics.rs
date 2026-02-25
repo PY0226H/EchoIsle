@@ -6,7 +6,7 @@ pub struct AnalyticsEvent {
     pub context: ::core::option::Option<EventContext>,
     #[prost(
         oneof = "analytics_event::EventType",
-        tags = "8, 9, 10, 11, 12, 13, 14, 15, 16, 17"
+        tags = "8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18"
     )]
     pub event_type: ::core::option::Option<analytics_event::EventType>,
 }
@@ -34,6 +34,8 @@ pub mod analytics_event {
         ChatLeft(super::ChatLeftEvent),
         #[prost(message, tag = "17")]
         Navigation(super::NavigationEvent),
+        #[prost(message, tag = "18")]
+        JudgeRealtimeRefresh(super::JudgeRealtimeRefreshEvent),
     }
 }
 /// / 应用启动事件
@@ -147,6 +149,31 @@ pub struct NavigationEvent {
     /// / 目标页面
     #[prost(string, tag = "2")]
     pub to: ::prost::alloc::string::String,
+}
+/// / AI Judge 判决页实时刷新事件
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct JudgeRealtimeRefreshEvent {
+    /// / 辩论 session id
+    #[prost(string, tag = "1")]
+    pub debate_session_id: ::prost::alloc::string::String,
+    /// / 触发来源事件类型（例如 DebateJudgeReportReady）
+    #[prost(string, tag = "2")]
+    pub source_event_type: ::prost::alloc::string::String,
+    /// / 刷新结果（success/failure）
+    #[prost(string, tag = "3")]
+    pub result: ::prost::alloc::string::String,
+    /// / 本次刷新成功或失败时的尝试次数
+    #[prost(int32, tag = "4")]
+    pub attempts: i32,
+    /// / 本轮累计重试次数
+    #[prost(int32, tag = "5")]
+    pub retry_count: i32,
+    /// / 本轮累计合并事件数
+    #[prost(int32, tag = "6")]
+    pub coalesced_events: i32,
+    /// / 错误文本（success 时为空）
+    #[prost(string, tag = "7")]
+    pub error_message: ::prost::alloc::string::String,
 }
 /// / 事件上下文
 #[derive(Clone, PartialEq, ::prost::Message)]

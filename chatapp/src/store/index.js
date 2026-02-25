@@ -4,7 +4,18 @@ import { jwtDecode } from "jwt-decode";
 import { getUrlBase } from '../utils';
 import { initSSE } from '../utils';
 import { formatMessageDate } from '../utils';
-import { sendAppStartEvent, sendUserLoginEvent, sendUserLogoutEvent, sendUserRegisterEvent, sendChatCreatedEvent, sendMessageSentEvent, sendChatJoinedEvent, sendChatLeftEvent, sendNavigationEvent } from '../analytics/event';
+import {
+  sendAppStartEvent,
+  sendChatCreatedEvent,
+  sendChatJoinedEvent,
+  sendChatLeftEvent,
+  sendJudgeRealtimeRefreshEvent,
+  sendMessageSentEvent,
+  sendNavigationEvent,
+  sendUserLoginEvent,
+  sendUserLogoutEvent,
+  sendUserRegisterEvent,
+} from '../analytics/event';
 import { v4 as uuidv4 } from 'uuid';
 import packageJson from '../../package.json';
 
@@ -404,6 +415,9 @@ export default createStore({
     },
     async navigation({ state }, { from, to }) {
       await sendNavigationEvent(state.context, state.token, from, to);
+    },
+    async judgeRealtimeRefresh({ state }, payload) {
+      await sendJudgeRealtimeRefreshEvent(state.context, state.token, payload);
     },
     async refreshAccessTickets({ state, commit }) {
       if (!state.token) {

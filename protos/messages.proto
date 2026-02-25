@@ -17,6 +17,7 @@ message AnalyticsEvent {
     ChatJoinedEvent chat_joined = 15;
     ChatLeftEvent chat_left = 16;
     NavigationEvent navigation = 17;
+    JudgeRealtimeRefreshEvent judge_realtime_refresh = 18;
   }
 }
 
@@ -90,6 +91,24 @@ message NavigationEvent {
   string from = 1;
   /// 目标页面
   string to = 2;
+}
+
+/// AI Judge 判决页实时刷新事件
+message JudgeRealtimeRefreshEvent {
+  /// 辩论 session id
+  string debate_session_id = 1;
+  /// 触发来源事件类型（例如 DebateJudgeReportReady）
+  string source_event_type = 2;
+  /// 刷新结果（success/failure）
+  string result = 3;
+  /// 本次刷新成功或失败时的尝试次数
+  int32 attempts = 4;
+  /// 本轮累计重试次数
+  int32 retry_count = 5;
+  /// 本轮累计合并事件数
+  int32 coalesced_events = 6;
+  /// 错误文本（success 时为空）
+  string error_message = 7;
 }
 
 /// 事件上下文

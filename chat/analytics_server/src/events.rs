@@ -55,6 +55,14 @@ pub struct AnalyticsEventRow {
     // NavigationEvent
     pub navigation_from: Option<String>,
     pub navigation_to: Option<String>,
+    // JudgeRealtimeRefreshEvent
+    pub judge_refresh_debate_session_id: Option<String>,
+    pub judge_refresh_source_event_type: Option<String>,
+    pub judge_refresh_result: Option<String>,
+    pub judge_refresh_attempts: Option<i32>,
+    pub judge_refresh_retry_count: Option<i32>,
+    pub judge_refresh_coalesced_events: Option<i32>,
+    pub judge_refresh_error_message: Option<String>,
 }
 
 trait EventConsume {
@@ -188,6 +196,7 @@ impl EventConsume for EventType {
             EventType::ChatJoined(event) => event.consume(row),
             EventType::ChatLeft(event) => event.consume(row),
             EventType::Navigation(event) => event.consume(row),
+            EventType::JudgeRealtimeRefresh(event) => event.consume(row),
         }
     }
 }
@@ -272,5 +281,74 @@ impl EventConsume for NavigationEvent {
         row.navigation_from = Some(self.from);
         row.navigation_to = Some(self.to);
         Ok(())
+    }
+}
+
+impl EventConsume for JudgeRealtimeRefreshEvent {
+    fn consume(self, row: &mut AnalyticsEventRow) -> Result<(), AppError> {
+        row.event_type = "judge_realtime_refresh".to_string();
+        row.judge_refresh_debate_session_id = Some(self.debate_session_id);
+        row.judge_refresh_source_event_type = Some(self.source_event_type);
+        row.judge_refresh_result = Some(self.result);
+        row.judge_refresh_attempts = Some(self.attempts);
+        row.judge_refresh_retry_count = Some(self.retry_count);
+        row.judge_refresh_coalesced_events = Some(self.coalesced_events);
+        row.judge_refresh_error_message = if self.error_message.is_empty() {
+            None
+        } else {
+            Some(self.error_message)
+        };
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn judge_realtime_refresh_event_should_consume_row() {
+        let mut row = AnalyticsEventRow::default();
+        let event = JudgeRealtimeRefreshEvent {
+            debate_session_id: "123".to_string(),
+            source_event_type: "DebateJudgeReportReady".to_string(),
+            result: "success".to_string(),
+            attempts: 2,
+            retry_count: 1,
+            coalesced_events: 3,
+            error_message: String::new(),
+        };
+
+        event.consume(&mut row).expect("consume should succeed");
+
+        assert_eq!(row.event_type, "judge_realtime_refresh");
+        assert_eq!(row.judge_refresh_debate_session_id.as_deref(), Some("123"));
+        assert_eq!(
+            row.judge_refresh_source_event_type.as_deref(),
+            Some("DebateJudgeReportReady")
+        );
+        assert_eq!(row.judge_refresh_result.as_deref(), Some("success"));
+        assert_eq!(row.judge_refresh_attempts, Some(2));
+        assert_eq!(row.judge_refresh_retry_count, Some(1));
+        assert_eq!(row.judge_refresh_coalesced_events, Some(3));
+        assert_eq!(row.judge_refresh_error_message, None);
+    }
+
+    #[test]
+    fn judge_realtime_refresh_event_should_keep_error_message_when_failed() {
+        let mut row = AnalyticsEventRow::default();
+        let event = JudgeRealtimeRefreshEvent {
+            debate_session_id: "456".to_string(),
+            source_event_type: "DebateDrawVoteResolved".to_string(),
+            result: "failure".to_string(),
+            attempts: 3,
+            retry_count: 2,
+            coalesced_events: 0,
+            error_message: "timeout".to_string(),
+        };
+
+        event.consume(&mut row).expect("consume should succeed");
+
+        assert_eq!(row.judge_refresh_error_message.as_deref(), Some("timeout"));
     }
 }
