@@ -1,0 +1,224 @@
+import unittest
+from datetime import datetime, timezone
+from types import SimpleNamespace
+
+from fastapi import HTTPException
+
+from app.app_factory import (
+    create_app,
+    create_default_app,
+    create_runtime,
+    require_internal_key,
+)
+from app.settings import Settings
+
+
+class _FakeReport:
+    def __init__(self) -> None:
+        self.winner = "pro"
+        self.needs_draw_vote = False
+        self.payload = {"provider": "openai"}
+
+    def model_dump(self, *, mode: str = "python") -> dict:
+        return {"winner": self.winner, "mode": mode}
+
+
+def _build_settings(**overrides: object) -> Settings:
+    base = {
+        "ai_internal_key": "k",
+        "chat_server_base_url": "http://chat",
+        "report_path_template": "/r/{job_id}",
+        "failed_path_template": "/f/{job_id}",
+        "callback_timeout_secs": 8.0,
+        "process_delay_ms": 0,
+        "judge_style_mode": "rational",
+        "provider": "mock",
+        "openai_api_key": "",
+        "openai_model": "gpt-4.1-mini",
+        "openai_base_url": "https://api.openai.com/v1",
+        "openai_timeout_secs": 25.0,
+        "openai_temperature": 0.1,
+        "openai_max_retries": 2,
+        "openai_fallback_to_mock": True,
+        "rag_enabled": True,
+        "rag_knowledge_file": "",
+        "rag_max_snippets": 4,
+        "rag_max_chars_per_snippet": 280,
+        "rag_query_message_limit": 80,
+        "rag_source_whitelist": ("https://teamfighttactics.leagueoflegends.com/en-us/news",),
+        "rag_backend": "file",
+        "rag_openai_embedding_model": "text-embedding-3-small",
+        "rag_milvus_uri": "",
+        "rag_milvus_token": "",
+        "rag_milvus_db_name": "",
+        "rag_milvus_collection": "",
+        "rag_milvus_vector_field": "embedding",
+        "rag_milvus_content_field": "content",
+        "rag_milvus_title_field": "title",
+        "rag_milvus_source_url_field": "source_url",
+        "rag_milvus_chunk_id_field": "chunk_id",
+        "rag_milvus_tags_field": "tags",
+        "rag_milvus_metric_type": "COSINE",
+        "rag_milvus_search_limit": 20,
+        "stage_agent_max_chunks": 12,
+    }
+    base.update(overrides)
+    return Settings(**base)
+
+
+def _build_request() -> SimpleNamespace:
+    now = datetime.now(timezone.utc)
+    return SimpleNamespace(
+        job=SimpleNamespace(
+            job_id=1,
+            ws_id=1,
+            session_id=2,
+            requested_by=1,
+            style_mode="rational",
+            rejudge_triggered=False,
+            requested_at=now,
+        ),
+        session=SimpleNamespace(
+            status="judging",
+            scheduled_start_at=now,
+            actual_start_at=now,
+            end_at=now,
+        ),
+        topic=SimpleNamespace(
+            title="test",
+            description="desc",
+            category="game",
+            stance_pro="pro",
+            stance_con="con",
+            context_seed=None,
+        ),
+        messages=[SimpleNamespace(message_id=1, user_id=1, side="pro", content="hello")],
+        message_window_size=100,
+        rubric_version="v1",
+    )
+
+
+class AppFactoryTests(unittest.IsolatedAsyncioTestCase):
+    async def test_require_internal_key_should_validate_header(self) -> None:
+        settings = _build_settings(ai_internal_key="expected")
+
+        with self.assertRaises(HTTPException) as ctx_missing:
+            require_internal_key(settings, None)
+        self.assertEqual(ctx_missing.exception.status_code, 401)
+        self.assertEqual(ctx_missing.exception.detail, "missing x-ai-internal-key")
+
+        with self.assertRaises(HTTPException) as ctx_invalid:
+            require_internal_key(settings, "wrong")
+        self.assertEqual(ctx_invalid.exception.status_code, 401)
+        self.assertEqual(ctx_invalid.exception.detail, "invalid x-ai-internal-key")
+
+        require_internal_key(settings, " expected ")
+
+    async def test_create_runtime_should_bind_callbacks_and_adapter(self) -> None:
+        settings = _build_settings(
+            ai_internal_key="k2",
+            process_delay_ms=120,
+            judge_style_mode="entertaining",
+        )
+        calls: dict[str, object] = {}
+
+        async def fake_callback_report(*, cfg: object, job_id: int, payload: dict) -> None:
+            calls["report"] = (cfg, job_id, payload)
+
+        async def fake_callback_failed(*, cfg: object, job_id: int, error_message: str) -> None:
+            calls["failed"] = (cfg, job_id, error_message)
+
+        async def fake_runtime_builder(**kwargs: object) -> _FakeReport:
+            calls["runtime"] = kwargs
+            return _FakeReport()
+
+        runtime = create_runtime(
+            settings=settings,
+            callback_report_impl=fake_callback_report,
+            callback_failed_impl=fake_callback_failed,
+            build_report_by_runtime_fn=fake_runtime_builder,
+        )
+        self.assertEqual(runtime.dispatch_runtime_cfg.process_delay_ms, 120)
+        self.assertEqual(runtime.dispatch_runtime_cfg.judge_style_mode, "entertaining")
+
+        await runtime.callback_report_fn(11, {"a": 1})
+        await runtime.callback_failed_fn(11, "err")
+        report_call = calls["report"]
+        failed_call = calls["failed"]
+        self.assertEqual(report_call[1], 11)
+        self.assertEqual(report_call[2], {"a": 1})
+        self.assertEqual(failed_call[1], 11)
+        self.assertEqual(failed_call[2], "err")
+
+        request = _build_request()
+        result = await runtime.build_report_by_runtime_adapter(
+            request,
+            "rational",
+            "system_config",
+        )
+        self.assertIsInstance(result, _FakeReport)
+        runtime_call = calls["runtime"]
+        self.assertEqual(runtime_call["request"], request)
+        self.assertEqual(runtime_call["effective_style_mode"], "rational")
+        self.assertEqual(runtime_call["style_mode_source"], "system_config")
+        self.assertEqual(runtime_call["settings"], settings)
+
+    async def test_create_app_should_register_routes_and_delegate_dispatch(self) -> None:
+        settings = _build_settings(ai_internal_key="k3")
+        request = _build_request()
+        callback_report_calls: list[tuple[int, dict]] = []
+        callback_failed_calls: list[tuple[int, str]] = []
+
+        async def fake_runtime_builder(**_kwargs: object) -> _FakeReport:
+            return _FakeReport()
+
+        async def fake_callback_report(*, cfg: object, job_id: int, payload: dict) -> None:
+            callback_report_calls.append((job_id, payload))
+
+        async def fake_callback_failed(*, cfg: object, job_id: int, error_message: str) -> None:
+            callback_failed_calls.append((job_id, error_message))
+
+        async def fake_sleep(_seconds: float) -> None:
+            return None
+
+        runtime = create_runtime(
+            settings=settings,
+            build_report_by_runtime_fn=fake_runtime_builder,
+            callback_report_impl=fake_callback_report,
+            callback_failed_impl=fake_callback_failed,
+            sleep_fn=fake_sleep,
+        )
+        app = create_app(runtime)
+        paths = {route.path for route in app.routes if hasattr(route, "path")}
+        self.assertIn("/healthz", paths)
+        self.assertIn("/internal/judge/dispatch", paths)
+
+        dispatch_route = next(route for route in app.routes if getattr(route, "path", "") == "/internal/judge/dispatch")
+        endpoint = dispatch_route.endpoint
+
+        with self.assertRaises(HTTPException):
+            await endpoint(request=request, x_ai_internal_key=None)
+
+        result = await endpoint(request=request, x_ai_internal_key="k3")
+        self.assertTrue(result["accepted"])
+        self.assertEqual(result["winner"], "pro")
+        self.assertEqual(result["provider"], "openai")
+        self.assertEqual(len(callback_report_calls), 1)
+        self.assertEqual(callback_report_calls[0][0], 1)
+        self.assertEqual(callback_failed_calls, [])
+
+    async def test_create_default_app_should_use_loader(self) -> None:
+        settings = _build_settings(ai_internal_key="loader-key")
+        called = {"count": 0}
+
+        def fake_loader() -> Settings:
+            called["count"] += 1
+            return settings
+
+        app = create_default_app(load_settings_fn=fake_loader)
+        self.assertEqual(called["count"], 1)
+        self.assertEqual(app.title, "AI Judge Service")
+
+
+if __name__ == "__main__":
+    unittest.main()
