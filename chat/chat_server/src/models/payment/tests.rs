@@ -1,6 +1,78 @@
 use super::*;
 use anyhow::Result;
-use serde_json::json;
+use axum::{
+    extract::{OriginalUri, State},
+    routing::post,
+    Json, Router,
+};
+use serde_json::{json, Value};
+use std::sync::{
+    atomic::{AtomicUsize, Ordering},
+    Arc,
+};
+use tokio::{net::TcpListener, sync::Mutex};
+
+#[derive(Clone)]
+struct AppleVerifyStubState {
+    responses: Arc<Vec<Value>>,
+    cursor: Arc<AtomicUsize>,
+    requests: Arc<Mutex<Vec<(String, Value)>>>,
+}
+
+async fn apple_verify_stub_handler(
+    State(state): State<AppleVerifyStubState>,
+    uri: OriginalUri,
+    Json(payload): Json<Value>,
+) -> Json<Value> {
+    state
+        .requests
+        .lock()
+        .await
+        .push((uri.path().to_string(), payload));
+    let idx = state.cursor.fetch_add(1, Ordering::SeqCst);
+    let response = state
+        .responses
+        .get(idx)
+        .cloned()
+        .or_else(|| state.responses.last().cloned())
+        .unwrap_or_else(|| json!({ "status": 0 }));
+    Json(response)
+}
+
+async fn start_apple_verify_stub(
+    responses: Vec<Value>,
+) -> Result<(
+    PaymentConfig,
+    Arc<Mutex<Vec<(String, Value)>>>,
+    tokio::task::JoinHandle<()>,
+)> {
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let app = Router::new()
+        .route("/prod", post(apple_verify_stub_handler))
+        .route("/sandbox", post(apple_verify_stub_handler))
+        .with_state(AppleVerifyStubState {
+            responses: Arc::new(responses),
+            cursor: Arc::new(AtomicUsize::new(0)),
+            requests: requests.clone(),
+        });
+
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    let addr = listener.local_addr()?;
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app)
+            .await
+            .expect("apple verify stub should run");
+    });
+
+    let config = PaymentConfig {
+        verify_mode: "apple".to_string(),
+        apple_verify_url_prod: format!("http://{addr}/prod"),
+        apple_verify_url_sandbox: format!("http://{addr}/sandbox"),
+        apple_shared_secret: "test-shared-secret".to_string(),
+        verify_timeout_ms: 3_000,
+    };
+    Ok((config, requests, server))
+}
 
 fn verify_input(tx: &str, receipt_data: &str) -> VerifyIapOrderInput {
     VerifyIapOrderInput {
@@ -67,6 +139,159 @@ fn normalize_verify_mode_should_default_to_mock() {
     assert_eq!(normalize_verify_mode(" production "), "apple");
     assert_eq!(normalize_verify_mode("mock"), "mock");
     assert_eq!(normalize_verify_mode(""), "mock");
+}
+
+#[tokio::test]
+async fn verify_receipt_should_use_apple_production_and_mark_verified() -> Result<()> {
+    let (config, requests, server) = start_apple_verify_stub(vec![json!({
+        "status": 0,
+        "environment": "Production",
+        "latest_receipt_info": [
+            {
+                "transaction_id": "tx-apple-ok-1",
+                "product_id": "com.aicomm.coins.60"
+            }
+        ]
+    })])
+    .await?;
+
+    let out = verify_receipt(
+        &config,
+        "com.aicomm.coins.60",
+        "tx-apple-ok-1",
+        None,
+        "receipt_ok_1",
+    )
+    .await?;
+
+    assert_eq!(out.status, "verified");
+    assert_eq!(out.verify_mode, "apple");
+    assert!(out.verify_reason.is_none());
+    assert_eq!(
+        out.raw_payload.get("endpoint").and_then(Value::as_str),
+        Some("production")
+    );
+    assert_eq!(
+        out.raw_payload
+            .get("matchedTransaction")
+            .and_then(Value::as_bool),
+        Some(true)
+    );
+
+    let requests = requests.lock().await;
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].0, "/prod");
+    assert_eq!(
+        requests[0].1.get("receipt-data").and_then(Value::as_str),
+        Some("receipt_ok_1")
+    );
+    assert_eq!(
+        requests[0].1.get("password").and_then(Value::as_str),
+        Some("test-shared-secret")
+    );
+    assert_eq!(
+        requests[0]
+            .1
+            .get("exclude-old-transactions")
+            .and_then(Value::as_bool),
+        Some(true)
+    );
+    server.abort();
+    Ok(())
+}
+
+#[tokio::test]
+async fn verify_receipt_should_fallback_to_sandbox_when_prod_returns_21007() -> Result<()> {
+    let (config, requests, server) = start_apple_verify_stub(vec![
+        json!({
+            "status": 21007,
+            "environment": "Production"
+        }),
+        json!({
+            "status": 0,
+            "environment": "Sandbox",
+            "receipt": {
+                "in_app": [
+                    {
+                        "transaction_id": "tx-apple-21007-1",
+                        "product_id": "com.aicomm.coins.60"
+                    }
+                ]
+            }
+        }),
+    ])
+    .await?;
+
+    let out = verify_receipt(
+        &config,
+        "com.aicomm.coins.60",
+        "tx-apple-21007-1",
+        None,
+        "receipt_21007_1",
+    )
+    .await?;
+
+    assert_eq!(out.status, "verified");
+    assert_eq!(out.verify_mode, "apple");
+    assert!(out.verify_reason.is_none());
+    assert_eq!(
+        out.raw_payload.get("endpoint").and_then(Value::as_str),
+        Some("sandbox")
+    );
+    assert_eq!(
+        out.raw_payload.get("statusCode").and_then(Value::as_i64),
+        Some(0)
+    );
+
+    let requests = requests.lock().await;
+    assert_eq!(requests.len(), 2);
+    assert_eq!(requests[0].0, "/prod");
+    assert_eq!(requests[1].0, "/sandbox");
+    server.abort();
+    Ok(())
+}
+
+#[tokio::test]
+async fn verify_receipt_should_reject_when_transaction_not_found_in_apple_payload() -> Result<()> {
+    let (config, requests, server) = start_apple_verify_stub(vec![json!({
+        "status": 0,
+        "environment": "Production",
+        "latest_receipt_info": [
+            {
+                "transaction_id": "tx-other",
+                "product_id": "com.aicomm.coins.120"
+            }
+        ]
+    })])
+    .await?;
+
+    let out = verify_receipt(
+        &config,
+        "com.aicomm.coins.60",
+        "tx-apple-miss-1",
+        None,
+        "receipt_miss_1",
+    )
+    .await?;
+
+    assert_eq!(out.status, "rejected");
+    assert_eq!(out.verify_mode, "apple");
+    assert_eq!(
+        out.verify_reason.as_deref(),
+        Some("transaction/product not found in apple receipt")
+    );
+    assert_eq!(
+        out.raw_payload
+            .get("matchedTransaction")
+            .and_then(Value::as_bool),
+        Some(false)
+    );
+
+    let requests = requests.lock().await;
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].0, "/prod");
+    server.abort();
+    Ok(())
 }
 
 #[tokio::test]
