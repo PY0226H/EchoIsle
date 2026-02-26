@@ -1,0 +1,157 @@
+import unittest
+from types import SimpleNamespace
+
+from app.rag_retriever import RAG_BACKEND_MILVUS, RetrievedContext
+from app.runtime_rag import (
+    apply_rag_payload_fields,
+    build_milvus_config,
+    retrieve_runtime_contexts,
+)
+from app.settings import Settings
+
+
+class _FakeReport:
+    def __init__(self) -> None:
+        self.payload: dict = {}
+
+
+def _build_settings(**overrides: object) -> Settings:
+    base = {
+        "ai_internal_key": "k",
+        "chat_server_base_url": "http://chat",
+        "report_path_template": "/r/{job_id}",
+        "failed_path_template": "/f/{job_id}",
+        "callback_timeout_secs": 8.0,
+        "process_delay_ms": 0,
+        "judge_style_mode": "rational",
+        "provider": "mock",
+        "openai_api_key": "",
+        "openai_model": "gpt-4.1-mini",
+        "openai_base_url": "https://api.openai.com/v1",
+        "openai_timeout_secs": 25.0,
+        "openai_temperature": 0.1,
+        "openai_max_retries": 2,
+        "openai_fallback_to_mock": True,
+        "rag_enabled": True,
+        "rag_knowledge_file": "",
+        "rag_max_snippets": 4,
+        "rag_max_chars_per_snippet": 280,
+        "rag_query_message_limit": 80,
+        "rag_source_whitelist": ("https://teamfighttactics.leagueoflegends.com/en-us/news",),
+        "rag_backend": "file",
+        "rag_openai_embedding_model": "text-embedding-3-small",
+        "rag_milvus_uri": "",
+        "rag_milvus_token": "",
+        "rag_milvus_db_name": "",
+        "rag_milvus_collection": "",
+        "rag_milvus_vector_field": "embedding",
+        "rag_milvus_content_field": "content",
+        "rag_milvus_title_field": "title",
+        "rag_milvus_source_url_field": "source_url",
+        "rag_milvus_chunk_id_field": "chunk_id",
+        "rag_milvus_tags_field": "tags",
+        "rag_milvus_metric_type": "COSINE",
+        "rag_milvus_search_limit": 20,
+        "stage_agent_max_chunks": 12,
+    }
+    base.update(overrides)
+    return Settings(**base)
+
+
+class RuntimeRagTests(unittest.TestCase):
+    def test_build_milvus_config_should_return_none_when_backend_invalid(self) -> None:
+        settings = _build_settings(rag_backend="file")
+        self.assertIsNone(build_milvus_config(settings))
+
+    def test_build_milvus_config_should_return_config_when_enabled(self) -> None:
+        settings = _build_settings(
+            rag_backend=RAG_BACKEND_MILVUS,
+            rag_milvus_uri="http://milvus:19530",
+            rag_milvus_collection="judge_kb",
+            rag_milvus_metric_type="IP",
+            rag_milvus_search_limit=33,
+        )
+        cfg = build_milvus_config(settings)
+        self.assertIsNotNone(cfg)
+        self.assertEqual(cfg.uri, "http://milvus:19530")
+        self.assertEqual(cfg.collection, "judge_kb")
+        self.assertEqual(cfg.metric_type, "IP")
+        self.assertEqual(cfg.search_limit, 33)
+
+    def test_retrieve_runtime_contexts_should_forward_settings_and_milvus_config(self) -> None:
+        settings = _build_settings(
+            rag_enabled=False,
+            rag_backend=RAG_BACKEND_MILVUS,
+            rag_milvus_uri="http://milvus:19530",
+            rag_milvus_collection="judge_kb",
+            openai_api_key="sk-test",
+        )
+        request = SimpleNamespace(job=SimpleNamespace(job_id=1))
+        captured: dict[str, object] = {}
+        expected = [
+            RetrievedContext(
+                chunk_id="c1",
+                title="title",
+                source_url="https://example.com",
+                content="content",
+                score=0.9,
+            )
+        ]
+
+        def fake_retrieve_contexts(req: object, **kwargs: object) -> list[RetrievedContext]:
+            captured["req"] = req
+            captured["kwargs"] = kwargs
+            return expected
+
+        actual = retrieve_runtime_contexts(
+            request=request,
+            settings=settings,
+            retrieve_contexts_fn=fake_retrieve_contexts,
+        )
+
+        self.assertEqual(actual, expected)
+        self.assertIs(captured["req"], request)
+        kwargs = captured["kwargs"]
+        self.assertFalse(kwargs["enabled"])
+        self.assertEqual(kwargs["backend"], RAG_BACKEND_MILVUS)
+        self.assertEqual(kwargs["openai_api_key"], "sk-test")
+        self.assertEqual(kwargs["milvus_config"].collection, "judge_kb")
+
+    def test_apply_rag_payload_fields_should_write_payload_with_used_flag(self) -> None:
+        settings = _build_settings(rag_backend=RAG_BACKEND_MILVUS, rag_enabled=True)
+        report = _FakeReport()
+        contexts = [
+            RetrievedContext(
+                chunk_id="c1",
+                title="title",
+                source_url="https://example.com",
+                content="content",
+                score=0.9,
+            )
+        ]
+
+        apply_rag_payload_fields(
+            report,
+            settings,
+            contexts,
+            used_by_model=True,
+        )
+        self.assertTrue(report.payload["ragEnabled"])
+        self.assertEqual(report.payload["ragBackend"], RAG_BACKEND_MILVUS)
+        self.assertTrue(report.payload["ragUsedByModel"])
+        self.assertEqual(report.payload["ragSnippetCount"], 1)
+        self.assertEqual(report.payload["ragSourceWhitelist"], list(settings.rag_source_whitelist))
+        self.assertEqual(len(report.payload["ragSources"]), 1)
+
+        report2 = _FakeReport()
+        apply_rag_payload_fields(
+            report2,
+            settings,
+            [],
+            used_by_model=True,
+        )
+        self.assertFalse(report2.payload["ragUsedByModel"])
+
+
+if __name__ == "__main__":
+    unittest.main()
