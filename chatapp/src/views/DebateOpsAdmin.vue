@@ -221,12 +221,23 @@
                   <td class="py-2 pr-4">{{ formatDateTime(item.endAt) }}</td>
                   <td class="py-2 pr-4">{{ item.joinable ? 'yes' : 'no' }}</td>
                   <td class="py-2 pr-4">
-                    <button
-                      @click="openSessionJudgeReport(item.id)"
-                      class="px-2 py-1 rounded border border-gray-300 text-xs bg-white hover:bg-gray-100"
-                    >
-                      判决
-                    </button>
+                    <div class="flex flex-wrap gap-1">
+                      <button
+                        @click="openSessionJudgeReport(item.id)"
+                        class="px-2 py-1 rounded border border-gray-300 text-xs bg-white hover:bg-gray-100"
+                      >
+                        判决
+                      </button>
+                      <button
+                        v-for="nextStatus in nextQuickStatusActions(item.status)"
+                        :key="`${item.id}-${nextStatus}`"
+                        @click="quickUpdateSessionStatus(item, nextStatus)"
+                        :disabled="quickUpdateSessionId === item.id"
+                        class="px-2 py-1 rounded border border-gray-300 text-xs bg-white hover:bg-gray-100 disabled:opacity-50"
+                      >
+                        {{ quickUpdateSessionId === item.id ? '处理中...' : `设为 ${nextStatus}` }}
+                      </button>
+                    </div>
                   </td>
                 </tr>
                 <tr v-if="sessions.length === 0">
@@ -243,6 +254,10 @@
 
 <script>
 import Sidebar from '../components/Sidebar.vue';
+import {
+  buildQuickUpdateSessionPayload,
+  nextQuickStatusActions as resolveNextQuickStatusActions,
+} from '../debate-ops-utils';
 
 function toLocalInputValue(date) {
   const d = new Date(date);
@@ -291,6 +306,7 @@ export default {
       createSessionLoading: false,
       updateTopicLoading: false,
       updateSessionLoading: false,
+      quickUpdateSessionId: 0,
       errorText: '',
       topics: [],
       sessions: [],
@@ -400,100 +416,133 @@ export default {
       }
     },
     async createTopic() {
-      this.createTopicLoading = true;
-      this.errorText = '';
-      try {
-        await this.$store.dispatch('createDebateTopicOps', {
-          title: this.topicForm.title,
-          description: this.topicForm.description,
-          category: this.topicForm.category,
-          stancePro: this.topicForm.stancePro,
-          stanceCon: this.topicForm.stanceCon,
-          contextSeed: this.topicForm.contextSeed,
-          isActive: this.topicForm.isActive,
-        });
-        this.topicForm.title = '';
-        this.topicForm.description = '';
-        this.topicForm.contextSeed = '';
-        await this.refreshData();
-      } catch (error) {
-        this.errorText = error?.response?.data?.error || error?.message || '创建辩题失败';
-      } finally {
-        this.createTopicLoading = false;
-      }
+      await this.upsertTopic('create');
     },
     async createSession() {
-      this.createSessionLoading = true;
-      this.errorText = '';
-      try {
-        const scheduledStartAt = this.toIso(this.sessionForm.scheduledStartAtLocal);
-        const endAt = this.toIso(this.sessionForm.endAtLocal);
-        if (!scheduledStartAt || !endAt) {
-          throw new Error('请填写有效的开始/结束时间');
-        }
-        await this.$store.dispatch('createDebateSessionOps', {
-          topicId: Number(this.sessionForm.topicId),
-          status: this.sessionForm.status,
-          scheduledStartAt,
-          endAt,
-          maxParticipantsPerSide: Number(this.sessionForm.maxParticipantsPerSide),
-        });
-        await this.refreshData();
-      } catch (error) {
-        this.errorText = error?.response?.data?.error || error?.message || '创建场次失败';
-      } finally {
-        this.createSessionLoading = false;
-      }
+      await this.upsertSession('create');
     },
     async updateTopic() {
-      if (!this.topicEditForm.topicId) {
+      await this.upsertTopic('update');
+    },
+    async upsertTopic(mode = 'create') {
+      const isCreate = mode === 'create';
+      if (!isCreate && !this.topicEditForm.topicId) {
         return;
       }
-      this.updateTopicLoading = true;
+      if (isCreate) {
+        this.createTopicLoading = true;
+      } else {
+        this.updateTopicLoading = true;
+      }
       this.errorText = '';
       try {
-        await this.$store.dispatch('updateDebateTopicOps', {
-          topicId: Number(this.topicEditForm.topicId),
-          title: this.topicEditForm.title,
-          description: this.topicEditForm.description,
-          category: this.topicEditForm.category,
-          stancePro: this.topicEditForm.stancePro,
-          stanceCon: this.topicEditForm.stanceCon,
-          contextSeed: this.topicEditForm.contextSeed,
-          isActive: this.topicEditForm.isActive,
-        });
+        if (isCreate) {
+          await this.$store.dispatch('createDebateTopicOps', {
+            title: this.topicForm.title,
+            description: this.topicForm.description,
+            category: this.topicForm.category,
+            stancePro: this.topicForm.stancePro,
+            stanceCon: this.topicForm.stanceCon,
+            contextSeed: this.topicForm.contextSeed,
+            isActive: this.topicForm.isActive,
+          });
+          this.topicForm.title = '';
+          this.topicForm.description = '';
+          this.topicForm.contextSeed = '';
+        } else {
+          await this.$store.dispatch('updateDebateTopicOps', {
+            topicId: Number(this.topicEditForm.topicId),
+            title: this.topicEditForm.title,
+            description: this.topicEditForm.description,
+            category: this.topicEditForm.category,
+            stancePro: this.topicEditForm.stancePro,
+            stanceCon: this.topicEditForm.stanceCon,
+            contextSeed: this.topicEditForm.contextSeed,
+            isActive: this.topicEditForm.isActive,
+          });
+        }
         await this.refreshData();
       } catch (error) {
-        this.errorText = error?.response?.data?.error || error?.message || '更新辩题失败';
+        this.errorText =
+          error?.response?.data?.error || error?.message || (isCreate ? '创建辩题失败' : '更新辩题失败');
       } finally {
-        this.updateTopicLoading = false;
+        if (isCreate) {
+          this.createTopicLoading = false;
+        } else {
+          this.updateTopicLoading = false;
+        }
       }
     },
     async updateSession() {
-      if (!this.sessionEditForm.sessionId) {
+      await this.upsertSession('update');
+    },
+    async upsertSession(mode = 'create') {
+      const isCreate = mode === 'create';
+      if (!isCreate && !this.sessionEditForm.sessionId) {
         return;
       }
-      this.updateSessionLoading = true;
+      if (isCreate) {
+        this.createSessionLoading = true;
+      } else {
+        this.updateSessionLoading = true;
+      }
       this.errorText = '';
       try {
-        const scheduledStartAt = this.toIso(this.sessionEditForm.scheduledStartAtLocal);
-        const endAt = this.toIso(this.sessionEditForm.endAtLocal);
+        const scheduledStartAt = this.toIso(
+          isCreate ? this.sessionForm.scheduledStartAtLocal : this.sessionEditForm.scheduledStartAtLocal,
+        );
+        const endAt = this.toIso(isCreate ? this.sessionForm.endAtLocal : this.sessionEditForm.endAtLocal);
         if (!scheduledStartAt || !endAt) {
           throw new Error('请填写有效的开始/结束时间');
         }
-        await this.$store.dispatch('updateDebateSessionOps', {
-          sessionId: Number(this.sessionEditForm.sessionId),
-          status: this.sessionEditForm.status,
-          scheduledStartAt,
-          endAt,
-          maxParticipantsPerSide: Number(this.sessionEditForm.maxParticipantsPerSide),
-        });
+        if (isCreate) {
+          await this.$store.dispatch('createDebateSessionOps', {
+            topicId: Number(this.sessionForm.topicId),
+            status: this.sessionForm.status,
+            scheduledStartAt,
+            endAt,
+            maxParticipantsPerSide: Number(this.sessionForm.maxParticipantsPerSide),
+          });
+        } else {
+          await this.$store.dispatch('updateDebateSessionOps', {
+            sessionId: Number(this.sessionEditForm.sessionId),
+            status: this.sessionEditForm.status,
+            scheduledStartAt,
+            endAt,
+            maxParticipantsPerSide: Number(this.sessionEditForm.maxParticipantsPerSide),
+          });
+        }
         await this.refreshData();
       } catch (error) {
-        this.errorText = error?.response?.data?.error || error?.message || '更新场次失败';
+        this.errorText =
+          error?.response?.data?.error || error?.message || (isCreate ? '创建场次失败' : '更新场次失败');
       } finally {
-        this.updateSessionLoading = false;
+        if (isCreate) {
+          this.createSessionLoading = false;
+        } else {
+          this.updateSessionLoading = false;
+        }
       }
+    },
+    async quickUpdateSessionStatus(session, nextStatus) {
+      const sessionId = Number(session?.id || 0);
+      if (!sessionId) {
+        return;
+      }
+      this.quickUpdateSessionId = sessionId;
+      this.errorText = '';
+      try {
+        const payload = buildQuickUpdateSessionPayload(session, nextStatus);
+        await this.$store.dispatch('updateDebateSessionOps', payload);
+        await this.refreshData();
+      } catch (error) {
+        this.errorText = error?.response?.data?.error || error?.message || '快速更新场次状态失败';
+      } finally {
+        this.quickUpdateSessionId = 0;
+      }
+    },
+    nextQuickStatusActions(status) {
+      return resolveNextQuickStatusActions(status);
     },
     async openSessionJudgeReport(sessionIdRaw) {
       const sessionId = Number(sessionIdRaw);
