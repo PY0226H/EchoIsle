@@ -1,2 +1,1 @@
 # path|max_lines|note
-ai_judge_service/app/openai_judge.py|706|legacy monolith, stage D split target
