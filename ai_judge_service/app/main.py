@@ -2,10 +2,11 @@ import asyncio
 import os
 from dataclasses import dataclass
 
-import httpx
 from fastapi import FastAPI, Header, HTTPException
 
-from .models import JudgeDispatchRequest, MarkJudgeJobFailedInput
+from .callback_client import CallbackClientConfig, callback_failed, callback_report
+from .dispatch_controller import DispatchRuntimeConfig, process_dispatch_request
+from .models import JudgeDispatchRequest
 from .openai_judge import OpenAiJudgeConfig, build_report_with_openai
 from .rag_retriever import (
     RAG_BACKEND_MILVUS,
@@ -16,7 +17,7 @@ from .rag_retriever import (
     summarize_retrieved_contexts,
 )
 from .runtime_policy import PROVIDER_OPENAI, normalize_provider, parse_env_bool, should_use_openai
-from .scoring import build_report, resolve_effective_style_mode
+from .scoring import build_report
 
 DEFAULT_RAG_SOURCE_WHITELIST = "https://teamfighttactics.leagueoflegends.com/en-us/news/"
 
@@ -125,10 +126,17 @@ def _load_settings() -> Settings:
 
 SETTINGS = _load_settings()
 app = FastAPI(title="AI Judge Service", version="0.2.0")
-
-
-def _join_url(base: str, path: str) -> str:
-    return f"{base.rstrip('/')}/{path.lstrip('/')}"
+CALLBACK_CFG = CallbackClientConfig(
+    ai_internal_key=SETTINGS.ai_internal_key,
+    chat_server_base_url=SETTINGS.chat_server_base_url,
+    report_path_template=SETTINGS.report_path_template,
+    failed_path_template=SETTINGS.failed_path_template,
+    callback_timeout_secs=SETTINGS.callback_timeout_secs,
+)
+DISPATCH_RUNTIME_CFG = DispatchRuntimeConfig(
+    process_delay_ms=SETTINGS.process_delay_ms,
+    judge_style_mode=SETTINGS.judge_style_mode,
+)
 
 
 def _require_internal_key(header_value: str | None) -> None:
@@ -136,33 +144,6 @@ def _require_internal_key(header_value: str | None) -> None:
         raise HTTPException(status_code=401, detail="missing x-ai-internal-key")
     if header_value.strip() != SETTINGS.ai_internal_key:
         raise HTTPException(status_code=401, detail="invalid x-ai-internal-key")
-
-
-async def _callback_report(job_id: int, payload: dict) -> None:
-    path = SETTINGS.report_path_template.format(job_id=job_id)
-    url = _join_url(SETTINGS.chat_server_base_url, path)
-    async with httpx.AsyncClient(timeout=SETTINGS.callback_timeout_secs) as client:
-        resp = await client.post(
-            url,
-            headers={"x-ai-internal-key": SETTINGS.ai_internal_key},
-            json=payload,
-        )
-    if resp.status_code // 100 != 2:
-        raise RuntimeError(f"report callback failed: status={resp.status_code}, body={resp.text}")
-
-
-async def _callback_failed(job_id: int, error_message: str) -> None:
-    path = SETTINGS.failed_path_template.format(job_id=job_id)
-    url = _join_url(SETTINGS.chat_server_base_url, path)
-    body = MarkJudgeJobFailedInput(error_message=error_message).model_dump()
-    async with httpx.AsyncClient(timeout=SETTINGS.callback_timeout_secs) as client:
-        resp = await client.post(
-            url,
-            headers={"x-ai-internal-key": SETTINGS.ai_internal_key},
-            json=body,
-        )
-    if resp.status_code // 100 != 2:
-        raise RuntimeError(f"failed callback failed: status={resp.status_code}, body={resp.text}")
 
 
 async def _build_report_by_runtime(
@@ -265,43 +246,19 @@ async def dispatch_judge_job(
     x_ai_internal_key: str | None = Header(default=None),
 ) -> dict:
     _require_internal_key(x_ai_internal_key)
-    if SETTINGS.process_delay_ms > 0:
-        await asyncio.sleep(SETTINGS.process_delay_ms / 1000.0)
-
-    if not request.messages:
-        await _callback_failed(request.job.job_id, "empty debate messages, cannot judge")
-        return {"accepted": True, "jobId": request.job.job_id, "status": "marked_failed"}
-
-    effective_style_mode, style_mode_source = resolve_effective_style_mode(
-        request.job.style_mode,
-        SETTINGS.judge_style_mode,
+    return await process_dispatch_request(
+        request=request,
+        runtime_cfg=DISPATCH_RUNTIME_CFG,
+        build_report_by_runtime=_build_report_by_runtime,
+        callback_report=lambda job_id, payload: callback_report(
+            cfg=CALLBACK_CFG,
+            job_id=job_id,
+            payload=payload,
+        ),
+        callback_failed=lambda job_id, error_message: callback_failed(
+            cfg=CALLBACK_CFG,
+            job_id=job_id,
+            error_message=error_message,
+        ),
+        sleep_fn=asyncio.sleep,
     )
-    try:
-        report = await _build_report_by_runtime(
-            request,
-            effective_style_mode=effective_style_mode,
-            style_mode_source=style_mode_source,
-        )
-    except Exception as err:
-        error_message = f"judge runtime failed: {err}"
-        try:
-            await _callback_failed(request.job.job_id, error_message)
-        except Exception as callback_err:  # pragma: no cover
-            raise HTTPException(
-                status_code=502,
-                detail=f"runtime failed and callback_failed failed: {callback_err}",
-            ) from callback_err
-        return {"accepted": True, "jobId": request.job.job_id, "status": "marked_failed"}
-
-    try:
-        await _callback_report(request.job.job_id, report.model_dump(mode="json"))
-    except Exception as err:  # pragma: no cover
-        raise HTTPException(status_code=502, detail=f"callback report failed: {err}") from err
-
-    return {
-        "accepted": True,
-        "jobId": request.job.job_id,
-        "winner": report.winner,
-        "needsDrawVote": report.needs_draw_vote,
-        "provider": report.payload.get("provider"),
-    }
