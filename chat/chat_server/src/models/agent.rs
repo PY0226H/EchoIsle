@@ -1,5 +1,5 @@
 use crate::{AppError, AppState};
-use chat_core::{AdapterType, AgentType, ChatAgent};
+use chat_core::{AdapterType, AgentArgs, AgentType, ChatAgent};
 use serde::{Deserialize, Serialize};
 use tracing::info;
 use utoipa::ToSchema;
@@ -92,7 +92,7 @@ impl AppState {
         .bind(input.adapter)
         .bind(input.model)
         .bind(input.prompt)
-        .bind(input.args)
+        .bind(sqlx::types::Json(AgentArgs::from(input.args)))
         .fetch_one(&self.pool)
         .await?;
 
@@ -169,7 +169,7 @@ impl AppState {
                     UPDATE chat_agents SET args = $1 WHERE chat_id = $2 AND id = $3 RETURNING *
                     "#,
                 )
-                .bind(args)
+                .bind(sqlx::types::Json(AgentArgs::from(args)))
                 .bind(chat_id as i64)
                 .bind(agent_id as i64)
                 .fetch_one(&self.pool)
@@ -182,7 +182,7 @@ impl AppState {
                     "#,
                 )
                 .bind(prompt)
-                .bind(args)
+                .bind(sqlx::types::Json(AgentArgs::from(args)))
                 .bind(chat_id as i64)
                 .bind(agent_id as i64)
                 .fetch_one(&self.pool)
@@ -221,7 +221,7 @@ mod tests {
         assert_eq!(agent.adapter, AdapterType::Ollama);
         assert_eq!(agent.model, "llama3.2");
         assert_eq!(agent.prompt, "You are a helpful assistant");
-        assert_eq!(agent.args, sqlx::types::Json(serde_json::json!({})));
+        assert_eq!(agent.args, sqlx::types::Json(AgentArgs::empty()));
         Ok(())
     }
 
@@ -233,7 +233,7 @@ mod tests {
         assert_eq!(agents[0].name, "translation");
         assert_eq!(agents[0].r#type, AgentType::Proxy);
         assert_eq!(agents[0].prompt, "If language is Chinese, translate to English, if language is English, translate to Chinese. Please reply with the translated content directly. No explanation is needed. Here is the content: ");
-        assert_eq!(agents[0].args, sqlx::types::Json(serde_json::json!({})));
+        assert_eq!(agents[0].args, sqlx::types::Json(AgentArgs::empty()));
         Ok(())
     }
 
@@ -264,7 +264,7 @@ mod tests {
             .await
             .expect("update agent failed");
         assert_eq!(agent.prompt, "Can you tell me the weather in Tokyo?");
-        assert_eq!(agent.args, sqlx::types::Json(serde_json::json!({})));
+        assert_eq!(agent.args, sqlx::types::Json(AgentArgs::empty()));
         Ok(())
     }
 }

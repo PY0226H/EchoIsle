@@ -150,6 +150,38 @@ pub enum AdapterType {
     Test,
 }
 
+#[derive(Debug, Clone, ToSchema, Serialize, Deserialize, PartialEq)]
+#[serde(transparent)]
+pub struct AgentArgs(pub serde_json::Value);
+
+impl AgentArgs {
+    pub fn empty() -> Self {
+        Self(serde_json::json!({}))
+    }
+
+    pub fn take(&mut self) -> serde_json::Value {
+        std::mem::replace(&mut self.0, serde_json::json!({}))
+    }
+}
+
+impl Default for AgentArgs {
+    fn default() -> Self {
+        Self::empty()
+    }
+}
+
+impl From<serde_json::Value> for AgentArgs {
+    fn from(value: serde_json::Value) -> Self {
+        Self(value)
+    }
+}
+
+impl From<AgentArgs> for serde_json::Value {
+    fn from(value: AgentArgs) -> Self {
+        value.0
+    }
+}
+
 #[derive(Debug, Clone, FromRow, ToSchema, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all(serialize = "camelCase"))]
 pub struct ChatAgent {
@@ -161,7 +193,7 @@ pub struct ChatAgent {
     pub adapter: AdapterType,
     pub model: String,
     pub prompt: String,
-    pub args: sqlx::types::Json<serde_json::Value>, // TODO: change to custom type
+    pub args: sqlx::types::Json<AgentArgs>,
     #[serde(alias = "createdAt")]
     pub created_at: DateTime<Utc>,
     #[serde(alias = "updatedAt")]
@@ -180,5 +212,24 @@ impl User {
             is_bot: false,
             created_at: chrono::Utc::now(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn agent_args_default_should_be_empty_object() {
+        assert_eq!(AgentArgs::default(), AgentArgs::empty());
+        assert_eq!(AgentArgs::default().0, serde_json::json!({}));
+    }
+
+    #[test]
+    fn agent_args_take_should_extract_value_and_leave_empty_object() {
+        let mut args = AgentArgs(serde_json::json!({"k":"v"}));
+        let v = args.take();
+        assert_eq!(v, serde_json::json!({"k":"v"}));
+        assert_eq!(args, AgentArgs::empty());
     }
 }
