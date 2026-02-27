@@ -20,6 +20,30 @@ fn default_map() -> serde_json::Value {
     serde_json::Value::Object(serde_json::Map::new())
 }
 
+fn is_supported_model(adapter: &AdapterType, model: &str) -> bool {
+    let model = model.trim();
+    if model.is_empty() {
+        return false;
+    }
+
+    match adapter {
+        // OpenAI model families:
+        // - gpt-* (e.g. gpt-4o)
+        // - o1/o3/o4 reasoning families
+        AdapterType::Openai => {
+            let model = model.to_ascii_lowercase();
+            model.starts_with("gpt-")
+                || model.starts_with("o1")
+                || model.starts_with("o3")
+                || model.starts_with("o4")
+        }
+        // Ollama model availability is deployment-dependent, validate non-empty only.
+        AdapterType::Ollama => true,
+        // Test adapter ignores model at runtime, validate non-empty only.
+        AdapterType::Test => true,
+    }
+}
+
 #[derive(Debug, Clone, Default, ToSchema, Serialize, Deserialize)]
 #[serde(rename_all(serialize = "camelCase"))]
 pub struct UpdateAgent {
@@ -77,7 +101,16 @@ impl AppState {
             )));
         }
 
-        // TODO: check if model is supported by adapter
+        if !is_supported_model(&input.adapter, &input.model) {
+            info!(
+                "Unsupported model '{}' for adapter {:?} in chat {chat_id}",
+                input.model, input.adapter
+            );
+            return Err(AppError::CreateAgentError(format!(
+                "model '{}' is not supported by adapter {:?}",
+                input.model, input.adapter
+            )));
+        }
 
         let agent = sqlx::query_as(
             r#"
@@ -234,6 +267,61 @@ mod tests {
         assert_eq!(agents[0].r#type, AgentType::Proxy);
         assert_eq!(agents[0].prompt, "If language is Chinese, translate to English, if language is English, translate to Chinese. Please reply with the translated content directly. No explanation is needed. Here is the content: ");
         assert_eq!(agents[0].args, sqlx::types::Json(AgentArgs::empty()));
+        Ok(())
+    }
+
+    #[test]
+    fn supported_model_validation_should_match_adapter_rules() {
+        assert!(is_supported_model(&AdapterType::Openai, "gpt-4o"));
+        assert!(is_supported_model(&AdapterType::Openai, "o3-mini"));
+        assert!(!is_supported_model(&AdapterType::Openai, "llama3.2"));
+
+        assert!(is_supported_model(&AdapterType::Ollama, "llama3.2"));
+        assert!(is_supported_model(&AdapterType::Test, "any-model"));
+        assert!(!is_supported_model(&AdapterType::Test, "   "));
+    }
+
+    #[tokio::test]
+    async fn create_agent_should_reject_unsupported_openai_model() -> Result<()> {
+        let (_tdb, state) = AppState::new_for_test().await?;
+        let input = CreateAgent::new(
+            "bad-openai",
+            AgentType::Proxy,
+            AdapterType::Openai,
+            "llama3.2",
+            "You are a helpful assistant",
+            HashMap::<String, String>::new(),
+        );
+        let err = state
+            .create_agent(input, 1)
+            .await
+            .expect_err("expected error");
+        assert_eq!(
+            err.to_string(),
+            "create agent error: model 'llama3.2' is not supported by adapter Openai"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn create_agent_should_reject_empty_model() -> Result<()> {
+        let (_tdb, state) = AppState::new_for_test().await?;
+        let input = CreateAgent::new(
+            "empty-model",
+            AgentType::Proxy,
+            AdapterType::Ollama,
+            "   ",
+            "You are a helpful assistant",
+            HashMap::<String, String>::new(),
+        );
+        let err = state
+            .create_agent(input, 1)
+            .await
+            .expect_err("expected error");
+        assert_eq!(
+            err.to_string(),
+            "create agent error: model '   ' is not supported by adapter Ollama"
+        );
         Ok(())
     }
 
