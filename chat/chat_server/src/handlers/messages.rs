@@ -1,11 +1,13 @@
 use axum::{
+    body::Body,
     extract::{Multipart, Path, Query, State},
-    http::{HeaderMap, StatusCode},
+    http::{header::CONTENT_TYPE, HeaderMap, StatusCode},
     response::IntoResponse,
     Extension, Json,
 };
 use std::path::{Component, Path as StdPath, PathBuf};
 use tokio::fs;
+use tokio_util::io::ReaderStream;
 use tracing::{info, warn};
 
 use crate::{AppError, AppState, ChatFile, CreateMessage, ListMessages};
@@ -76,10 +78,10 @@ pub(crate) async fn file_handler(
     let path = resolve_workspace_file_path(&state.config.server.base_dir, ws_id, &path).await?;
 
     let mime = mime_guess::from_path(&path).first_or_octet_stream();
-    // TODO: streaming
-    let body = fs::read(path).await?;
+    let file = fs::File::open(path).await?;
+    let body = Body::from_stream(ReaderStream::new(file));
     let mut headers = HeaderMap::new();
-    headers.insert("content-type", mime.to_string().parse().unwrap());
+    headers.insert(CONTENT_TYPE, mime.to_string().parse()?);
     Ok((headers, body))
 }
 

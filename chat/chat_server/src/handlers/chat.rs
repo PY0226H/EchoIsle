@@ -1,4 +1,4 @@
-use crate::{AppError, AppState, CreateChat};
+use crate::{AppError, AppState, CreateChat, UpdateChat};
 use axum::{
     extract::{Path, State},
     http::StatusCode,
@@ -74,12 +74,51 @@ pub(crate) async fn get_chat_handler(
     }
 }
 
-// TODO: finish this as a homework
-pub(crate) async fn update_chat_handler() -> impl IntoResponse {
-    "update chat"
+#[utoipa::path(
+    patch,
+    path = "/api/chats/{id}",
+    params(
+        ("id" = u64, Path, description = "Chat id")
+    ),
+    request_body = UpdateChat,
+    responses(
+        (status = 200, description = "Chat updated", body = Chat),
+        (status = 400, description = "Invalid input", body = ErrorOutput),
+        (status = 404, description = "Chat not found", body = ErrorOutput),
+    ),
+    security(
+        ("token" = [])
+    )
+)]
+pub(crate) async fn update_chat_handler(
+    Extension(user): Extension<User>,
+    State(state): State<AppState>,
+    Path(id): Path<u64>,
+    Json(input): Json<UpdateChat>,
+) -> Result<impl IntoResponse, AppError> {
+    let chat = state.update_chat(id, user.ws_id as u64, input).await?;
+    Ok((StatusCode::OK, Json(chat)))
 }
 
-// TODO: finish this as a homework
-pub(crate) async fn delete_chat_handler() -> impl IntoResponse {
-    "delete chat"
+#[utoipa::path(
+    delete,
+    path = "/api/chats/{id}",
+    params(
+        ("id" = u64, Path, description = "Chat id")
+    ),
+    responses(
+        (status = 204, description = "Chat deleted"),
+        (status = 404, description = "Chat not found", body = ErrorOutput),
+    ),
+    security(
+        ("token" = [])
+    )
+)]
+pub(crate) async fn delete_chat_handler(
+    Extension(user): Extension<User>,
+    State(state): State<AppState>,
+    Path(id): Path<u64>,
+) -> Result<impl IntoResponse, AppError> {
+    state.delete_chat(id, user.ws_id as u64).await?;
+    Ok(StatusCode::NO_CONTENT)
 }

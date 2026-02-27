@@ -3,7 +3,7 @@ use argon2::{
     password_hash::{rand_core::OsRng, PasswordHash, PasswordHasher, PasswordVerifier, SaltString},
     Argon2,
 };
-use chat_core::{ChatUser, User};
+use chat_core::{ChatUser, User, Workspace};
 use serde::{Deserialize, Serialize};
 use std::mem;
 use utoipa::ToSchema;
@@ -51,24 +51,48 @@ impl AppState {
         Ok(user)
     }
 
-    /// Create a new user
-    // TODO: use transaction for workspace creation and user creation
+    /// Create a new user.
+    /// Workspace creation + user creation + owner patch are executed in one transaction.
     pub async fn create_user(&self, input: &CreateUser) -> Result<User, AppError> {
-        // check if email exists
-        let user = self.find_user_by_email(&input.email).await?;
-        if user.is_some() {
+        let mut tx = self.pool.begin().await?;
+
+        let existing: Option<(i64,)> = sqlx::query_as("SELECT id FROM users WHERE email = $1")
+            .bind(&input.email)
+            .fetch_optional(&mut *tx)
+            .await?;
+        if existing.is_some() {
             return Err(AppError::EmailAlreadyExists(input.email.clone()));
         }
 
-        // check if workspace exists, if not create one
-        let ws = match self.find_workspace_by_name(&input.workspace).await? {
+        // Workspace may be created on signup when the workspace name doesn't exist.
+        let ws: Workspace = match sqlx::query_as(
+            r#"
+            SELECT id, name, owner_id, created_at
+            FROM workspaces
+            WHERE name = $1
+            "#,
+        )
+        .bind(&input.workspace)
+        .fetch_optional(&mut *tx)
+        .await?
+        {
             Some(ws) => ws,
-            None => self.create_workspace(&input.workspace, 0).await?,
+            None => {
+                sqlx::query_as(
+                    r#"
+                    INSERT INTO workspaces (name, owner_id)
+                    VALUES ($1, 0)
+                    RETURNING id, name, owner_id, created_at
+                    "#,
+                )
+                .bind(&input.workspace)
+                .fetch_one(&mut *tx)
+                .await?
+            }
         };
 
         let password_hash = hash_password(&input.password)?;
-        // TODO: this is just a demo for now
-        let is_bot = input.email.ends_with("@bot.org");
+        let is_bot = is_bot_email(&input.email);
         let mut user: User = sqlx::query_as(
             r#"
             INSERT INTO users (ws_id, email, fullname, password_hash, is_bot)
@@ -81,16 +105,27 @@ impl AppState {
         .bind(&input.fullname)
         .bind(password_hash)
         .bind(is_bot)
-        .fetch_one(&self.pool)
+        .fetch_one(&mut *tx)
         .await?;
 
         user.ws_name = ws.name.clone();
 
         if ws.owner_id == 0 {
-            self.update_workspace_owner(ws.id as _, user.id as _)
-                .await?;
+            let _: Workspace = sqlx::query_as(
+                r#"
+                UPDATE workspaces
+                SET owner_id = $1
+                WHERE id = $2 AND owner_id = 0
+                RETURNING id, name, owner_id, created_at
+                "#,
+            )
+            .bind(user.id)
+            .bind(ws.id)
+            .fetch_one(&mut *tx)
+            .await?;
         }
 
+        tx.commit().await?;
         Ok(user)
     }
 
@@ -163,6 +198,10 @@ fn hash_password(password: &str) -> Result<String, AppError> {
     Ok(password_hash)
 }
 
+fn is_bot_email(email: &str) -> bool {
+    email.ends_with("@bot.org")
+}
+
 fn verify_password(password: &str, password_hash: &str) -> Result<bool, AppError> {
     let argon2 = Argon2::default();
     let password_hash = PasswordHash::new(password_hash)?;
@@ -211,6 +250,12 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn is_bot_email_should_match_bot_domain_suffix() {
+        assert!(is_bot_email("helper@bot.org"));
+        assert!(!is_bot_email("helper@acme.org"));
+    }
+
     #[tokio::test]
     async fn create_duplicate_user_should_fail() -> Result<()> {
         let (_tdb, state) = AppState::new_for_test().await?;
@@ -246,6 +291,24 @@ mod tests {
         let user = state.verify_user(&input).await?;
         assert!(user.is_some());
 
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn create_user_should_set_workspace_owner_in_same_transaction() -> Result<()> {
+        let (_tdb, state) = AppState::new_for_test().await?;
+        let input = CreateUser::new(
+            "txn-workspace",
+            "Txn Owner",
+            "txn-owner@acme.org",
+            "hunter42",
+        );
+        let user = state.create_user(&input).await?;
+        let ws = state
+            .find_workspace_by_name("txn-workspace")
+            .await?
+            .expect("workspace should exist");
+        assert_eq!(ws.owner_id, user.id);
         Ok(())
     }
 

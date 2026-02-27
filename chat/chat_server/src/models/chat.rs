@@ -10,6 +10,11 @@ pub struct CreateChat {
     pub public: bool,
 }
 
+#[derive(Debug, Clone, Default, ToSchema, Serialize, Deserialize)]
+pub struct UpdateChat {
+    pub name: String,
+}
+
 #[allow(dead_code)]
 impl AppState {
     pub async fn create_chat(
@@ -114,6 +119,79 @@ impl AppState {
         Ok(chat)
     }
 
+    pub async fn update_chat(
+        &self,
+        id: u64,
+        ws_id: u64,
+        input: UpdateChat,
+    ) -> Result<Chat, AppError> {
+        let name = input.name.trim();
+        if name.len() < 3 {
+            return Err(AppError::CreateChatError(
+                "Chat name must have at least 3 characters".to_string(),
+            ));
+        }
+        if name.len() > 64 {
+            return Err(AppError::CreateChatError(
+                "Chat name must have at most 64 characters".to_string(),
+            ));
+        }
+
+        let chat = sqlx::query_as(
+            r#"
+            UPDATE chats
+            SET name = $1
+            WHERE id = $2 AND ws_id = $3
+            RETURNING id, ws_id, name, type, members, agents, created_at
+            "#,
+        )
+        .bind(name)
+        .bind(id as i64)
+        .bind(ws_id as i64)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        match chat {
+            Some(chat) => Ok(chat),
+            None => Err(AppError::NotFound(format!("chat id {id}"))),
+        }
+    }
+
+    pub async fn delete_chat(&self, id: u64, ws_id: u64) -> Result<(), AppError> {
+        let mut tx = self.pool.begin().await?;
+        let existed = sqlx::query_scalar::<_, i64>(
+            r#"
+            SELECT id
+            FROM chats
+            WHERE id = $1 AND ws_id = $2
+            "#,
+        )
+        .bind(id as i64)
+        .bind(ws_id as i64)
+        .fetch_optional(&mut *tx)
+        .await?;
+        if existed.is_none() {
+            return Err(AppError::NotFound(format!("chat id {id}")));
+        }
+
+        sqlx::query("DELETE FROM chat_agents WHERE chat_id = $1")
+            .bind(id as i64)
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("DELETE FROM messages WHERE chat_id = $1")
+            .bind(id as i64)
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("DELETE FROM chats WHERE id = $1 AND ws_id = $2")
+            .bind(id as i64)
+            .bind(ws_id as i64)
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await?;
+
+        Ok(())
+    }
+
     pub async fn is_chat_member(&self, chat_id: u64, user_id: u64) -> Result<bool, AppError> {
         let is_member = sqlx::query(
             r#"
@@ -148,9 +226,21 @@ impl CreateChat {
 }
 
 #[cfg(test)]
+impl UpdateChat {
+    pub fn new(name: &str) -> Self {
+        Self {
+            name: name.to_string(),
+        }
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{CreateAgent, CreateMessage, ListMessages};
     use anyhow::Result;
+    use chat_core::{AdapterType, AgentType};
+    use std::collections::HashMap;
 
     #[tokio::test]
     async fn create_single_chat_should_work() -> Result<()> {
@@ -227,6 +317,59 @@ mod tests {
         // user 4 is not a member of chat 2
         let is_member = state.is_chat_member(2, 4).await.expect("is member failed");
         assert!(!is_member);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn chat_update_should_work() -> Result<()> {
+        let (_tdb, state) = AppState::new_for_test().await?;
+        let input = CreateChat::new("origin-name", &[1, 2], false);
+        let chat = state.create_chat(input, 1, 1).await?;
+        let updated = state
+            .update_chat(chat.id as u64, 1, UpdateChat::new("renamed-chat"))
+            .await?;
+        assert_eq!(updated.name.as_deref(), Some("renamed-chat"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn chat_delete_should_remove_chat_messages_and_agents() -> Result<()> {
+        let (_tdb, state) = AppState::new_for_test().await?;
+        let input = CreateChat::new("to-delete", &[1, 2], false);
+        let chat = state.create_chat(input, 1, 1).await?;
+
+        let agent = CreateAgent::new(
+            "cleanup-agent",
+            AgentType::Proxy,
+            AdapterType::Test,
+            "gpt-4o-mini",
+            "cleanup",
+            HashMap::<String, String>::new(),
+        );
+        state.create_agent(agent, chat.id as u64).await?;
+
+        let message = CreateMessage {
+            content: "hello".to_string(),
+            files: vec![],
+        };
+        state.create_message(message, chat.id as u64, 1).await?;
+
+        state.delete_chat(chat.id as u64, 1).await?;
+
+        assert!(state.get_chat_by_id(chat.id as u64).await?.is_none());
+        let messages = state
+            .list_messages(
+                ListMessages {
+                    last_id: None,
+                    limit: 20,
+                },
+                chat.id as u64,
+            )
+            .await?;
+        assert!(messages.is_empty());
+        let agents = state.list_agents(chat.id as u64).await?;
+        assert!(agents.is_empty());
 
         Ok(())
     }

@@ -64,6 +64,24 @@ async fn chat_server_should_work() -> Result<()> {
     Ok(())
 }
 
+#[tokio::test]
+async fn chat_update_and_delete_should_work() -> Result<()> {
+    let (_tdb, state) = chat_server::AppState::new_for_test().await?;
+    let chat_server = ChatServer::new(state).await?;
+    let chat = chat_server.create_chat().await?;
+
+    let updated = chat_server
+        .update_chat(chat.id as u64, "renamed-by-api")
+        .await?;
+    assert_eq!(updated.name.as_deref(), Some("renamed-by-api"));
+
+    chat_server.delete_chat(chat.id as u64).await?;
+    let chats = chat_server.list_chats().await?;
+    assert!(!chats.iter().any(|item| item.id == chat.id));
+
+    Ok(())
+}
+
 impl NotifyServer {
     async fn new(db_url: &str, token: &str) -> Result<Self> {
         let mut config = notify_server::AppConfig::load()?;
@@ -183,6 +201,44 @@ impl ChatServer {
         assert!(tickets.file_token.len() > 10);
         assert!(tickets.expires_in_secs > 0);
         Ok(tickets)
+    }
+
+    async fn list_chats(&self) -> Result<Vec<Chat>> {
+        let res = self
+            .client
+            .get(format!("http://{}/api/chats", self.addr))
+            .header("Authorization", format!("Bearer {}", self.token))
+            .send()
+            .await?;
+        assert_eq!(res.status(), StatusCode::OK);
+        Ok(res.json().await?)
+    }
+
+    async fn update_chat(&self, chat_id: u64, name: &str) -> Result<Chat> {
+        let body = serde_json::to_string(&json!({
+            "name": name,
+        }))?;
+        let res = self
+            .client
+            .patch(format!("http://{}/api/chats/{}", self.addr, chat_id))
+            .header("Authorization", format!("Bearer {}", self.token))
+            .header("Content-Type", "application/json")
+            .body(body)
+            .send()
+            .await?;
+        assert_eq!(res.status(), StatusCode::OK);
+        Ok(res.json().await?)
+    }
+
+    async fn delete_chat(&self, chat_id: u64) -> Result<()> {
+        let res = self
+            .client
+            .delete(format!("http://{}/api/chats/{}", self.addr, chat_id))
+            .header("Authorization", format!("Bearer {}", self.token))
+            .send()
+            .await?;
+        assert_eq!(res.status(), StatusCode::NO_CONTENT);
+        Ok(())
     }
 
     async fn create_agent(&self, chat_id: u64) -> Result<ChatAgent> {

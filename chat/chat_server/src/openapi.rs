@@ -12,7 +12,7 @@ use crate::{
     OpsUpdateDebateSessionInput, OpsUpdateDebateTopicInput, PinDebateMessageInput,
     PinDebateMessageOutput, RequestJudgeJobInput, RequestJudgeJobOutput, SigninUser,
     SubmitDrawVoteInput, SubmitDrawVoteOutput, SubmitJudgeReportInput, SubmitJudgeReportOutput,
-    VerifyIapOrderInput, VerifyIapOrderOutput, WalletBalanceOutput, WalletLedgerItem,
+    UpdateChat, VerifyIapOrderInput, VerifyIapOrderOutput, WalletBalanceOutput, WalletLedgerItem,
 };
 use axum::Router;
 use chat_core::{AgentType, Chat, ChatAgent, ChatType, ChatUser, Message, User, Workspace};
@@ -60,6 +60,8 @@ pub(crate) trait OpenApiRouter {
             list_chat_handler,
             create_chat_handler,
             get_chat_handler,
+            update_chat_handler,
+            delete_chat_handler,
             create_agent_handler,
             update_agent_handler,
             list_agent_handler,
@@ -86,7 +88,7 @@ pub(crate) trait OpenApiRouter {
                 IapProduct, ListIapProducts, GetIapOrderByTransaction, IapOrderSnapshot,
                 GetIapOrderByTransactionOutput, VerifyIapOrderInput, VerifyIapOrderOutput,
                 WalletBalanceOutput, ListWalletLedger, WalletLedgerItem,
-                SigninUser, CreateUser, CreateChat, CreateMessage, ListMessages, AuthOutput, AccessTicketsOutput, ErrorOutput
+                SigninUser, CreateUser, CreateChat, UpdateChat, CreateMessage, ListMessages, AuthOutput, AccessTicketsOutput, ErrorOutput
             ),
         ),
         modifiers(&SecurityAddon),
