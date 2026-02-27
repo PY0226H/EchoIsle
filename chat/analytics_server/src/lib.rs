@@ -16,6 +16,7 @@ use chat_core::{
     DecodingKey, User,
 };
 use clickhouse::Client;
+use clickhouse::Row;
 use handlers::{
     create_event_handler, get_judge_refresh_summary_handler,
     get_judge_refresh_summary_metrics_handler, GetJudgeRefreshSummaryOutput,
@@ -25,6 +26,7 @@ use openapi::OpenApiRouter as _;
 use std::{fmt, ops::Deref, sync::Arc};
 use tokio::fs;
 use tower_http::cors::{self, CorsLayer};
+use tracing::{info, warn};
 
 use axum::{
     http::Method,
@@ -49,6 +51,15 @@ pub struct AppStateInner {
     pub(crate) judge_refresh_summary_cache:
         Arc<DashMap<String, (i64, GetJudgeRefreshSummaryOutput)>>,
     pub(crate) judge_refresh_summary_metrics: Arc<JudgeRefreshSummaryMetrics>,
+}
+
+const SESSION_PRELOAD_WINDOW_MINUTES: u32 = 10;
+
+#[derive(Debug, Clone, Row, serde::Deserialize)]
+struct SessionCacheRow {
+    client_id: String,
+    session_id: String,
+    last_server_ts_ms: i64,
 }
 
 pub async fn get_router(state: AppState) -> Result<Router, AppError> {
@@ -116,8 +127,23 @@ impl AppState {
         if let Some(password) = config.server.db_password.as_ref() {
             client = client.with_password(password);
         }
-        // TODO: load sessions from db
-        let sessions = Arc::new(DashMap::new());
+        let sessions = match load_recent_sessions_from_db(&client).await {
+            Ok(rows) => {
+                let restored = build_sessions_cache(rows);
+                info!(
+                    "restored {} analytics sessions from ClickHouse",
+                    restored.len()
+                );
+                restored
+            }
+            Err(err) => {
+                warn!(
+                    "failed to restore sessions from ClickHouse, fallback to empty cache: {}",
+                    err
+                );
+                Arc::new(DashMap::new())
+            }
+        };
         let judge_refresh_summary_cache = Arc::new(DashMap::new());
         let judge_refresh_summary_metrics = Arc::new(JudgeRefreshSummaryMetrics::default());
         Ok(Self {
@@ -133,10 +159,74 @@ impl AppState {
     }
 }
 
+async fn load_recent_sessions_from_db(client: &Client) -> Result<Vec<SessionCacheRow>, AppError> {
+    let sql = format!(
+        r#"
+SELECT
+    client_id,
+    argMax(session_id, server_ts) AS session_id,
+    toInt64(toUnixTimestamp64Milli(max(server_ts))) AS last_server_ts_ms
+FROM analytics_events
+WHERE server_ts >= now64(3) - toIntervalMinute({})
+GROUP BY client_id
+"#,
+        SESSION_PRELOAD_WINDOW_MINUTES
+    );
+    let mut cursor = client.query(sql.as_str()).fetch::<SessionCacheRow>()?;
+    let mut rows = Vec::new();
+    while let Some(row) = cursor.next().await? {
+        rows.push(row);
+    }
+    Ok(rows)
+}
+
+fn build_sessions_cache(rows: Vec<SessionCacheRow>) -> Arc<DashMap<String, (String, i64)>> {
+    let sessions = Arc::new(DashMap::new());
+    for row in rows {
+        if row.client_id.is_empty() || row.session_id.is_empty() {
+            continue;
+        }
+        sessions.insert(row.client_id, (row.session_id, row.last_server_ts_ms));
+    }
+    sessions
+}
+
 impl fmt::Debug for AppStateInner {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("AppStateInner")
             .field("config", &self.config)
             .finish()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn build_sessions_cache_should_skip_invalid_rows() {
+        let sessions = build_sessions_cache(vec![
+            SessionCacheRow {
+                client_id: "client-a".to_string(),
+                session_id: "sess-a".to_string(),
+                last_server_ts_ms: 100,
+            },
+            SessionCacheRow {
+                client_id: "".to_string(),
+                session_id: "sess-b".to_string(),
+                last_server_ts_ms: 200,
+            },
+            SessionCacheRow {
+                client_id: "client-c".to_string(),
+                session_id: "".to_string(),
+                last_server_ts_ms: 300,
+            },
+        ]);
+
+        assert_eq!(sessions.len(), 1);
+        let entry = sessions
+            .get("client-a")
+            .expect("client-a should be restored");
+        assert_eq!(entry.value(), &("sess-a".to_string(), 100));
     }
 }

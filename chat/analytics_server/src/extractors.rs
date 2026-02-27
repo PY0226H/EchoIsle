@@ -1,5 +1,4 @@
-// TODO: check license for https://github.com/Stefanuk12/axum-protobuf
-// this is a modified version of the original code
+// Adapted from https://github.com/Stefanuk12/axum-protobuf and modified for this project.
 
 use std::convert::Infallible;
 
@@ -38,10 +37,7 @@ impl IntoResponse for ProtobufRejection {
             ),
         };
 
-        Response::builder()
-            .status(status)
-            .body(Body::from(body))
-            .unwrap() // we know this will be valid since we made it
+        (status, body).into_response()
     }
 }
 
