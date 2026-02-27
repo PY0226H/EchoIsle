@@ -640,6 +640,127 @@ async fn debate_mvp_signoff_should_cover_accept_draw_without_rematch() -> Result
     Ok(())
 }
 
+#[tokio::test]
+async fn debate_ops_should_reject_non_owner_management_actions() -> Result<()> {
+    let (_tdb, state) = AppState::new_for_test().await?;
+    let server = TestServer::new(state.clone()).await?;
+
+    let now_ms = SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis();
+    let workspace = format!("mvp-ops-perm-{now_ms}");
+    let owner_email = format!("owner-ops-{now_ms}@acme.org");
+    let member_email = format!("member-ops-{now_ms}@acme.org");
+
+    let owner = server
+        .signup(&workspace, "Owner Ops", &owner_email, "123456")
+        .await?;
+    let member = server
+        .signup(&workspace, "Member Ops", &member_email, "123456")
+        .await?;
+
+    let topic: DebateTopic = owner
+        .post(
+            "/api/debate/ops/topics",
+            &OpsCreateDebateTopicInput {
+                title: "权限校验辩题".to_string(),
+                description: "用于验证非 owner 权限限制".to_string(),
+                category: "game".to_string(),
+                stance_pro: "应限制".to_string(),
+                stance_con: "可放开".to_string(),
+                context_seed: Some("ops permission seed".to_string()),
+                is_active: true,
+            },
+            StatusCode::CREATED,
+        )
+        .await?;
+
+    let session: DebateSessionSummary = owner
+        .post(
+            "/api/debate/ops/sessions",
+            &OpsCreateDebateSessionInput {
+                topic_id: topic.id as u64,
+                status: Some("scheduled".to_string()),
+                scheduled_start_at: "2099-01-02T00:00:00Z".parse()?,
+                end_at: "2099-01-02T01:00:00Z".parse()?,
+                max_participants_per_side: Some(200),
+            },
+            StatusCode::CREATED,
+        )
+        .await?;
+
+    let create_topic_error: serde_json::Value = member
+        .post(
+            "/api/debate/ops/topics",
+            &OpsCreateDebateTopicInput {
+                title: "member create topic".to_string(),
+                description: "should fail".to_string(),
+                category: "game".to_string(),
+                stance_pro: "pro".to_string(),
+                stance_con: "con".to_string(),
+                context_seed: None,
+                is_active: true,
+            },
+            StatusCode::CONFLICT,
+        )
+        .await?;
+    assert!(create_topic_error
+        .to_string()
+        .contains("only workspace owner can manage debate operations"));
+
+    let update_topic_error: serde_json::Value = member
+        .put(
+            format!("/api/debate/ops/topics/{}", topic.id).as_str(),
+            &serde_json::json!({
+                "title": "member update topic",
+                "description": "should fail",
+                "category": "game",
+                "stancePro": "pro",
+                "stanceCon": "con",
+                "contextSeed": null,
+                "isActive": true
+            }),
+            StatusCode::CONFLICT,
+        )
+        .await?;
+    assert!(update_topic_error
+        .to_string()
+        .contains("only workspace owner can manage debate operations"));
+
+    let create_session_error: serde_json::Value = member
+        .post(
+            "/api/debate/ops/sessions",
+            &OpsCreateDebateSessionInput {
+                topic_id: topic.id as u64,
+                status: Some("open".to_string()),
+                scheduled_start_at: "2099-01-02T00:00:00Z".parse()?,
+                end_at: "2099-01-02T01:00:00Z".parse()?,
+                max_participants_per_side: Some(200),
+            },
+            StatusCode::CONFLICT,
+        )
+        .await?;
+    assert!(create_session_error
+        .to_string()
+        .contains("only workspace owner can manage debate operations"));
+
+    let update_session_error: serde_json::Value = member
+        .put(
+            format!("/api/debate/ops/sessions/{}", session.id).as_str(),
+            &OpsUpdateDebateSessionInput {
+                status: Some("open".to_string()),
+                scheduled_start_at: None,
+                end_at: None,
+                max_participants_per_side: None,
+            },
+            StatusCode::CONFLICT,
+        )
+        .await?;
+    assert!(update_session_error
+        .to_string()
+        .contains("only workspace owner can manage debate operations"));
+
+    Ok(())
+}
+
 impl TestServer {
     async fn new(state: AppState) -> Result<Self> {
         let app: Router = chat_server::get_router(state).await?;
