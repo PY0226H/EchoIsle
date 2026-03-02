@@ -153,7 +153,9 @@ async fn debate_room_loop(
     let mut heartbeat_tick = tokio::time::interval(ROOM_HEARTBEAT_INTERVAL);
     heartbeat_tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
     heartbeat_tick.tick().await;
-    let replay_window = state.replay_debate_events_for_user(user_id, session_id, last_ack_seq);
+    let replay_window = state
+        .replay_debate_events_for_user(user_id, session_id, last_ack_seq)
+        .await;
 
     if !send_room_message(
         &mut socket,
@@ -379,6 +381,7 @@ mod tests {
                 pro_count: 2,
                 con_count: 1,
             })),
+            None,
         );
         tx.send(Arc::new(user_event))?;
 
@@ -455,6 +458,7 @@ mod tests {
                     con_count: 1,
                 },
             )),
+            None,
         );
         tx.send(Arc::new(out_of_room_event))?;
         let no_msg = tokio::time::timeout(Duration::from_millis(200), socket.next()).await;
@@ -471,6 +475,7 @@ mod tests {
                     con_count: 2,
                 },
             )),
+            None,
         );
         tx.send(Arc::new(in_room_event))?;
 
@@ -553,6 +558,7 @@ mod tests {
                 pro_count: 2,
                 con_count: 1,
             })),
+            None,
         );
         let _ = state.build_user_event_for_recipient(
             1,
@@ -563,6 +569,7 @@ mod tests {
                 pro_count: 2,
                 con_count: 2,
             })),
+            None,
         );
 
         let app = Router::new()

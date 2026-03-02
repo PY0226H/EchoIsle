@@ -200,11 +200,26 @@ pub async fn setup_pg_listener(state: AppState) -> anyhow::Result<()> {
         while let Some(Ok(notif)) = stream.next().await {
             info!("Received notification: {:?}", notif);
             let notification = Notification::load(notif.channel(), notif.payload())?;
+            let replay_event = match state
+                .persist_debate_event(notification.event.as_ref())
+                .await
+            {
+                Ok(v) => v,
+                Err(e) => {
+                    warn!(
+                        "persist debate replay event failed, fallback to memory-only replay: {}",
+                        e
+                    );
+                    None
+                }
+            };
             let users = &state.users;
             for user_id in notification.user_ids {
-                let user_event = Arc::new(
-                    state.build_user_event_for_recipient(user_id, notification.event.clone()),
-                );
+                let user_event = Arc::new(state.build_user_event_for_recipient(
+                    user_id,
+                    notification.event.clone(),
+                    replay_event.clone(),
+                ));
                 if let Some(tx) = users.get(&user_id) {
                     info!("Sending notification to user {}", user_id);
                     if let Err(e) = tx.send(user_event) {
@@ -374,6 +389,24 @@ impl AppEvent {
             AppEvent::DebateMessagePinned(v) => Some(v.session_id),
             AppEvent::DebateJudgeReportReady(v) => Some(v.session_id),
             AppEvent::DebateDrawVoteResolved(v) => Some(v.session_id),
+            _ => None,
+        }
+    }
+
+    pub fn debate_dedupe_key(&self) -> Option<String> {
+        match self {
+            AppEvent::DebateParticipantJoined(v) => Some(format!(
+                "join:{}:{}:{}:{}:{}",
+                v.session_id, v.user_id, v.side, v.pro_count, v.con_count
+            )),
+            AppEvent::DebateSessionStatusChanged(v) => Some(format!(
+                "status:{}:{}:{}",
+                v.session_id, v.from_status, v.to_status
+            )),
+            AppEvent::DebateMessageCreated(v) => Some(format!("message:{}", v.message_id)),
+            AppEvent::DebateMessagePinned(v) => Some(format!("pin:{}", v.pin_id)),
+            AppEvent::DebateJudgeReportReady(v) => Some(format!("report:{}", v.report_id)),
+            AppEvent::DebateDrawVoteResolved(v) => Some(format!("vote:{}", v.vote_id)),
             _ => None,
         }
     }
