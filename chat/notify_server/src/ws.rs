@@ -1,4 +1,7 @@
-use std::sync::Arc;
+use std::{
+    sync::Arc,
+    time::{SystemTime, UNIX_EPOCH},
+};
 
 use crate::{AppEvent, AppState};
 use axum::{
@@ -13,7 +16,11 @@ use chat_core::User;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::sync::broadcast;
+use tokio::time::{Duration, Instant, MissedTickBehavior};
 use tracing::{info, warn};
+
+const ROOM_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(20);
+const ROOM_HEARTBEAT_TIMEOUT: Duration = Duration::from_secs(65);
 
 pub(crate) async fn ws_handler(
     ws: WebSocketUpgrade,
@@ -23,7 +30,7 @@ pub(crate) async fn ws_handler(
     let user_id = user.id as u64;
     let rx = state.subscribe_user_events(user_id);
     info!("User {} subscribed via websocket", user_id);
-    ws.on_upgrade(move |socket| websocket_loop(socket, rx, user_id))
+    ws.on_upgrade(move |socket| websocket_loop(socket, rx, user_id, state))
 }
 
 pub(crate) async fn debate_room_ws_handler(
@@ -38,13 +45,14 @@ pub(crate) async fn debate_room_ws_handler(
         "User {} subscribed via debate room websocket, session_id={}",
         user_id, session_id
     );
-    ws.on_upgrade(move |socket| debate_room_loop(socket, rx, user_id, session_id))
+    ws.on_upgrade(move |socket| debate_room_loop(socket, rx, user_id, session_id, state))
 }
 
 async fn websocket_loop(
     mut socket: WebSocket,
     mut rx: broadcast::Receiver<Arc<AppEvent>>,
     user_id: u64,
+    state: AppState,
 ) {
     loop {
         tokio::select! {
@@ -85,20 +93,40 @@ async fn websocket_loop(
             }
         }
     }
+    drop(rx);
+    state.cleanup_user_events_if_unused(user_id);
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type", rename_all = "camelCase")]
 enum RoomClientMessage {
     Ping,
+    Pong,
 }
 
 #[derive(Debug, Serialize)]
 #[serde(tag = "type", rename_all = "camelCase")]
 enum RoomServerMessage {
-    Welcome { session_id: i64, user_id: u64 },
-    RoomEvent { event_name: String, payload: Value },
-    Pong,
+    Welcome {
+        session_id: i64,
+        user_id: u64,
+        heartbeat_interval_ms: u64,
+        heartbeat_timeout_ms: u64,
+    },
+    RoomEvent {
+        event_name: String,
+        payload: Value,
+    },
+    Ping {
+        ts: i64,
+    },
+    Pong {
+        ts: Option<i64>,
+    },
+    SyncRequired {
+        reason: String,
+        skipped: u64,
+    },
 }
 
 async fn debate_room_loop(
@@ -106,12 +134,20 @@ async fn debate_room_loop(
     mut rx: broadcast::Receiver<Arc<AppEvent>>,
     user_id: u64,
     session_id: i64,
+    state: AppState,
 ) {
+    let mut last_client_heartbeat = Instant::now();
+    let mut heartbeat_tick = tokio::time::interval(ROOM_HEARTBEAT_INTERVAL);
+    heartbeat_tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
+    heartbeat_tick.tick().await;
+
     if !send_room_message(
         &mut socket,
         &RoomServerMessage::Welcome {
             session_id,
             user_id,
+            heartbeat_interval_ms: ROOM_HEARTBEAT_INTERVAL.as_millis() as u64,
+            heartbeat_timeout_ms: ROOM_HEARTBEAT_TIMEOUT.as_millis() as u64,
         },
     )
     .await
@@ -125,16 +161,34 @@ async fn debate_room_loop(
                 match incoming {
                     Some(Ok(Message::Close(_))) | None => break,
                     Some(Ok(Message::Ping(v))) => {
+                        last_client_heartbeat = Instant::now();
                         if socket.send(Message::Pong(v)).await.is_err() {
                             break;
                         }
                     }
+                    Some(Ok(Message::Pong(_))) => {
+                        last_client_heartbeat = Instant::now();
+                    }
                     Some(Ok(Message::Text(text))) => {
                         let cmd = serde_json::from_str::<RoomClientMessage>(&text);
-                        if matches!(cmd, Ok(RoomClientMessage::Ping))
-                            && !send_room_message(&mut socket, &RoomServerMessage::Pong).await
-                        {
-                            break;
+                        match cmd {
+                            Ok(RoomClientMessage::Ping) => {
+                                last_client_heartbeat = Instant::now();
+                                if !send_room_message(
+                                    &mut socket,
+                                    &RoomServerMessage::Pong {
+                                        ts: Some(now_unix_ms()),
+                                    },
+                                )
+                                .await
+                                {
+                                    break;
+                                }
+                            }
+                            Ok(RoomClientMessage::Pong) => {
+                                last_client_heartbeat = Instant::now();
+                            }
+                            Err(_) => {}
                         }
                     }
                     Some(Ok(_)) => {}
@@ -176,12 +230,37 @@ async fn debate_room_loop(
                             "debate room websocket lagged for user {}, session {}, skipped {} events",
                             user_id, session_id, skipped
                         );
+                        let sync_msg = RoomServerMessage::SyncRequired {
+                            reason: "lagged_receiver".to_string(),
+                            skipped,
+                        };
+                        if !send_room_message(&mut socket, &sync_msg).await {
+                            break;
+                        }
                     }
                     Err(broadcast::error::RecvError::Closed) => break,
                 }
             }
+            _ = heartbeat_tick.tick() => {
+                let idle_for = Instant::now().saturating_duration_since(last_client_heartbeat);
+                if idle_for > ROOM_HEARTBEAT_TIMEOUT {
+                    warn!(
+                        "debate room websocket heartbeat timeout for user {}, session {}, idle={}ms",
+                        user_id,
+                        session_id,
+                        idle_for.as_millis()
+                    );
+                    break;
+                }
+                let ping = RoomServerMessage::Ping { ts: now_unix_ms() };
+                if !send_room_message(&mut socket, &ping).await {
+                    break;
+                }
+            }
         }
     }
+    drop(rx);
+    state.cleanup_user_events_if_unused(user_id);
 }
 
 async fn send_room_message(socket: &mut WebSocket, msg: &RoomServerMessage) -> bool {
@@ -190,6 +269,13 @@ async fn send_room_message(socket: &mut WebSocket, msg: &RoomServerMessage) -> b
         Err(_) => return false,
     };
     socket.send(Message::Text(payload)).await.is_ok()
+}
+
+fn now_unix_ms() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|v| v.as_millis() as i64)
+        .unwrap_or(0)
 }
 
 #[cfg(test)]
@@ -204,7 +290,7 @@ mod tests {
     use anyhow::Result;
     use axum::{middleware::from_fn_with_state, routing::get, Router};
     use chat_core::EncodingKey;
-    use futures::StreamExt;
+    use futures::{SinkExt, StreamExt};
     use tokio::{net::TcpListener, time::Duration};
     use tokio_tungstenite::{connect_async, tungstenite::Error as WsError};
 
@@ -301,6 +387,18 @@ mod tests {
             .and_then(|v| v.as_i64())
             .expect("welcome should carry session id");
         assert_eq!(welcome_session_id, 12);
+        let heartbeat_interval_ms = welcome_json
+            .get("heartbeatIntervalMs")
+            .or_else(|| welcome_json.get("heartbeat_interval_ms"))
+            .and_then(|v| v.as_u64())
+            .expect("welcome should carry heartbeatIntervalMs");
+        assert!(heartbeat_interval_ms > 0);
+        let heartbeat_timeout_ms = welcome_json
+            .get("heartbeatTimeoutMs")
+            .or_else(|| welcome_json.get("heartbeat_timeout_ms"))
+            .and_then(|v| v.as_u64())
+            .expect("welcome should carry heartbeatTimeoutMs");
+        assert!(heartbeat_timeout_ms > heartbeat_interval_ms);
 
         for _ in 0..40 {
             if state.users.contains_key(&1) {
@@ -350,6 +448,41 @@ mod tests {
             .and_then(|v| v.as_i64())
             .expect("room event payload should carry session id");
         assert_eq!(payload_session_id, 12);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn debate_room_ws_handler_should_reply_app_ping_with_pong() -> Result<()> {
+        let state = test_state();
+        let ek = EncodingKey::load(include_str!("../../chat_core/fixtures/encoding.pem"))?;
+        let user = chat_core::User::new(1, "Tyr Chen", "tchen@acme.org");
+        let notify_ticket = ek.sign_notify_ticket(user, 300)?;
+
+        let app = Router::new()
+            .route("/ws/debate/:session_id", get(debate_room_ws_handler))
+            .layer(from_fn_with_state(state.clone(), verify_notify_ticket))
+            .with_state(state);
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        let addr = listener.local_addr()?;
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let (mut socket, _) =
+            connect_async(format!("ws://{addr}/ws/debate/12?token={notify_ticket}")).await?;
+        let _welcome = tokio::time::timeout(Duration::from_secs(2), socket.next()).await?;
+
+        socket
+            .send(tokio_tungstenite::tungstenite::Message::Text(
+                r#"{"type":"ping"}"#.to_string(),
+            ))
+            .await?;
+
+        let maybe_msg = tokio::time::timeout(Duration::from_secs(2), socket.next()).await?;
+        let msg = maybe_msg.expect("should receive pong message")?;
+        let text = msg.into_text()?.to_string();
+        let json: serde_json::Value = serde_json::from_str(&text)?;
+        assert_eq!(json["type"], "pong");
         Ok(())
     }
 

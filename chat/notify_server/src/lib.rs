@@ -109,6 +109,17 @@ impl AppState {
             rx
         }
     }
+
+    pub(crate) fn cleanup_user_events_if_unused(&self, user_id: u64) {
+        let should_remove = self
+            .users
+            .get(&user_id)
+            .map(|tx| tx.receiver_count() == 0)
+            .unwrap_or(false);
+        if should_remove {
+            self.users.remove(&user_id);
+        }
+    }
 }
 
 #[cfg(test)]

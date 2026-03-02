@@ -281,6 +281,10 @@ import {
   shouldPollJudgeReportStatus,
 } from '../debate-room-utils';
 
+const WS_HEARTBEAT_SEND_INTERVAL_MS = 20_000;
+const WS_HEARTBEAT_WATCHDOG_INTERVAL_MS = 5_000;
+const WS_HEARTBEAT_STALE_TIMEOUT_MS = 65_000;
+
 export default {
   components: {
     Sidebar,
@@ -306,6 +310,9 @@ export default {
       wsConnected: false,
       wsReconnectTimer: null,
       wsReconnectAttempts: 0,
+      wsHeartbeatTimer: null,
+      wsHeartbeatWatchdogTimer: null,
+      wsLastMessageAt: 0,
       roomRecovering: false,
       lastRoomRecoverAt: 0,
       judgeLoading: false,
@@ -687,6 +694,62 @@ export default {
         this.wsReconnectTimer = null;
       }
     },
+    markWsActivity() {
+      this.wsLastMessageAt = Date.now();
+    },
+    clearWsHeartbeatTimers() {
+      if (this.wsHeartbeatTimer) {
+        clearInterval(this.wsHeartbeatTimer);
+        this.wsHeartbeatTimer = null;
+      }
+      if (this.wsHeartbeatWatchdogTimer) {
+        clearInterval(this.wsHeartbeatWatchdogTimer);
+        this.wsHeartbeatWatchdogTimer = null;
+      }
+    },
+    startWsHeartbeat(ws) {
+      this.clearWsHeartbeatTimers();
+      this.markWsActivity();
+      this.wsHeartbeatTimer = setInterval(() => {
+        if (this.destroyed || this.ws !== ws || ws.readyState !== WebSocket.OPEN) {
+          return;
+        }
+        try {
+          ws.send(JSON.stringify({ type: 'ping' }));
+        } catch (_) {
+          ws.close();
+        }
+      }, WS_HEARTBEAT_SEND_INTERVAL_MS);
+      this.wsHeartbeatWatchdogTimer = setInterval(() => {
+        if (this.destroyed || this.ws !== ws || ws.readyState !== WebSocket.OPEN) {
+          return;
+        }
+        if (Date.now() - this.wsLastMessageAt > WS_HEARTBEAT_STALE_TIMEOUT_MS) {
+          ws.close();
+        }
+      }, WS_HEARTBEAT_WATCHDOG_INTERVAL_MS);
+    },
+    handleWsControlMessage(ws, msg) {
+      const type = String(msg?.type || '');
+      if (!type) {
+        return false;
+      }
+      this.markWsActivity();
+      if (type === 'ping') {
+        if (this.ws === ws && ws.readyState === WebSocket.OPEN) {
+          ws.send(JSON.stringify({ type: 'pong' }));
+        }
+        return true;
+      }
+      if (type === 'pong' || type === 'welcome') {
+        return true;
+      }
+      if (type === 'syncRequired') {
+        this.recoverRoomStateAfterReconnect();
+        return true;
+      }
+      return false;
+    },
     scheduleWsReconnect() {
       if (this.destroyed || this.wsReconnectTimer) {
         return;
@@ -700,6 +763,7 @@ export default {
     },
     disconnectWs({ resetBackoff = false } = {}) {
       this.clearWsReconnectTimer();
+      this.clearWsHeartbeatTimers();
       if (this.ws) {
         this.ws.close();
       }
@@ -770,10 +834,17 @@ export default {
           }
           this.wsConnected = true;
           this.wsReconnectAttempts = 0;
+          this.startWsHeartbeat(ws);
           this.recoverRoomStateAfterReconnect();
         };
         ws.onmessage = (event) => {
           const msg = parseDebateRoomWsMessage(event?.data);
+          if (!msg || typeof msg !== 'object') {
+            return;
+          }
+          if (this.handleWsControlMessage(ws, msg)) {
+            return;
+          }
           const payload = extractDebateRoomEvent(msg);
           if (payload) {
             this.handleRoomPayload(payload);
@@ -791,6 +862,7 @@ export default {
           }
           this.ws = null;
           this.wsConnected = false;
+          this.clearWsHeartbeatTimers();
           this.scheduleWsReconnect();
         };
       } catch (error) {
