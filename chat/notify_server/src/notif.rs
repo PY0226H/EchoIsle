@@ -202,9 +202,12 @@ pub async fn setup_pg_listener(state: AppState) -> anyhow::Result<()> {
             let notification = Notification::load(notif.channel(), notif.payload())?;
             let users = &state.users;
             for user_id in notification.user_ids {
+                let user_event = Arc::new(
+                    state.build_user_event_for_recipient(user_id, notification.event.clone()),
+                );
                 if let Some(tx) = users.get(&user_id) {
                     info!("Sending notification to user {}", user_id);
-                    if let Err(e) = tx.send(notification.event.clone()) {
+                    if let Err(e) = tx.send(user_event) {
                         warn!("Failed to send notification to user {}: {}", user_id, e);
                     }
                 }

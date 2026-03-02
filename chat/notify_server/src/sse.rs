@@ -19,8 +19,8 @@ pub(crate) async fn sse_handler(
     info!("User {} subscribed", user_id);
 
     let stream = BroadcastStream::new(rx).filter_map(|v| v.ok()).map(|v| {
-        let name = v.event_name();
-        let v = serde_json::to_string(&v).expect("Failed to serialize event");
+        let name = v.app_event.event_name();
+        let v = serde_json::to_string(v.app_event.as_ref()).expect("Failed to serialize event");
         debug!("Sending event {}: {:?}", name, v);
         Ok(Event::default().data(v).event(name))
     });

@@ -10,7 +10,7 @@ A skill is a set of local instructions stored in a `SKILL.md` file.
 - `post-module-interview-journal`: Generate interview-ready development records after each module implementation. (file: `/Users/panyihang/Documents/aicomm/skills/post-module-interview-journal/SKILL.md`)
 - `post-module-explanation-journal`: Generate deep Chinese explanation documents for newly added or modified module code under `docs/explanation`. (file: `/Users/panyihang/Documents/aicomm/skills/post-module-explanation-journal/SKILL.md`)
 - `python-venv-guard`: Enforce Python virtual environment usage before any Python command, and forbid global python/pip usage. (file: `/Users/panyihang/Documents/aicomm/skills/python-venv-guard/SKILL.md`)
-- `pre-module-mvp-plan-guard`: Before each development module, read MVP plan, verify scope alignment, and write pre-development alignment record. (file: `/Users/panyihang/Documents/aicomm/skills/pre-module-mvp-plan-guard/SKILL.md`)
+- `pre-module-mvp-plan-guard`: During MVP development phase, before each development module, read MVP plan, verify scope alignment, and write pre-development alignment record. (file: `/Users/panyihang/Documents/aicomm/skills/pre-module-mvp-plan-guard/SKILL.md`)
 - `post-module-plan-sync`: After each module completion, sync MVP plan matrix and next-step recommendation. (file: `/Users/panyihang/Documents/aicomm/skills/post-module-plan-sync/SKILL.md`)
 - `post-optimization-plan-sync`: After each backend optimization module, sync optimization matrix and next-step recommendation, then append optimization history. (file: `/Users/panyihang/Documents/aicomm/skills/post-optimization-plan-sync/SKILL.md`)
 
@@ -38,7 +38,8 @@ A skill is a set of local instructions stored in a `SKILL.md` file.
 - Always use `/Users/panyihang/Documents/aicomm/ai_judge_service/.venv/bin/python`.
 
 ## Mandatory pre-development hook
-- For any turn that starts module-level implementation/refactor/fix, run `pre-module-mvp-plan-guard` before coding.
+- For any turn that starts module-level implementation/refactor/fix during MVP development phase, run `pre-module-mvp-plan-guard` before coding.
+- If the current work is not in MVP development phase, skip this hook.
 - Must read `/Users/panyihang/Documents/aicomm/docs/产品化开发计划-在线辩论AI裁判平台.md`.
 - Must verify the target module is within MVP roadmap scope.
 - If off-road, record adjustment reason and update the plan first.

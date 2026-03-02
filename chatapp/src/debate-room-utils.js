@@ -29,7 +29,7 @@ function normalizeNotifyBasePath(pathname) {
   return trimmed;
 }
 
-export function buildDebateRoomWsUrl({ notifyBase, sessionId, notifyTicket }) {
+export function buildDebateRoomWsUrl({ notifyBase, sessionId, notifyTicket, lastAckSeq = null }) {
   if (!sessionId) {
     throw new Error('sessionId is required');
   }
@@ -43,6 +43,10 @@ export function buildDebateRoomWsUrl({ notifyBase, sessionId, notifyTicket }) {
   parsed.pathname = `${basePath}/ws/debate/${sessionId}`;
   parsed.search = '';
   parsed.searchParams.set('token', String(notifyTicket).trim());
+  const normalizedLastAckSeq = Number(lastAckSeq);
+  if (lastAckSeq != null && Number.isFinite(normalizedLastAckSeq) && normalizedLastAckSeq >= 0) {
+    parsed.searchParams.set('lastAckSeq', String(Math.floor(normalizedLastAckSeq)));
+  }
   return parsed.toString();
 }
 

@@ -313,6 +313,7 @@ export default {
       wsHeartbeatTimer: null,
       wsHeartbeatWatchdogTimer: null,
       wsLastMessageAt: 0,
+      lastAckSeq: 0,
       roomRecovering: false,
       lastRoomRecoverAt: 0,
       judgeLoading: false,
@@ -403,6 +404,41 @@ export default {
         throw new Error('invalid session id');
       }
       this.sessionId = parsed;
+      this.restoreLastAckSeq();
+    },
+    lastAckSeqStorageKey() {
+      if (!this.sessionId) {
+        return '';
+      }
+      return `debateRoom:lastAckSeq:${this.sessionId}`;
+    },
+    restoreLastAckSeq() {
+      const key = this.lastAckSeqStorageKey();
+      if (!key || !globalThis?.sessionStorage) {
+        this.lastAckSeq = 0;
+        return;
+      }
+      const raw = Number(globalThis.sessionStorage.getItem(key));
+      this.lastAckSeq = Number.isFinite(raw) && raw >= 0 ? Math.floor(raw) : 0;
+    },
+    persistLastAckSeq() {
+      const key = this.lastAckSeqStorageKey();
+      if (!key || !globalThis?.sessionStorage) {
+        return;
+      }
+      globalThis.sessionStorage.setItem(key, String(this.lastAckSeq));
+    },
+    setLastAckSeq(seq) {
+      const next = Number(seq);
+      if (!Number.isFinite(next) || next < 0) {
+        return;
+      }
+      const normalized = Math.floor(next);
+      if (normalized <= this.lastAckSeq) {
+        return;
+      }
+      this.lastAckSeq = normalized;
+      this.persistLastAckSeq();
     },
     formatDateTime(value) {
       if (!value) {
@@ -741,14 +777,42 @@ export default {
         }
         return true;
       }
-      if (type === 'pong' || type === 'welcome') {
+      if (type === 'welcome') {
+        return true;
+      }
+      if (type === 'pong') {
         return true;
       }
       if (type === 'syncRequired') {
-        this.recoverRoomStateAfterReconnect();
+        this.disconnectWs();
+        this.connectRoomWs();
         return true;
       }
       return false;
+    },
+    handleRoomEventMessage(msg) {
+      const eventSeqRaw = Number(msg?.eventSeq ?? msg?.event_seq);
+      if (Number.isFinite(eventSeqRaw) && eventSeqRaw > 0) {
+        const eventSeq = Math.floor(eventSeqRaw);
+        if (eventSeq <= this.lastAckSeq) {
+          return;
+        }
+        if (eventSeq > this.lastAckSeq + 1) {
+          this.disconnectWs();
+          this.connectRoomWs();
+          return;
+        }
+        const payload = extractDebateRoomEvent(msg);
+        if (payload) {
+          this.handleRoomPayload(payload);
+        }
+        this.setLastAckSeq(eventSeq);
+        return;
+      }
+      const payload = extractDebateRoomEvent(msg);
+      if (payload) {
+        this.handleRoomPayload(payload);
+      }
     },
     scheduleWsReconnect() {
       if (this.destroyed || this.wsReconnectTimer) {
@@ -824,6 +888,7 @@ export default {
           notifyBase: getNotifyBase(),
           sessionId: this.sessionId,
           notifyTicket,
+          lastAckSeq: this.lastAckSeq,
         });
         this.disconnectWs();
         const ws = new WebSocket(wsUrl);
@@ -845,10 +910,7 @@ export default {
           if (this.handleWsControlMessage(ws, msg)) {
             return;
           }
-          const payload = extractDebateRoomEvent(msg);
-          if (payload) {
-            this.handleRoomPayload(payload);
-          }
+          this.handleRoomEventMessage(msg);
         };
         ws.onerror = () => {
           if (this.ws !== ws) {

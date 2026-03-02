@@ -3,11 +3,11 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use crate::{AppEvent, AppState};
+use crate::{AppState, DebateReplayEvent, UserEvent};
 use axum::{
     extract::{
         ws::{Message, WebSocket, WebSocketUpgrade},
-        Path, State,
+        Path, Query, State,
     },
     response::Response,
     Extension,
@@ -35,6 +35,7 @@ pub(crate) async fn ws_handler(
 
 pub(crate) async fn debate_room_ws_handler(
     Path(session_id): Path<i64>,
+    Query(query): Query<DebateRoomWsQuery>,
     ws: WebSocketUpgrade,
     Extension(user): Extension<User>,
     State(state): State<AppState>,
@@ -45,12 +46,14 @@ pub(crate) async fn debate_room_ws_handler(
         "User {} subscribed via debate room websocket, session_id={}",
         user_id, session_id
     );
-    ws.on_upgrade(move |socket| debate_room_loop(socket, rx, user_id, session_id, state))
+    ws.on_upgrade(move |socket| {
+        debate_room_loop(socket, rx, user_id, session_id, query.last_ack_seq, state)
+    })
 }
 
 async fn websocket_loop(
     mut socket: WebSocket,
-    mut rx: broadcast::Receiver<Arc<AppEvent>>,
+    mut rx: broadcast::Receiver<Arc<UserEvent>>,
     user_id: u64,
     state: AppState,
 ) {
@@ -74,7 +77,7 @@ async fn websocket_loop(
             maybe_event = rx.recv() => {
                 match maybe_event {
                     Ok(event) => {
-                        let payload = match serde_json::to_string(&event) {
+                        let payload = match serde_json::to_string(event.app_event.as_ref()) {
                             Ok(v) => v,
                             Err(e) => {
                                 warn!("serialize event failed for user {}: {}", user_id, e);
@@ -104,16 +107,25 @@ enum RoomClientMessage {
     Pong,
 }
 
+#[derive(Debug, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct DebateRoomWsQuery {
+    last_ack_seq: Option<u64>,
+}
+
 #[derive(Debug, Serialize)]
 #[serde(tag = "type", rename_all = "camelCase")]
 enum RoomServerMessage {
     Welcome {
         session_id: i64,
         user_id: u64,
+        last_event_seq: u64,
         heartbeat_interval_ms: u64,
         heartbeat_timeout_ms: u64,
     },
     RoomEvent {
+        event_seq: u64,
+        event_at_ms: i64,
         event_name: String,
         payload: Value,
     },
@@ -131,21 +143,24 @@ enum RoomServerMessage {
 
 async fn debate_room_loop(
     mut socket: WebSocket,
-    mut rx: broadcast::Receiver<Arc<AppEvent>>,
+    mut rx: broadcast::Receiver<Arc<UserEvent>>,
     user_id: u64,
     session_id: i64,
+    last_ack_seq: Option<u64>,
     state: AppState,
 ) {
     let mut last_client_heartbeat = Instant::now();
     let mut heartbeat_tick = tokio::time::interval(ROOM_HEARTBEAT_INTERVAL);
     heartbeat_tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
     heartbeat_tick.tick().await;
+    let replay_window = state.replay_debate_events_for_user(user_id, session_id, last_ack_seq);
 
     if !send_room_message(
         &mut socket,
         &RoomServerMessage::Welcome {
             session_id,
             user_id,
+            last_event_seq: replay_window.latest_seq,
             heartbeat_interval_ms: ROOM_HEARTBEAT_INTERVAL.as_millis() as u64,
             heartbeat_timeout_ms: ROOM_HEARTBEAT_TIMEOUT.as_millis() as u64,
         },
@@ -153,6 +168,20 @@ async fn debate_room_loop(
     .await
     {
         return;
+    }
+    if replay_window.has_gap {
+        let sync_msg = RoomServerMessage::SyncRequired {
+            reason: "replay_window_miss".to_string(),
+            skipped: replay_window.skipped,
+        };
+        if !send_room_message(&mut socket, &sync_msg).await {
+            return;
+        }
+    }
+    for replay_event in replay_window.events {
+        if !send_room_message(&mut socket, &room_event_message(&replay_event)).await {
+            return;
+        }
     }
 
     loop {
@@ -207,20 +236,17 @@ async fn debate_room_loop(
                         if event.debate_session_id() != Some(session_id) {
                             continue;
                         }
-                        let payload = match serde_json::to_value(event.as_ref()) {
-                            Ok(v) => v,
-                            Err(e) => {
-                                warn!(
-                                    "serialize debate room event failed for user {}, session {}: {}",
-                                    user_id, session_id, e
-                                );
-                                continue;
-                            }
+                        let Some(replay_event) = event.debate_replay.as_ref() else {
+                            warn!(
+                                "debate room event missing replay metadata for user {}, session {}",
+                                user_id, session_id
+                            );
+                            continue;
                         };
-                        let msg = RoomServerMessage::RoomEvent {
-                            event_name: event.event_name().to_string(),
-                            payload,
+                        if replay_event.session_id != session_id {
+                            continue;
                         };
+                        let msg = room_event_message(replay_event);
                         if !send_room_message(&mut socket, &msg).await {
                             break;
                         }
@@ -263,6 +289,15 @@ async fn debate_room_loop(
     state.cleanup_user_events_if_unused(user_id);
 }
 
+fn room_event_message(event: &DebateReplayEvent) -> RoomServerMessage {
+    RoomServerMessage::RoomEvent {
+        event_seq: event.event_seq,
+        event_at_ms: event.event_at_ms,
+        event_name: event.event_name.clone(),
+        payload: event.payload.clone(),
+    }
+}
+
 async fn send_room_message(socket: &mut WebSocket, msg: &RoomServerMessage) -> bool {
     let payload = match serde_json::to_string(msg) {
         Ok(v) => v,
@@ -285,7 +320,7 @@ mod tests {
         config::{AuthConfig, ServerConfig},
         middlewares::verify_notify_ticket,
         notif::DebateParticipantJoined,
-        AppConfig,
+        AppConfig, AppEvent,
     };
     use anyhow::Result;
     use axum::{middleware::from_fn_with_state, routing::get, Router};
@@ -335,15 +370,17 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(25)).await;
         }
         let tx = state.users.get(&1).expect("user channel should exist");
-        tx.send(Arc::new(AppEvent::DebateParticipantJoined(
-            DebateParticipantJoined {
+        let user_event = state.build_user_event_for_recipient(
+            1,
+            Arc::new(AppEvent::DebateParticipantJoined(DebateParticipantJoined {
                 session_id: 12,
                 user_id: 1,
                 side: "pro".to_string(),
                 pro_count: 2,
                 con_count: 1,
-            },
-        )))?;
+            })),
+        );
+        tx.send(Arc::new(user_event))?;
 
         let maybe_msg = tokio::time::timeout(Duration::from_secs(2), socket.next()).await?;
         let msg = maybe_msg.expect("should receive websocket message")?;
@@ -407,27 +444,35 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(25)).await;
         }
         let tx = state.users.get(&1).expect("user channel should exist");
-        tx.send(Arc::new(AppEvent::DebateParticipantJoined(
-            crate::notif::DebateParticipantJoined {
-                session_id: 13,
-                user_id: 1,
-                side: "pro".to_string(),
-                pro_count: 2,
-                con_count: 1,
-            },
-        )))?;
+        let out_of_room_event = state.build_user_event_for_recipient(
+            1,
+            Arc::new(AppEvent::DebateParticipantJoined(
+                crate::notif::DebateParticipantJoined {
+                    session_id: 13,
+                    user_id: 1,
+                    side: "pro".to_string(),
+                    pro_count: 2,
+                    con_count: 1,
+                },
+            )),
+        );
+        tx.send(Arc::new(out_of_room_event))?;
         let no_msg = tokio::time::timeout(Duration::from_millis(200), socket.next()).await;
         assert!(no_msg.is_err(), "session 13 event should be filtered out");
 
-        tx.send(Arc::new(AppEvent::DebateParticipantJoined(
-            crate::notif::DebateParticipantJoined {
-                session_id: 12,
-                user_id: 1,
-                side: "con".to_string(),
-                pro_count: 2,
-                con_count: 2,
-            },
-        )))?;
+        let in_room_event = state.build_user_event_for_recipient(
+            1,
+            Arc::new(AppEvent::DebateParticipantJoined(
+                crate::notif::DebateParticipantJoined {
+                    session_id: 12,
+                    user_id: 1,
+                    side: "con".to_string(),
+                    pro_count: 2,
+                    con_count: 2,
+                },
+            )),
+        );
+        tx.send(Arc::new(in_room_event))?;
 
         let maybe_msg = tokio::time::timeout(Duration::from_secs(2), socket.next()).await?;
         let room_msg = maybe_msg
@@ -442,6 +487,12 @@ mod tests {
             .and_then(|v| v.as_str())
             .expect("room event should carry event name");
         assert_eq!(event_name, "DebateParticipantJoined");
+        let event_seq = room_json
+            .get("eventSeq")
+            .or_else(|| room_json.get("event_seq"))
+            .and_then(|v| v.as_u64())
+            .expect("room event should carry event seq");
+        assert!(event_seq > 0);
         let payload_session_id = room_json["payload"]
             .get("sessionId")
             .or_else(|| room_json["payload"].get("session_id"))
@@ -483,6 +534,67 @@ mod tests {
         let text = msg.into_text()?.to_string();
         let json: serde_json::Value = serde_json::from_str(&text)?;
         assert_eq!(json["type"], "pong");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn debate_room_ws_handler_should_replay_from_last_ack_seq() -> Result<()> {
+        let state = test_state();
+        let ek = EncodingKey::load(include_str!("../../chat_core/fixtures/encoding.pem"))?;
+        let user = chat_core::User::new(1, "Tyr Chen", "tchen@acme.org");
+        let notify_ticket = ek.sign_notify_ticket(user, 300)?;
+
+        let _ = state.build_user_event_for_recipient(
+            1,
+            Arc::new(AppEvent::DebateParticipantJoined(DebateParticipantJoined {
+                session_id: 12,
+                user_id: 1,
+                side: "pro".to_string(),
+                pro_count: 2,
+                con_count: 1,
+            })),
+        );
+        let _ = state.build_user_event_for_recipient(
+            1,
+            Arc::new(AppEvent::DebateParticipantJoined(DebateParticipantJoined {
+                session_id: 12,
+                user_id: 2,
+                side: "con".to_string(),
+                pro_count: 2,
+                con_count: 2,
+            })),
+        );
+
+        let app = Router::new()
+            .route("/ws/debate/:session_id", get(debate_room_ws_handler))
+            .layer(from_fn_with_state(state.clone(), verify_notify_ticket))
+            .with_state(state);
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        let addr = listener.local_addr()?;
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let (mut socket, _) = connect_async(format!(
+            "ws://{addr}/ws/debate/12?token={notify_ticket}&lastAckSeq=1"
+        ))
+        .await?;
+        let _welcome = tokio::time::timeout(Duration::from_secs(2), socket.next()).await?;
+
+        let replay_msg = tokio::time::timeout(Duration::from_secs(2), socket.next()).await?;
+        let replay_text = replay_msg
+            .expect("should receive replay event")
+            .expect("replay event should be ws ok")
+            .into_text()?
+            .to_string();
+        let replay_json: serde_json::Value = serde_json::from_str(&replay_text)?;
+        assert_eq!(replay_json["type"], "roomEvent");
+        let event_seq = replay_json
+            .get("eventSeq")
+            .or_else(|| replay_json.get("event_seq"))
+            .and_then(|v| v.as_u64())
+            .expect("replay event should carry event seq");
+        assert_eq!(event_seq, 2);
         Ok(())
     }
 
