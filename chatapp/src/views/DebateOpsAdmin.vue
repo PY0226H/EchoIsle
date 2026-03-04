@@ -780,6 +780,73 @@
             当前窗口未发现明显异常。
           </div>
 
+          <div class="rounded border border-slate-200 bg-slate-50 p-3 space-y-2">
+            <div class="flex items-center justify-between gap-2">
+              <div class="text-xs font-semibold text-slate-800">异常码趋势（最近 24h 对比）</div>
+              <button
+                @click="clearObservabilityAnomalyTrendHistory"
+                class="px-2 py-1 rounded border text-xs bg-white hover:bg-gray-100"
+              >
+                清空趋势历史
+              </button>
+            </div>
+            <div class="text-[11px] text-gray-600">
+              latest: {{ formatDateTime(observabilityAnomalyTrendSummary.latestAtMs) }} ·
+              samples(24h/前24h): {{ observabilityAnomalyTrendSummary.recentSamples }}/{{ observabilityAnomalyTrendSummary.previousSamples }}
+            </div>
+            <div v-if="observabilityTrendNoticeText" class="text-xs text-emerald-700">
+              {{ observabilityTrendNoticeText }}
+            </div>
+            <div class="flex flex-wrap gap-1">
+              <span
+                v-for="row in observabilityAnomalyCodeStats.rows"
+                :key="`current-code-${row.code}`"
+                class="px-2 py-1 rounded bg-white border text-[11px] text-gray-700"
+              >
+                {{ row.code }}: {{ row.count }}
+              </span>
+              <span
+                v-if="observabilityAnomalyCodeStats.rows.length === 0"
+                class="px-2 py-1 rounded bg-white border text-[11px] text-gray-500"
+              >
+                当前窗口无异常码
+              </span>
+            </div>
+            <div class="overflow-x-auto">
+              <table class="min-w-full text-xs">
+                <thead>
+                  <tr class="text-left text-gray-500 border-b">
+                    <th class="py-2 pr-3">Code</th>
+                    <th class="py-2 pr-3 text-right">最近24h均值</th>
+                    <th class="py-2 pr-3 text-right">前24h均值</th>
+                    <th class="py-2 pr-3 text-right">Delta</th>
+                    <th class="py-2 pr-3">趋势</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr
+                    v-for="row in observabilityAnomalyTrendSummary.rows"
+                    :key="`trend-${row.code}`"
+                    class="border-b last:border-b-0"
+                  >
+                    <td class="py-2 pr-3 text-gray-900">{{ row.code }}</td>
+                    <td class="py-2 pr-3 text-right text-gray-900">{{ formatDecimal(row.recentAvg) }}</td>
+                    <td class="py-2 pr-3 text-right text-gray-900">{{ formatDecimal(row.previousAvg) }}</td>
+                    <td class="py-2 pr-3 text-right" :class="observabilityTrendClass(row)">
+                      {{ row.delta > 0 ? '+' : '' }}{{ formatDecimal(row.delta) }}
+                    </td>
+                    <td class="py-2 pr-3" :class="observabilityTrendClass(row)">
+                      {{ observabilityTrendText(row) }}
+                    </td>
+                  </tr>
+                  <tr v-if="observabilityAnomalyTrendSummary.rows.length === 0">
+                    <td colspan="5" class="py-4 text-center text-gray-500">暂无趋势数据（请刷新观测后生成快照）</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+
           <div class="overflow-x-auto">
             <table class="min-w-full text-xs">
               <thead>
@@ -849,13 +916,17 @@ import {
 } from '../debate-ops-utils';
 import { normalizeJudgeRefreshSummaryQuery } from '../judge-refresh-summary-utils';
 import {
+  appendObservabilityAnomalyTrendSnapshot,
+  buildObservabilityAnomalyCodeStats,
   buildObservabilityAnomalyStateKey,
   DEFAULT_OBSERVABILITY_THRESHOLDS,
   buildJudgeObservabilityAnomalies,
   normalizeObservabilitySessionId,
   normalizeObservabilityAnomalyStateMap,
+  normalizeObservabilityAnomalyTrendHistory,
   normalizeObservabilityThresholds,
   projectObservabilityAnomalies,
+  summarizeObservabilityAnomalyTrend,
 } from '../judge-observability-utils';
 import {
   emptyOpsRbacMe,
@@ -909,6 +980,7 @@ function parseOptionalBoolean(value) {
 
 const OBSERVABILITY_THRESHOLDS_STORAGE_KEY = 'ops_observability_thresholds_v1';
 const OBSERVABILITY_ANOMALY_STATE_STORAGE_KEY = 'ops_observability_anomaly_state_v1';
+const OBSERVABILITY_ANOMALY_TREND_HISTORY_STORAGE_KEY = 'ops_observability_anomaly_trend_history_v1';
 
 export default {
   components: {
@@ -937,6 +1009,7 @@ export default {
       observabilityMetricsErrorText: '',
       observabilityThresholdNoticeText: '',
       observabilityAnomalyNoticeText: '',
+      observabilityTrendNoticeText: '',
       topics: [],
       sessions: [],
       reviewRows: [],
@@ -980,6 +1053,7 @@ export default {
       observabilityThresholds: normalizeObservabilityThresholds(DEFAULT_OBSERVABILITY_THRESHOLDS),
       observabilityThresholdSettingsOpen: false,
       observabilityAnomalyState: {},
+      observabilityAnomalyTrendHistory: [],
       topicForm: {
         title: '',
         description: '',
@@ -1030,6 +1104,12 @@ export default {
     },
     observabilitySuppressedAnomalyCount() {
       return Number(this.observabilityAnomalyProjection.suppressedCount || 0);
+    },
+    observabilityAnomalyCodeStats() {
+      return buildObservabilityAnomalyCodeStats(this.observabilityAnomaliesRaw);
+    },
+    observabilityAnomalyTrendSummary() {
+      return summarizeObservabilityAnomalyTrend(this.observabilityAnomalyTrendHistory);
     },
     observabilityCacheMissRate() {
       const missRate = 100 - Number(this.observabilityMetrics?.cacheHitRate || 0);
@@ -1203,6 +1283,70 @@ export default {
       this.observabilityAnomalyState = nextState;
       this.persistObservabilityAnomalyState();
       this.observabilityAnomalyNoticeText = '已清除全部抑制窗口';
+    },
+    loadObservabilityAnomalyTrendHistory() {
+      const raw = localStorage.getItem(OBSERVABILITY_ANOMALY_TREND_HISTORY_STORAGE_KEY);
+      if (!raw) {
+        this.observabilityAnomalyTrendHistory = [];
+        return;
+      }
+      try {
+        const parsed = JSON.parse(raw);
+        this.observabilityAnomalyTrendHistory = normalizeObservabilityAnomalyTrendHistory(parsed);
+      } catch (_error) {
+        this.observabilityAnomalyTrendHistory = [];
+      }
+    },
+    persistObservabilityAnomalyTrendHistory() {
+      const normalized = normalizeObservabilityAnomalyTrendHistory(this.observabilityAnomalyTrendHistory);
+      this.observabilityAnomalyTrendHistory = normalized;
+      if (normalized.length === 0) {
+        localStorage.removeItem(OBSERVABILITY_ANOMALY_TREND_HISTORY_STORAGE_KEY);
+        return;
+      }
+      localStorage.setItem(
+        OBSERVABILITY_ANOMALY_TREND_HISTORY_STORAGE_KEY,
+        JSON.stringify(normalized),
+      );
+    },
+    captureObservabilityTrendSnapshot() {
+      const now = Date.now();
+      this.observabilityAnomalyTrendHistory = appendObservabilityAnomalyTrendSnapshot(
+        this.observabilityAnomalyTrendHistory,
+        this.observabilityAnomaliesRaw,
+        now,
+      );
+      this.persistObservabilityAnomalyTrendHistory();
+      this.observabilityTrendNoticeText = '';
+    },
+    clearObservabilityAnomalyTrendHistory() {
+      this.observabilityAnomalyTrendHistory = [];
+      localStorage.removeItem(OBSERVABILITY_ANOMALY_TREND_HISTORY_STORAGE_KEY);
+      this.observabilityTrendNoticeText = '趋势历史已清空';
+    },
+    observabilityTrendText(row) {
+      if (!row) {
+        return '持平';
+      }
+      if (row.trend === 'up') {
+        return '上升';
+      }
+      if (row.trend === 'down') {
+        return '下降';
+      }
+      return '持平';
+    },
+    observabilityTrendClass(row) {
+      if (!row) {
+        return 'text-gray-700';
+      }
+      if (row.trend === 'up') {
+        return 'text-rose-700';
+      }
+      if (row.trend === 'down') {
+        return 'text-emerald-700';
+      }
+      return 'text-gray-700';
     },
     anomalyActionLabel(anomaly) {
       if (!anomaly) {
@@ -1483,6 +1627,7 @@ export default {
         this.observabilityRows = Array.isArray(response?.rows) ? response.rows : [];
         this.observabilityUpdatedAt = Date.now();
         await this.refreshJudgeObservabilityMetrics({ silent, suppressOnError: silent });
+        this.captureObservabilityTrendSnapshot();
       } catch (error) {
         if (!silent) {
           this.observabilityErrorText = this.resolveErrorText(error, '加载裁判观测汇总失败');
@@ -1812,6 +1957,7 @@ export default {
   async mounted() {
     this.loadObservabilityThresholds();
     this.loadObservabilityAnomalyState();
+    this.loadObservabilityAnomalyTrendHistory();
     await this.refreshData();
   },
 };

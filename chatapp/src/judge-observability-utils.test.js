@@ -1,13 +1,17 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import {
+  appendObservabilityAnomalyTrendSnapshot,
+  buildObservabilityAnomalyCodeStats,
   buildObservabilityAnomalyStateKey,
   DEFAULT_OBSERVABILITY_THRESHOLDS,
   buildJudgeObservabilityAnomalies,
   normalizeObservabilitySessionId,
   normalizeObservabilityAnomalyStateMap,
+  normalizeObservabilityAnomalyTrendHistory,
   normalizeObservabilityThresholds,
   projectObservabilityAnomalies,
+  summarizeObservabilityAnomalyTrend,
 } from './judge-observability-utils.js';
 
 test('normalizeObservabilitySessionId should normalize valid id', () => {
@@ -150,4 +154,78 @@ test('projectObservabilityAnomalies should filter suppressed anomalies', () => {
   assert.equal(ret.visible.length, 1);
   assert.equal(ret.visible[0].code, 'low_success_rate');
   assert.equal(ret.visible[0].acknowledgedAtMs, now - 5_000);
+});
+
+test('buildObservabilityAnomalyCodeStats should count anomaly codes', () => {
+  const ret = buildObservabilityAnomalyCodeStats([
+    { code: 'a' },
+    { code: 'a' },
+    { code: 'b' },
+    {},
+  ]);
+  assert.equal(ret.total, 4);
+  assert.deepEqual(ret.counts, {
+    a: 2,
+    b: 1,
+    unknown: 1,
+  });
+  assert.deepEqual(ret.rows[0], { code: 'a', count: 2 });
+});
+
+test('normalizeObservabilityAnomalyTrendHistory should keep valid points in window', () => {
+  const now = 100 * 60 * 60 * 1000;
+  const ret = normalizeObservabilityAnomalyTrendHistory([
+    { atMs: now - (49 * 60 * 60 * 1000), counts: { a: 2 } },
+    { atMs: now - (2 * 60 * 60 * 1000), counts: { a: 1, b: -2 } },
+    { atMs: now - (1 * 60 * 60 * 1000), counts: { b: 3 } },
+    { atMs: now + 1, counts: { c: 1 } },
+  ], now);
+  assert.equal(ret.length, 2);
+  assert.deepEqual(ret[0], {
+    atMs: now - (2 * 60 * 60 * 1000),
+    counts: { a: 1 },
+  });
+  assert.deepEqual(ret[1], {
+    atMs: now - (1 * 60 * 60 * 1000),
+    counts: { b: 3 },
+  });
+});
+
+test('appendObservabilityAnomalyTrendSnapshot should append one normalized snapshot', () => {
+  const now = 8_000_000;
+  const ret = appendObservabilityAnomalyTrendSnapshot([
+    { atMs: now - 1000, counts: { old: 1 } },
+  ], [
+    { code: 'low_success_rate' },
+    { code: 'low_success_rate' },
+    { code: 'db_errors' },
+  ], now);
+  assert.equal(ret.length, 2);
+  assert.equal(ret[1].atMs, now);
+  assert.deepEqual(ret[1].counts, {
+    low_success_rate: 2,
+    db_errors: 1,
+  });
+});
+
+test('summarizeObservabilityAnomalyTrend should compare recent and previous windows', () => {
+  const now = 10 * 24 * 60 * 60 * 1000;
+  const oneHour = 60 * 60 * 1000;
+  const history = [
+    { atMs: now - (30 * oneHour), counts: { high_retry: 3 } },
+    { atMs: now - (26 * oneHour), counts: { high_retry: 1, db_errors: 1 } },
+    { atMs: now - (6 * oneHour), counts: { high_retry: 6, db_errors: 2 } },
+    { atMs: now - (2 * oneHour), counts: { high_retry: 2 } },
+  ];
+  const ret = summarizeObservabilityAnomalyTrend(history, now);
+  assert.equal(ret.recentSamples, 2);
+  assert.equal(ret.previousSamples, 2);
+  const highRetry = ret.rows.find((item) => item.code === 'high_retry');
+  assert.equal(highRetry.recentAvg, 4);
+  assert.equal(highRetry.previousAvg, 2);
+  assert.equal(highRetry.trend, 'up');
+  const dbErrors = ret.rows.find((item) => item.code === 'db_errors');
+  assert.equal(dbErrors.recentAvg, 1);
+  assert.equal(dbErrors.previousAvg, 0.5);
+  assert.equal(dbErrors.trend, 'up');
 });

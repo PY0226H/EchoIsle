@@ -291,3 +291,182 @@ export function projectObservabilityAnomalies(anomalies = [], state = {}, nowMs 
     state: normalizedState,
   };
 }
+
+export const OBSERVABILITY_TREND_WINDOW_MS = 48 * 60 * 60 * 1000;
+export const OBSERVABILITY_TREND_MAX_POINTS = 1000;
+
+export function buildObservabilityAnomalyCodeStats(anomalies = []) {
+  const source = Array.isArray(anomalies) ? anomalies : [];
+  const counts = {};
+  source.forEach((anomaly) => {
+    const code = String(anomaly?.code || '').trim() || 'unknown';
+    counts[code] = Number(counts[code] || 0) + 1;
+  });
+  const rows = Object.entries(counts)
+    .map(([code, count]) => ({
+      code,
+      count: Number(count || 0),
+    }))
+    .sort((a, b) => {
+      if (b.count !== a.count) {
+        return b.count - a.count;
+      }
+      return a.code.localeCompare(b.code);
+    });
+  return {
+    total: source.length,
+    counts,
+    rows,
+  };
+}
+
+function normalizeTrendCounts(input = {}) {
+  const source = input && typeof input === 'object' ? input : {};
+  const counts = {};
+  Object.entries(source).forEach(([codeRaw, valueRaw]) => {
+    const code = String(codeRaw || '').trim();
+    if (!code) {
+      return;
+    }
+    const n = Number(valueRaw);
+    if (!Number.isFinite(n)) {
+      return;
+    }
+    const value = Math.max(0, Math.trunc(n));
+    if (value > 0) {
+      counts[code] = value;
+    }
+  });
+  return counts;
+}
+
+export function normalizeObservabilityAnomalyTrendHistory(
+  input = [],
+  nowMs = Date.now(),
+  windowMs = OBSERVABILITY_TREND_WINDOW_MS,
+  maxPoints = OBSERVABILITY_TREND_MAX_POINTS,
+) {
+  const source = Array.isArray(input) ? input : [];
+  const now = normalizeTimestampMs(nowMs) || Date.now();
+  const safeWindowMs = Math.max(1, Math.trunc(Number(windowMs) || OBSERVABILITY_TREND_WINDOW_MS));
+  const safeMaxPoints = Math.max(1, Math.trunc(Number(maxPoints) || OBSERVABILITY_TREND_MAX_POINTS));
+  const lowerBound = now - safeWindowMs;
+  const items = [];
+  source.forEach((entry) => {
+    const row = entry && typeof entry === 'object' ? entry : {};
+    const atMs = normalizeTimestampMs(row.atMs);
+    if (!atMs || atMs < lowerBound || atMs > now) {
+      return;
+    }
+    items.push({
+      atMs,
+      counts: normalizeTrendCounts(row.counts),
+    });
+  });
+  items.sort((a, b) => a.atMs - b.atMs);
+  if (items.length > safeMaxPoints) {
+    return items.slice(items.length - safeMaxPoints);
+  }
+  return items;
+}
+
+function mergeTrendTotals(target = {}, counts = {}) {
+  Object.entries(counts).forEach(([code, value]) => {
+    const n = Number(value || 0);
+    if (n <= 0) {
+      return;
+    }
+    target[code] = Number(target[code] || 0) + n;
+  });
+}
+
+export function appendObservabilityAnomalyTrendSnapshot(
+  history = [],
+  anomalies = [],
+  nowMs = Date.now(),
+) {
+  const atMs = normalizeTimestampMs(nowMs) || Date.now();
+  const normalizedHistory = normalizeObservabilityAnomalyTrendHistory(history, atMs);
+  const stats = buildObservabilityAnomalyCodeStats(anomalies);
+  const next = [
+    ...normalizedHistory,
+    {
+      atMs,
+      counts: stats.counts,
+    },
+  ];
+  return normalizeObservabilityAnomalyTrendHistory(next, atMs);
+}
+
+export function summarizeObservabilityAnomalyTrend(history = [], nowMs = Date.now()) {
+  const now = normalizeTimestampMs(nowMs) || Date.now();
+  const normalizedHistory = normalizeObservabilityAnomalyTrendHistory(history, now);
+  const recentStartMs = now - (24 * 60 * 60 * 1000);
+  const previousStartMs = now - (48 * 60 * 60 * 1000);
+  let recentSamples = 0;
+  let previousSamples = 0;
+  const recentTotals = {};
+  const previousTotals = {};
+
+  normalizedHistory.forEach((entry) => {
+    const atMs = normalizeTimestampMs(entry?.atMs);
+    if (atMs >= recentStartMs && atMs <= now) {
+      recentSamples += 1;
+      mergeTrendTotals(recentTotals, entry?.counts || {});
+      return;
+    }
+    if (atMs >= previousStartMs && atMs < recentStartMs) {
+      previousSamples += 1;
+      mergeTrendTotals(previousTotals, entry?.counts || {});
+    }
+  });
+
+  const codeSet = new Set([
+    ...Object.keys(recentTotals),
+    ...Object.keys(previousTotals),
+  ]);
+  const rows = Array.from(codeSet)
+    .map((code) => {
+      const recentTotal = Number(recentTotals[code] || 0);
+      const previousTotal = Number(previousTotals[code] || 0);
+      const recentAvg = recentSamples > 0 ? recentTotal / recentSamples : 0;
+      const previousAvg = previousSamples > 0 ? previousTotal / previousSamples : 0;
+      const delta = recentAvg - previousAvg;
+      let trend = 'flat';
+      if (delta > 0.001) {
+        trend = 'up';
+      } else if (delta < -0.001) {
+        trend = 'down';
+      }
+      return {
+        code,
+        recentTotal,
+        previousTotal,
+        recentAvg,
+        previousAvg,
+        delta,
+        trend,
+      };
+    })
+    .sort((a, b) => {
+      if (b.recentAvg !== a.recentAvg) {
+        return b.recentAvg - a.recentAvg;
+      }
+      if (Math.abs(b.delta) !== Math.abs(a.delta)) {
+        return Math.abs(b.delta) - Math.abs(a.delta);
+      }
+      return a.code.localeCompare(b.code);
+    });
+
+  const latestAtMs = normalizedHistory.length > 0
+    ? normalizedHistory[normalizedHistory.length - 1].atMs
+    : 0;
+
+  return {
+    latestAtMs,
+    historyCount: normalizedHistory.length,
+    recentSamples,
+    previousSamples,
+    rows,
+  };
+}
