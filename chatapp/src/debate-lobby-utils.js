@@ -4,6 +4,10 @@ const STATUS_SCHEDULED = 'scheduled';
 const STATUS_JUDGING = 'judging';
 const STATUS_CLOSED = 'closed';
 const STATUS_CANCELED = 'canceled';
+const LANE_ALL = 'all';
+const LANE_LIVE = 'live';
+const LANE_UPCOMING = 'upcoming';
+const LANE_ENDED = 'ended';
 
 export function normalizeSessionStatus(status) {
   return String(status || '').trim().toLowerCase();
@@ -43,13 +47,13 @@ export function isSessionJoinOpen(status) {
 export function classifyLobbySessionLane(session) {
   const status = normalizeSessionStatus(session?.status);
   if (isSessionLive(status)) {
-    return 'live';
+    return LANE_LIVE;
   }
   if (status === STATUS_OPEN || status === STATUS_SCHEDULED) {
-    return 'upcoming';
+    return LANE_UPCOMING;
   }
   if (isSessionEnded(status)) {
-    return 'ended';
+    return LANE_ENDED;
   }
   return 'unknown';
 }
@@ -70,6 +74,26 @@ export function splitLobbySessionsByLane(sessions = []) {
     lanes[lane].push(session);
   }
   return lanes;
+}
+
+export function normalizeLobbyLane(lane) {
+  const normalized = String(lane || '').trim().toLowerCase();
+  if (
+    normalized === LANE_LIVE ||
+    normalized === LANE_UPCOMING ||
+    normalized === LANE_ENDED
+  ) {
+    return normalized;
+  }
+  return LANE_ALL;
+}
+
+export function matchesLaneFilter(session, laneFilter) {
+  const lane = normalizeLobbyLane(laneFilter);
+  if (lane === LANE_ALL) {
+    return true;
+  }
+  return classifyLobbySessionLane(session) === lane;
 }
 
 function toTimeMs(value) {
@@ -126,6 +150,7 @@ export function filterDebateSessions(
   {
     selectedTopicId = '',
     statusFilter = 'all',
+    laneFilter = LANE_ALL,
     joinableOnly = false,
     keyword = '',
     topicTitleById = () => '',
@@ -144,6 +169,10 @@ export function filterDebateSessions(
       }
 
       if (!matchesStatusFilter(session, statusFilter)) {
+        return false;
+      }
+
+      if (!matchesLaneFilter(session, laneFilter)) {
         return false;
       }
 

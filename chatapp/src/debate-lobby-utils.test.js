@@ -5,7 +5,9 @@ import {
   filterDebateSessions,
   isSessionEnded,
   isSessionJoinOpen,
+  matchesLaneFilter,
   matchesStatusFilter,
+  normalizeLobbyLane,
   normalizeSessionStatus,
   normalizeSessionTopicId,
   splitLobbySessionsByLane,
@@ -28,6 +30,10 @@ assert.equal(isSessionJoinOpen('running'), false);
 assert.equal(classifyLobbySessionLane({ status: 'running' }), 'live');
 assert.equal(classifyLobbySessionLane({ status: 'open' }), 'upcoming');
 assert.equal(classifyLobbySessionLane({ status: 'closed' }), 'ended');
+assert.equal(normalizeLobbyLane(' LIVE '), 'live');
+assert.equal(normalizeLobbyLane('unknown'), 'all');
+assert.equal(matchesLaneFilter({ status: 'running' }, 'live'), true);
+assert.equal(matchesLaneFilter({ status: 'open' }, 'live'), false);
 
 assert.equal(matchesStatusFilter({ status: 'closed' }, 'ended'), true);
 assert.equal(matchesStatusFilter({ status: 'judging' }, 'ended'), true);
@@ -102,6 +108,15 @@ const filteredJoinableOnly = filterDebateSessions(sessions, {
 assert.deepEqual(
   filteredJoinableOnly.map((item) => item.id),
   [3, 1],
+);
+
+const filteredLane = filterDebateSessions(sessions, {
+  statusFilter: 'all',
+  laneFilter: 'upcoming',
+});
+assert.deepEqual(
+  filteredLane.map((item) => item.id),
+  [1],
 );
 
 const lanes = splitLobbySessionsByLane([

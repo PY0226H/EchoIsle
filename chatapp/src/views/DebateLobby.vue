@@ -21,7 +21,7 @@
           {{ errorText }}
         </div>
 
-        <div class="bg-white border rounded-lg p-4 grid grid-cols-1 md:grid-cols-5 gap-3">
+        <div class="bg-white border rounded-lg p-4 grid grid-cols-1 md:grid-cols-6 gap-3">
           <div>
             <div class="text-xs uppercase text-gray-500 mb-1">Topic</div>
             <select
@@ -50,6 +50,18 @@
             </select>
           </div>
           <div>
+            <div class="text-xs uppercase text-gray-500 mb-1">Lane</div>
+            <select
+              v-model="laneFilter"
+              class="w-full border rounded px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+            >
+              <option value="all">全部分区</option>
+              <option value="live">进行中</option>
+              <option value="upcoming">待开启</option>
+              <option value="ended">已结束</option>
+            </select>
+          </div>
+          <div>
             <div class="text-xs uppercase text-gray-500 mb-1">Keyword</div>
             <input
               v-model.trim="keyword"
@@ -63,6 +75,61 @@
           </label>
           <div class="text-xs text-gray-500 self-end text-right">
             sessions: {{ filteredSessions.length }} / {{ sessions.length }}
+          </div>
+        </div>
+
+        <div v-if="searchActionSessions.length > 0" class="bg-white border rounded-lg p-4 space-y-3">
+          <div class="flex items-center justify-between">
+            <div class="text-sm font-semibold text-gray-900">搜索命中快速操作</div>
+            <div class="text-xs text-gray-500">hits: {{ searchActionSessions.length }}</div>
+          </div>
+          <div class="space-y-2">
+            <div
+              v-for="session in searchActionSessions"
+              :key="`search-hit-${session.id}`"
+              class="border rounded p-3 bg-gray-50 flex flex-wrap items-center justify-between gap-2"
+            >
+              <div>
+                <div class="text-sm font-semibold text-gray-900">
+                  Session {{ session.id }} · {{ topicTitle(sessionTopicId(session)) }}
+                </div>
+                <div class="text-xs text-gray-600 mt-1">
+                  status={{ session.status }} · lane={{ getSessionLane(session) }}
+                </div>
+              </div>
+              <div class="flex flex-wrap gap-2">
+                <button
+                  v-if="getSessionLane(session) === 'live'"
+                  @click="enterRoom(session.id)"
+                  class="px-3 py-2 rounded border border-gray-300 text-gray-800 text-sm bg-white hover:bg-gray-100"
+                >
+                  一键观战
+                </button>
+                <template v-else-if="getSessionLane(session) === 'upcoming'">
+                  <button
+                    @click="joinAndEnter(session, 'pro')"
+                    :disabled="loading || !session.joinable"
+                    class="px-3 py-2 rounded bg-blue-600 text-white text-sm disabled:opacity-50"
+                  >
+                    加入正方
+                  </button>
+                  <button
+                    @click="joinAndEnter(session, 'con')"
+                    :disabled="loading || !session.joinable"
+                    class="px-3 py-2 rounded bg-orange-600 text-white text-sm disabled:opacity-50"
+                  >
+                    加入反方
+                  </button>
+                </template>
+                <button
+                  v-else
+                  @click="enterRoom(session.id)"
+                  class="px-3 py-2 rounded border border-gray-300 text-gray-800 text-sm bg-white hover:bg-gray-100"
+                >
+                  查看房间
+                </button>
+              </div>
+            </div>
           </div>
         </div>
 
@@ -233,10 +300,39 @@
 <script>
 import Sidebar from '../components/Sidebar.vue';
 import {
+  classifyLobbySessionLane,
   filterDebateSessions,
+  normalizeLobbyLane,
   normalizeSessionTopicId,
   splitLobbySessionsByLane,
 } from '../debate-lobby-utils';
+
+function routeQuerySnapshot(query = {}) {
+  return [
+    String(query.topic || ''),
+    String(query.q || ''),
+    String(query.status || ''),
+    String(query.lane || ''),
+    String(query.joinable || ''),
+  ].join('|');
+}
+
+function normalizeStatusFilter(status) {
+  const value = String(status || '').trim().toLowerCase();
+  const allowed = new Set([
+    'all',
+    'joinable',
+    'live',
+    'upcoming',
+    'open',
+    'running',
+    'ended',
+  ]);
+  if (!allowed.has(value)) {
+    return 'all';
+  }
+  return value;
+}
 
 export default {
   components: {
@@ -249,6 +345,21 @@ export default {
         this.applyRouteFilters();
       },
     },
+    selectedTopicId() {
+      this.syncRouteQuery();
+    },
+    statusFilter() {
+      this.syncRouteQuery();
+    },
+    laneFilter() {
+      this.syncRouteQuery();
+    },
+    keyword() {
+      this.syncRouteQuery();
+    },
+    joinableOnly() {
+      this.syncRouteQuery();
+    },
   },
   data() {
     return {
@@ -256,6 +367,7 @@ export default {
       sessions: [],
       selectedTopicId: '',
       statusFilter: 'all',
+      laneFilter: 'all',
       joinableOnly: false,
       keyword: '',
       loading: false,
@@ -267,6 +379,7 @@ export default {
       return filterDebateSessions(this.sessions, {
         selectedTopicId: this.selectedTopicId,
         statusFilter: this.statusFilter,
+        laneFilter: this.laneFilter,
         joinableOnly: this.joinableOnly,
         keyword: this.keyword,
         topicTitleById: (topicId) => this.topicTitle(topicId),
@@ -287,19 +400,53 @@ export default {
     hasAnyVisibleSessions() {
       return this.filteredSessions.length > 0;
     },
+    searchActionSessions() {
+      if (!this.keyword) {
+        return [];
+      }
+      return this.filteredSessions.slice(0, 8);
+    },
   },
   methods: {
     applyRouteFilters() {
       const routeQuery = this.$route?.query || {};
-      if (routeQuery.topic != null) {
-        this.selectedTopicId = String(routeQuery.topic || '').trim();
+      this.selectedTopicId = String(routeQuery.topic || '').trim();
+      this.keyword = String(routeQuery.q || '').trim();
+      this.statusFilter = normalizeStatusFilter(routeQuery.status);
+      this.laneFilter = normalizeLobbyLane(routeQuery.lane);
+      const rawJoinable = String(routeQuery.joinable || '').trim().toLowerCase();
+      this.joinableOnly = rawJoinable === '1' || rawJoinable === 'true' || rawJoinable === 'yes';
+    },
+    buildRouteQuery() {
+      const query = {};
+      if (this.selectedTopicId) {
+        query.topic = this.selectedTopicId;
       }
-      if (routeQuery.q != null) {
-        this.keyword = String(routeQuery.q || '').trim();
+      if (this.keyword) {
+        query.q = this.keyword;
       }
-      if (routeQuery.status != null) {
-        this.statusFilter = String(routeQuery.status || '').trim() || this.statusFilter;
+      if (this.statusFilter && this.statusFilter !== 'all') {
+        query.status = normalizeStatusFilter(this.statusFilter);
       }
+      if (this.laneFilter && this.laneFilter !== 'all') {
+        query.lane = this.laneFilter;
+      }
+      if (this.joinableOnly) {
+        query.joinable = '1';
+      }
+      return query;
+    },
+    async syncRouteQuery() {
+      const nextQuery = this.buildRouteQuery();
+      const currentSnapshot = routeQuerySnapshot(this.$route?.query || {});
+      const nextSnapshot = routeQuerySnapshot(nextQuery);
+      if (currentSnapshot === nextSnapshot) {
+        return;
+      }
+      await this.$router.replace({ path: this.$route.path, query: nextQuery });
+    },
+    getSessionLane(session) {
+      return classifyLobbySessionLane(session);
     },
     sessionTopicId(session) {
       return normalizeSessionTopicId(session);
