@@ -19,6 +19,18 @@ function toTimestampMs(value, fallbackMs) {
   return fallbackMs;
 }
 
+function normalizeDecisionSource(value) {
+  const normalized = String(value || '').trim().toLowerCase();
+  if (
+    normalized === 'threshold_reached' ||
+    normalized === 'vote_timeout' ||
+    normalized === 'pending'
+  ) {
+    return normalized;
+  }
+  return '-';
+}
+
 export function buildNotificationCenterItems(
   { latestJudgeReportEvent = null, latestDrawVoteResolvedEvent = null } = {},
   { nowMs = Date.now() } = {},
@@ -44,6 +56,7 @@ export function buildNotificationCenterItems(
   if (drawSessionId) {
     const voteId = toPositiveInt(latestDrawVoteResolvedEvent?.voteId) || drawSessionId;
     const resolution = String(latestDrawVoteResolvedEvent?.resolution || '').trim().toLowerCase() || '-';
+    const decisionSource = normalizeDecisionSource(latestDrawVoteResolvedEvent?.decisionSource);
     const rematchSessionId = toPositiveInt(latestDrawVoteResolvedEvent?.rematchSessionId);
     const targetPath = rematchSessionId ? `/debate/sessions/${rematchSessionId}` : `/debate/sessions/${drawSessionId}`;
 
@@ -51,7 +64,7 @@ export function buildNotificationCenterItems(
       key: `draw:${voteId}`,
       kind: 'draw_vote_resolved',
       title: '平局投票已决议',
-      subtitle: `场次 #${drawSessionId} · resolution=${resolution}`,
+      subtitle: `场次 #${drawSessionId} · resolution=${resolution} · source=${decisionSource}`,
       path: targetPath,
       query: null,
       createdAtMs: toTimestampMs(

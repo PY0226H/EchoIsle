@@ -84,6 +84,7 @@ pub struct DebateDrawVoteResolved {
     pub report_id: i64,
     pub status: String,
     pub resolution: String,
+    pub decision_source: String,
     pub participated_voters: i32,
     pub agree_votes: i32,
     pub disagree_votes: i32,
@@ -174,6 +175,8 @@ struct DebateDrawVoteResolvedPayload {
     report_id: i64,
     status: String,
     resolution: String,
+    #[serde(default)]
+    decision_source: Option<String>,
     participated_voters: i32,
     agree_votes: i32,
     disagree_votes: i32,
@@ -345,6 +348,10 @@ impl Notification {
                     vote_id: payload.vote_id,
                     session_id: payload.session_id,
                     report_id: payload.report_id,
+                    decision_source: normalize_draw_vote_decision_source(
+                        payload.decision_source.as_deref(),
+                        &payload.status,
+                    ),
                     status: payload.status,
                     resolution: payload.resolution,
                     participated_voters: payload.participated_voters,
@@ -427,6 +434,21 @@ fn get_affected_chat_user_ids(old: Option<&Chat>, new: Option<&Chat>) -> HashSet
         (Some(old), None) => old.members.iter().map(|v| *v as u64).collect(),
         (None, Some(new)) => new.members.iter().map(|v| *v as u64).collect(),
         _ => HashSet::new(),
+    }
+}
+
+fn normalize_draw_vote_decision_source(raw: Option<&str>, status: &str) -> String {
+    let normalized = raw.unwrap_or_default().trim().to_ascii_lowercase();
+    if matches!(
+        normalized.as_str(),
+        "threshold_reached" | "vote_timeout" | "pending"
+    ) {
+        return normalized;
+    }
+    match status.trim().to_ascii_lowercase().as_str() {
+        "decided" => "threshold_reached".to_string(),
+        "expired" => "vote_timeout".to_string(),
+        _ => "pending".to_string(),
     }
 }
 
@@ -561,6 +583,7 @@ mod tests {
             "report_id": 31,
             "status": "decided",
             "resolution": "open_rematch",
+            "decision_source": "threshold_reached",
             "participated_voters": 7,
             "agree_votes": 2,
             "disagree_votes": 5,
@@ -578,10 +601,39 @@ mod tests {
                 assert_eq!(v.report_id, 31);
                 assert_eq!(v.status, "decided");
                 assert_eq!(v.resolution, "open_rematch");
+                assert_eq!(v.decision_source, "threshold_reached");
                 assert_eq!(v.agree_votes, 2);
                 assert_eq!(v.disagree_votes, 5);
                 assert_eq!(v.required_voters, 7);
                 assert_eq!(v.rematch_session_id, Some(88));
+            }
+            _ => panic!("expected DebateDrawVoteResolved event"),
+        }
+    }
+
+    #[test]
+    fn notification_load_should_default_decision_source_when_missing() {
+        let payload = r#"{
+            "vote_id": 42,
+            "session_id": 15,
+            "report_id": 31,
+            "status": "expired",
+            "resolution": "open_rematch",
+            "participated_voters": 0,
+            "agree_votes": 0,
+            "disagree_votes": 0,
+            "required_voters": 7,
+            "decided_at": "2026-02-24T10:00:00Z",
+            "rematch_session_id": 89,
+            "user_ids": [7, 8, 9]
+        }"#;
+        let notif = Notification::load("debate_draw_vote_resolved", payload).unwrap();
+        assert_eq!(notif.user_ids, HashSet::from([7_u64, 8_u64, 9_u64]));
+        match notif.event.as_ref() {
+            AppEvent::DebateDrawVoteResolved(v) => {
+                assert_eq!(v.vote_id, 42);
+                assert_eq!(v.status, "expired");
+                assert_eq!(v.decision_source, "vote_timeout");
             }
             _ => panic!("expected DebateDrawVoteResolved event"),
         }

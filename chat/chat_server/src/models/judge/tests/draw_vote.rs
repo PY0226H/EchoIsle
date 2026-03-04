@@ -386,3 +386,83 @@ async fn get_draw_vote_status_should_create_expected_next_round_rematch() -> Res
     assert_eq!(rematch_round.0, 1);
     Ok(())
 }
+
+#[tokio::test]
+async fn get_draw_vote_status_should_not_duplicate_rematch_on_concurrent_expire_finalize(
+) -> Result<()> {
+    let (_tdb, state) = AppState::new_for_test().await?;
+    let session_id = seed_topic_and_session(&state, 1, "closed").await?;
+    join_user_to_session(&state, session_id, 1).await?;
+    join_user_to_session(&state, session_id, 2).await?;
+    let job_id = seed_running_judge_job(&state, session_id).await?;
+
+    state
+        .submit_judge_report(
+            job_id as u64,
+            SubmitJudgeReportInput {
+                winner: "draw".to_string(),
+                pro_score: 73,
+                con_score: 73,
+                logic_pro: 73,
+                logic_con: 73,
+                evidence_pro: 73,
+                evidence_con: 73,
+                rebuttal_pro: 73,
+                rebuttal_con: 73,
+                clarity_pro: 73,
+                clarity_con: 73,
+                pro_summary: "pro".to_string(),
+                con_summary: "con".to_string(),
+                rationale: "rationale".to_string(),
+                style_mode: Some("rational".to_string()),
+                needs_draw_vote: true,
+                rejudge_triggered: true,
+                payload: serde_json::json!({}),
+                winner_first: Some("pro".to_string()),
+                winner_second: Some("con".to_string()),
+                stage_summaries: vec![],
+            },
+        )
+        .await?;
+
+    sqlx::query(
+        r#"
+            UPDATE judge_draw_votes
+            SET voting_ends_at = NOW() - INTERVAL '1 second',
+                updated_at = NOW()
+            WHERE session_id = $1
+            "#,
+    )
+    .bind(session_id)
+    .execute(&state.pool)
+    .await?;
+
+    let user1 = state.find_user_by_id(1).await?.expect("user1 should exist");
+    let user2 = state.find_user_by_id(2).await?.expect("user2 should exist");
+    let (result1, result2) = tokio::join!(
+        state.get_draw_vote_status(session_id as u64, &user1),
+        state.get_draw_vote_status(session_id as u64, &user2)
+    );
+    let output1 = result1?;
+    let output2 = result2?;
+    let vote1 = output1.vote.expect("vote should exist for user1");
+    let vote2 = output2.vote.expect("vote should exist for user2");
+    assert_eq!(vote1.status, "expired");
+    assert_eq!(vote2.status, "expired");
+    assert_eq!(vote1.decision_source, "vote_timeout");
+    assert_eq!(vote2.decision_source, "vote_timeout");
+    assert_eq!(vote1.rematch_session_id, vote2.rematch_session_id);
+
+    let rematch_count: (i64,) = sqlx::query_as(
+        r#"
+            SELECT COUNT(*)::bigint
+            FROM debate_sessions
+            WHERE parent_session_id = $1 AND rematch_round = 1
+            "#,
+    )
+    .bind(session_id)
+    .fetch_one(&state.pool)
+    .await?;
+    assert_eq!(rematch_count.0, 1);
+    Ok(())
+}

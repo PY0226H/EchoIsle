@@ -372,6 +372,7 @@ async fn debate_mvp_signoff_should_cover_draw_vote_and_rematch_flow() -> Result<
     let vote_detail_before = vote_before.vote.expect("draw vote should exist");
     assert_eq!(vote_detail_before.eligible_voters, 3);
     assert_eq!(vote_detail_before.required_voters, 3);
+    assert_eq!(vote_detail_before.decision_source, "pending");
 
     let _: SubmitDrawVoteOutput = owner
         .post(
@@ -396,6 +397,7 @@ async fn debate_mvp_signoff_should_cover_draw_vote_and_rematch_flow() -> Result<
         .await?;
     assert_eq!(final_vote_submit.status, "decided");
     assert_eq!(final_vote_submit.vote.resolution, "open_rematch");
+    assert_eq!(final_vote_submit.vote.decision_source, "threshold_reached");
     assert_eq!(final_vote_submit.vote.agree_votes, 1);
     assert_eq!(final_vote_submit.vote.disagree_votes, 2);
     let rematch_session_id = final_vote_submit
@@ -412,6 +414,7 @@ async fn debate_mvp_signoff_should_cover_draw_vote_and_rematch_flow() -> Result<
     assert_eq!(vote_after.status, "decided");
     let vote_detail_after = vote_after.vote.expect("draw vote should still exist");
     assert_eq!(vote_detail_after.resolution, "open_rematch");
+    assert_eq!(vote_detail_after.decision_source, "threshold_reached");
     assert_eq!(
         vote_detail_after.rematch_session_id,
         Some(rematch_session_id)
@@ -589,6 +592,7 @@ async fn debate_mvp_signoff_should_cover_accept_draw_without_rematch() -> Result
     assert_eq!(vote_before.status, "open");
     let vote_detail_before = vote_before.vote.expect("draw vote should exist");
     assert_eq!(vote_detail_before.required_voters, 3);
+    assert_eq!(vote_detail_before.decision_source, "pending");
 
     let _: SubmitDrawVoteOutput = owner
         .post(
@@ -613,6 +617,7 @@ async fn debate_mvp_signoff_should_cover_accept_draw_without_rematch() -> Result
         .await?;
     assert_eq!(final_vote_submit.status, "decided");
     assert_eq!(final_vote_submit.vote.resolution, "accept_draw");
+    assert_eq!(final_vote_submit.vote.decision_source, "threshold_reached");
     assert_eq!(final_vote_submit.vote.agree_votes, 2);
     assert_eq!(final_vote_submit.vote.disagree_votes, 1);
     assert_eq!(final_vote_submit.vote.rematch_session_id, None);
@@ -626,6 +631,7 @@ async fn debate_mvp_signoff_should_cover_accept_draw_without_rematch() -> Result
     assert_eq!(vote_after.status, "decided");
     let vote_detail_after = vote_after.vote.expect("draw vote should still exist");
     assert_eq!(vote_detail_after.resolution, "accept_draw");
+    assert_eq!(vote_detail_after.decision_source, "threshold_reached");
     assert_eq!(vote_detail_after.rematch_session_id, None);
 
     let sessions_after: Vec<DebateSessionSummary> = owner

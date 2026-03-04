@@ -18,6 +18,7 @@ test('buildNotificationCenterItems should include judge and draw events sorted b
       sessionId: 17,
       voteId: 89,
       resolution: 'rematch_started',
+      decisionSource: 'vote_timeout',
       rematchSessionId: 23,
       decidedAt: '2024-01-01T00:00:00.000Z',
     },
@@ -31,6 +32,7 @@ test('buildNotificationCenterItems should include judge and draw events sorted b
   assert.equal(judge.path, '/judge-report');
   assert.deepEqual(judge.query, { sessionId: '17' });
   assert.equal(draw.path, '/debate/sessions/23');
+  assert.equal(draw.subtitle, '场次 #17 · resolution=rematch_started · source=vote_timeout');
   assert.ok(items[0].createdAtMs >= items[1].createdAtMs);
 });
 
@@ -40,6 +42,7 @@ test('buildNotificationCenterItems should ignore invalid payload and use fallbac
     latestDrawVoteResolvedEvent: {
       sessionId: 9,
       resolution: 'draw_confirmed',
+      decisionSource: 'unexpected',
       rematchSessionId: null,
     },
   }, { nowMs: 99 });
@@ -47,6 +50,7 @@ test('buildNotificationCenterItems should ignore invalid payload and use fallbac
   assert.equal(items.length, 1);
   assert.equal(items[0].key, 'draw:9');
   assert.equal(items[0].path, '/debate/sessions/9');
+  assert.equal(items[0].subtitle, '场次 #9 · resolution=draw_confirmed · source=-');
   assert.equal(items[0].createdAtMs, 99);
 });
 
