@@ -2,13 +2,16 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import {
   appendObservabilityAnomalyTrendSnapshot,
+  buildObservabilitySliSnapshot,
   buildObservabilityAnomalyCodeStats,
   buildObservabilityAnomalyStateKey,
+  DEFAULT_OBSERVABILITY_SLO_TARGETS,
   DEFAULT_OBSERVABILITY_THRESHOLDS,
   buildJudgeObservabilityAnomalies,
   normalizeObservabilitySessionId,
   normalizeObservabilityAnomalyStateMap,
   normalizeObservabilityAnomalyTrendHistory,
+  normalizeObservabilitySloTargets,
   normalizeObservabilityThresholds,
   projectObservabilityAnomalies,
   summarizeObservabilityAnomalyTrend,
@@ -228,4 +231,80 @@ test('summarizeObservabilityAnomalyTrend should compare recent and previous wind
   assert.equal(dbErrors.recentAvg, 1);
   assert.equal(dbErrors.previousAvg, 0.5);
   assert.equal(dbErrors.trend, 'up');
+});
+
+test('normalizeObservabilitySloTargets should fallback and clamp', () => {
+  const ret = normalizeObservabilitySloTargets({
+    refreshSuccessRateMin: 0,
+    cacheHitRateMin: 101,
+    dbErrorRateMax: -1,
+    avgDbLatencyMaxMs: 0,
+  });
+  assert.deepEqual(ret, {
+    refreshSuccessRateMin: 1,
+    cacheHitRateMin: 99.99,
+    dbErrorRateMax: 0,
+    avgDbLatencyMaxMs: 1,
+  });
+  assert.equal(
+    normalizeObservabilitySloTargets({}).refreshSuccessRateMin,
+    DEFAULT_OBSERVABILITY_SLO_TARGETS.refreshSuccessRateMin,
+  );
+});
+
+test('buildObservabilitySliSnapshot should evaluate indicator statuses', () => {
+  const ret = buildObservabilitySliSnapshot({
+    rows: [
+      {
+        totalRuns: 10,
+        successRate: 90,
+      },
+      {
+        totalRuns: 10,
+        successRate: 70,
+      },
+    ],
+    metrics: {
+      cacheHitRate: 60,
+      dbQueryTotal: 100,
+      dbErrorTotal: 2,
+      avgDbLatencyMs: 1300,
+    },
+  }, {
+    refreshSuccessRateMin: 95,
+    cacheHitRateMin: 70,
+    dbErrorRateMax: 1.5,
+    avgDbLatencyMaxMs: 1000,
+  });
+  const byCode = Object.fromEntries(ret.indicators.map((item) => [item.code, item]));
+  assert.equal(byCode.refresh_success_rate.status, 'warning');
+  assert.equal(byCode.cache_hit_rate.status, 'warning');
+  assert.equal(byCode.db_error_rate.status, 'warning');
+  assert.equal(byCode.avg_db_latency.status, 'warning');
+  assert.equal(ret.dangerCount, 0);
+  assert.equal(ret.warningCount, 4);
+});
+
+test('buildObservabilitySliSnapshot should mark danger when far from target', () => {
+  const ret = buildObservabilitySliSnapshot({
+    rows: [
+      {
+        totalRuns: 10,
+        successRate: 20,
+      },
+    ],
+    metrics: {
+      cacheHitRate: 10,
+      dbQueryTotal: 10,
+      dbErrorTotal: 9,
+      avgDbLatencyMs: 5000,
+    },
+  }, {
+    refreshSuccessRateMin: 90,
+    cacheHitRateMin: 80,
+    dbErrorRateMax: 5,
+    avgDbLatencyMaxMs: 1000,
+  });
+  assert.equal(ret.dangerCount, 4);
+  assert.equal(ret.warningCount, 0);
 });

@@ -706,6 +706,45 @@
             </div>
           </div>
 
+          <div class="rounded border border-slate-200 bg-slate-50 p-3 space-y-2">
+            <div class="text-xs font-semibold text-slate-800">SLI/SLO 健康度</div>
+            <div
+              v-if="observabilitySliSnapshot.dangerCount > 0"
+              class="rounded border border-rose-200 bg-rose-50 text-rose-700 p-2 text-xs"
+            >
+              当前存在 {{ observabilitySliSnapshot.dangerCount }} 项严重偏离 SLO，请优先处理。
+            </div>
+            <div
+              v-else-if="observabilitySliSnapshot.warningCount > 0"
+              class="rounded border border-amber-200 bg-amber-50 text-amber-700 p-2 text-xs"
+            >
+              当前存在 {{ observabilitySliSnapshot.warningCount }} 项预警，建议关注波动趋势。
+            </div>
+            <div
+              v-else
+              class="rounded border border-emerald-200 bg-emerald-50 text-emerald-700 p-2 text-xs"
+            >
+              当前 SLI 指标均满足目标阈值。
+            </div>
+            <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-2 text-xs">
+              <div
+                v-for="item in observabilitySliSnapshot.indicators"
+                :key="`sli-${item.code}`"
+                class="rounded border p-2"
+                :class="observabilitySliStatusClass(item.status)"
+              >
+                <div class="font-semibold">{{ item.label }}</div>
+                <div class="mt-1">
+                  当前: {{ formatDecimal(item.value) }}{{ item.unit }} ·
+                  目标: {{ item.comparator === 'lte' ? '<=' : '>=' }}{{ formatDecimal(item.target) }}{{ item.unit }}
+                </div>
+                <div class="mt-1 text-[11px] opacity-90">
+                  状态: {{ observabilitySliStatusText(item.status) }}
+                </div>
+              </div>
+            </div>
+          </div>
+
           <div
             v-if="observabilitySuppressedAnomalyCount > 0"
             class="rounded border border-indigo-200 bg-indigo-50 text-indigo-700 p-2 text-xs flex items-center justify-between gap-2"
@@ -917,13 +956,16 @@ import {
 import { normalizeJudgeRefreshSummaryQuery } from '../judge-refresh-summary-utils';
 import {
   appendObservabilityAnomalyTrendSnapshot,
+  buildObservabilitySliSnapshot,
   buildObservabilityAnomalyCodeStats,
   buildObservabilityAnomalyStateKey,
+  DEFAULT_OBSERVABILITY_SLO_TARGETS,
   DEFAULT_OBSERVABILITY_THRESHOLDS,
   buildJudgeObservabilityAnomalies,
   normalizeObservabilitySessionId,
   normalizeObservabilityAnomalyStateMap,
   normalizeObservabilityAnomalyTrendHistory,
+  normalizeObservabilitySloTargets,
   normalizeObservabilityThresholds,
   projectObservabilityAnomalies,
   summarizeObservabilityAnomalyTrend,
@@ -1051,6 +1093,7 @@ export default {
         debateSessionId: '',
       },
       observabilityThresholds: normalizeObservabilityThresholds(DEFAULT_OBSERVABILITY_THRESHOLDS),
+      observabilitySloTargets: normalizeObservabilitySloTargets(DEFAULT_OBSERVABILITY_SLO_TARGETS),
       observabilityThresholdSettingsOpen: false,
       observabilityAnomalyState: {},
       observabilityAnomalyTrendHistory: [],
@@ -1111,6 +1154,12 @@ export default {
     observabilityAnomalyTrendSummary() {
       return summarizeObservabilityAnomalyTrend(this.observabilityAnomalyTrendHistory);
     },
+    observabilitySliSnapshot() {
+      return buildObservabilitySliSnapshot({
+        rows: this.observabilityRows,
+        metrics: this.observabilityMetrics,
+      }, this.observabilitySloTargets);
+    },
     observabilityCacheMissRate() {
       const missRate = 100 - Number(this.observabilityMetrics?.cacheHitRate || 0);
       return Math.max(0, missRate);
@@ -1144,6 +1193,24 @@ export default {
         return '-';
       }
       return n.toFixed(2);
+    },
+    observabilitySliStatusClass(status) {
+      if (status === 'healthy') {
+        return 'bg-emerald-50 border-emerald-200 text-emerald-700';
+      }
+      if (status === 'danger') {
+        return 'bg-rose-50 border-rose-200 text-rose-700';
+      }
+      return 'bg-amber-50 border-amber-200 text-amber-700';
+    },
+    observabilitySliStatusText(status) {
+      if (status === 'healthy') {
+        return '达标';
+      }
+      if (status === 'danger') {
+        return '严重偏离';
+      }
+      return '预警';
     },
     observabilityRowKey(row) {
       return `${row?.debateSessionId || ''}:${row?.sourceEventType || ''}`;

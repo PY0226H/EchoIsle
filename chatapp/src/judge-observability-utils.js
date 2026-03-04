@@ -12,6 +12,13 @@ export const DEFAULT_OBSERVABILITY_THRESHOLDS = {
   minRequestForCacheHitCheck: 20,
 };
 
+export const DEFAULT_OBSERVABILITY_SLO_TARGETS = {
+  refreshSuccessRateMin: 95,
+  cacheHitRateMin: 70,
+  dbErrorRateMax: 1,
+  avgDbLatencyMaxMs: 1000,
+};
+
 function clampFloat(value, min, max, fallback) {
   const n = Number(value);
   if (!Number.isFinite(n)) {
@@ -67,6 +74,128 @@ export function normalizeObservabilityThresholds(input = {}) {
       1_000_000,
       DEFAULT_OBSERVABILITY_THRESHOLDS.minRequestForCacheHitCheck,
     ),
+  };
+}
+
+export function normalizeObservabilitySloTargets(input = {}) {
+  return {
+    refreshSuccessRateMin: clampFloat(
+      input.refreshSuccessRateMin,
+      1,
+      99.99,
+      DEFAULT_OBSERVABILITY_SLO_TARGETS.refreshSuccessRateMin,
+    ),
+    cacheHitRateMin: clampFloat(
+      input.cacheHitRateMin,
+      1,
+      99.99,
+      DEFAULT_OBSERVABILITY_SLO_TARGETS.cacheHitRateMin,
+    ),
+    dbErrorRateMax: clampFloat(
+      input.dbErrorRateMax,
+      0,
+      100,
+      DEFAULT_OBSERVABILITY_SLO_TARGETS.dbErrorRateMax,
+    ),
+    avgDbLatencyMaxMs: clampInt(
+      input.avgDbLatencyMaxMs,
+      1,
+      60_000,
+      DEFAULT_OBSERVABILITY_SLO_TARGETS.avgDbLatencyMaxMs,
+    ),
+  };
+}
+
+function resolveIndicatorStatus(value, target, comparator = 'gte') {
+  if (!Number.isFinite(value) || !Number.isFinite(target)) {
+    return 'warning';
+  }
+  if (comparator === 'lte') {
+    if (value <= target) {
+      return 'healthy';
+    }
+    if (value <= target * 1.5) {
+      return 'warning';
+    }
+    return 'danger';
+  }
+  if (value >= target) {
+    return 'healthy';
+  }
+  if (value >= target * 0.8) {
+    return 'warning';
+  }
+  return 'danger';
+}
+
+export function buildObservabilitySliSnapshot(
+  { rows = [], metrics = {} } = {},
+  inputTargets = {},
+) {
+  const targets = normalizeObservabilitySloTargets(inputTargets);
+  const normalizedRows = Array.isArray(rows) ? rows : [];
+
+  let totalRuns = 0;
+  let weightedSuccess = 0;
+  normalizedRows.forEach((row) => {
+    const runs = Math.max(0, toNumber(row?.totalRuns, 0));
+    const successRate = Math.max(0, Math.min(100, toNumber(row?.successRate, 0)));
+    totalRuns += runs;
+    weightedSuccess += runs * successRate;
+  });
+  const refreshSuccessRate = totalRuns > 0 ? (weightedSuccess / totalRuns) : 100;
+  const cacheHitRate = Math.max(0, Math.min(100, toNumber(metrics?.cacheHitRate, 0)));
+  const dbErrorTotal = Math.max(0, toNumber(metrics?.dbErrorTotal, 0));
+  const dbQueryTotal = Math.max(0, toNumber(metrics?.dbQueryTotal, 0));
+  const dbErrorRate = dbQueryTotal > 0 ? ((dbErrorTotal / dbQueryTotal) * 100) : 0;
+  const avgDbLatencyMs = Math.max(0, toNumber(metrics?.avgDbLatencyMs, 0));
+
+  const indicators = [
+    {
+      code: 'refresh_success_rate',
+      label: '刷新成功率',
+      unit: '%',
+      value: refreshSuccessRate,
+      target: targets.refreshSuccessRateMin,
+      comparator: 'gte',
+      status: resolveIndicatorStatus(refreshSuccessRate, targets.refreshSuccessRateMin, 'gte'),
+    },
+    {
+      code: 'cache_hit_rate',
+      label: '缓存命中率',
+      unit: '%',
+      value: cacheHitRate,
+      target: targets.cacheHitRateMin,
+      comparator: 'gte',
+      status: resolveIndicatorStatus(cacheHitRate, targets.cacheHitRateMin, 'gte'),
+    },
+    {
+      code: 'db_error_rate',
+      label: 'DB 错误率',
+      unit: '%',
+      value: dbErrorRate,
+      target: targets.dbErrorRateMax,
+      comparator: 'lte',
+      status: resolveIndicatorStatus(dbErrorRate, targets.dbErrorRateMax, 'lte'),
+    },
+    {
+      code: 'avg_db_latency',
+      label: 'DB 平均延迟',
+      unit: 'ms',
+      value: avgDbLatencyMs,
+      target: targets.avgDbLatencyMaxMs,
+      comparator: 'lte',
+      status: resolveIndicatorStatus(avgDbLatencyMs, targets.avgDbLatencyMaxMs, 'lte'),
+    },
+  ];
+
+  const dangerCount = indicators.filter((item) => item.status === 'danger').length;
+  const warningCount = indicators.filter((item) => item.status === 'warning').length;
+  return {
+    indicators,
+    dangerCount,
+    warningCount,
+    healthyCount: indicators.length - dangerCount - warningCount,
   };
 }
 
