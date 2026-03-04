@@ -1157,6 +1157,40 @@ export default {
     toggleObservabilityThresholdSettings() {
       this.observabilityThresholdSettingsOpen = !this.observabilityThresholdSettingsOpen;
     },
+    applyOpsObservabilityConfigPayload(payload, { persistLocal = true } = {}) {
+      const thresholds = normalizeObservabilityThresholds(payload?.thresholds || DEFAULT_OBSERVABILITY_THRESHOLDS);
+      const anomalyState = normalizeObservabilityAnomalyStateMap(payload?.anomalyState || {});
+      this.observabilityThresholds = thresholds;
+      this.observabilityAnomalyState = anomalyState;
+      if (!persistLocal) {
+        return;
+      }
+      localStorage.setItem(
+        OBSERVABILITY_THRESHOLDS_STORAGE_KEY,
+        JSON.stringify(thresholds),
+      );
+      if (Object.keys(anomalyState).length === 0) {
+        localStorage.removeItem(OBSERVABILITY_ANOMALY_STATE_STORAGE_KEY);
+      } else {
+        localStorage.setItem(
+          OBSERVABILITY_ANOMALY_STATE_STORAGE_KEY,
+          JSON.stringify(anomalyState),
+        );
+      }
+    },
+    async syncOpsObservabilityConfigFromServer() {
+      if (!this.canJudgeReview) {
+        return;
+      }
+      try {
+        const payload = await this.$store.dispatch('getOpsObservabilityConfig');
+        this.applyOpsObservabilityConfigPayload(payload);
+      } catch (error) {
+        this.loadObservabilityThresholds();
+        this.loadObservabilityAnomalyState();
+        this.observabilityThresholdNoticeText = `${this.resolveErrorText(error, '观测配置同步失败')}（当前使用本地配置）`;
+      }
+    },
     loadObservabilityThresholds() {
       const raw = localStorage.getItem(OBSERVABILITY_THRESHOLDS_STORAGE_KEY);
       if (!raw) {
@@ -1182,6 +1216,22 @@ export default {
         JSON.stringify(normalized),
       );
       this.observabilityThresholdNoticeText = '阈值已保存';
+      this.syncOpsObservabilityThresholdsToServer();
+    },
+    async syncOpsObservabilityThresholdsToServer() {
+      if (!this.canJudgeReview) {
+        return;
+      }
+      try {
+        const payload = await this.$store.dispatch(
+          'upsertOpsObservabilityThresholds',
+          this.observabilityThresholds,
+        );
+        this.applyOpsObservabilityConfigPayload(payload);
+        this.observabilityThresholdNoticeText = '阈值已保存（已同步服务端）';
+      } catch (error) {
+        this.observabilityThresholdNoticeText = `${this.resolveErrorText(error, '阈值服务端同步失败')}（当前仅本地生效）`;
+      }
     },
     resetObservabilityThresholds() {
       this.observabilityThresholds = normalizeObservabilityThresholds(
@@ -1189,6 +1239,7 @@ export default {
       );
       localStorage.removeItem(OBSERVABILITY_THRESHOLDS_STORAGE_KEY);
       this.observabilityThresholdNoticeText = '已恢复默认阈值';
+      this.syncOpsObservabilityThresholdsToServer();
     },
     loadObservabilityAnomalyState() {
       const raw = localStorage.getItem(OBSERVABILITY_ANOMALY_STATE_STORAGE_KEY);
@@ -1208,12 +1259,29 @@ export default {
       this.observabilityAnomalyState = normalized;
       if (Object.keys(normalized).length === 0) {
         localStorage.removeItem(OBSERVABILITY_ANOMALY_STATE_STORAGE_KEY);
+        this.syncOpsObservabilityAnomalyStateToServer();
         return;
       }
       localStorage.setItem(
         OBSERVABILITY_ANOMALY_STATE_STORAGE_KEY,
         JSON.stringify(normalized),
       );
+      this.syncOpsObservabilityAnomalyStateToServer();
+    },
+    async syncOpsObservabilityAnomalyStateToServer() {
+      if (!this.canJudgeReview) {
+        return;
+      }
+      try {
+        const payload = await this.$store.dispatch(
+          'upsertOpsObservabilityAnomalyState',
+          { anomalyState: this.observabilityAnomalyState },
+        );
+        this.applyOpsObservabilityConfigPayload(payload);
+        this.observabilityAnomalyNoticeText = '异常状态已同步服务端';
+      } catch (error) {
+        this.observabilityAnomalyNoticeText = `${this.resolveErrorText(error, '异常状态服务端同步失败')}（当前仅本地生效）`;
+      }
     },
     anomalyHasState(anomaly) {
       const key = buildObservabilityAnomalyStateKey(anomaly);
@@ -1776,6 +1844,7 @@ export default {
         if (this.canJudgeReview) {
           this.observabilityErrorText = '';
           this.observabilityMetricsErrorText = '';
+          await this.syncOpsObservabilityConfigFromServer();
           await this.refreshJudgeObservability({ silent: true });
         } else {
           this.observabilityRows = [];

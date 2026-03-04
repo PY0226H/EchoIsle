@@ -2,8 +2,9 @@ use crate::{
     AppError, AppState, CreateDebateMessageInput, GetJudgeReportQuery, JoinDebateSessionInput,
     ListDebateMessages, ListDebatePinnedMessages, ListDebateSessions, ListDebateTopics,
     ListJudgeReviewOpsQuery, OpsCreateDebateSessionInput, OpsCreateDebateTopicInput,
-    OpsUpdateDebateSessionInput, OpsUpdateDebateTopicInput, PinDebateMessageInput,
-    RequestJudgeJobInput, SubmitDrawVoteInput, UpsertOpsRoleInput,
+    OpsObservabilityThresholds, OpsUpdateDebateSessionInput, OpsUpdateDebateTopicInput,
+    PinDebateMessageInput, RequestJudgeJobInput, SubmitDrawVoteInput,
+    UpdateOpsObservabilityAnomalyStateInput, UpsertOpsRoleInput,
 };
 use axum::{
     extract::{Path, Query, State},
@@ -178,6 +179,74 @@ pub(crate) async fn get_ops_rbac_me_handler(
     State(state): State<AppState>,
 ) -> Result<impl IntoResponse, AppError> {
     let ret = state.get_ops_rbac_me(&user).await?;
+    Ok((StatusCode::OK, Json(ret)))
+}
+
+/// Get current ops observability config snapshot.
+#[utoipa::path(
+    get,
+    path = "/api/debate/ops/observability/config",
+    responses(
+        (status = 200, description = "Ops observability config", body = crate::GetOpsObservabilityConfigOutput),
+        (status = 409, description = "Permission conflict", body = ErrorOutput),
+    ),
+    security(
+        ("token" = [])
+    )
+)]
+pub(crate) async fn get_ops_observability_config_handler(
+    Extension(user): Extension<User>,
+    State(state): State<AppState>,
+) -> Result<impl IntoResponse, AppError> {
+    let ret = state.get_ops_observability_config(&user).await?;
+    Ok((StatusCode::OK, Json(ret)))
+}
+
+/// Upsert ops observability thresholds for current workspace.
+#[utoipa::path(
+    put,
+    path = "/api/debate/ops/observability/thresholds",
+    request_body = OpsObservabilityThresholds,
+    responses(
+        (status = 200, description = "Updated ops observability config", body = crate::GetOpsObservabilityConfigOutput),
+        (status = 409, description = "Permission conflict", body = ErrorOutput),
+    ),
+    security(
+        ("token" = [])
+    )
+)]
+pub(crate) async fn upsert_ops_observability_thresholds_handler(
+    Extension(user): Extension<User>,
+    State(state): State<AppState>,
+    Json(input): Json<OpsObservabilityThresholds>,
+) -> Result<impl IntoResponse, AppError> {
+    let ret = state
+        .upsert_ops_observability_thresholds(&user, input)
+        .await?;
+    Ok((StatusCode::OK, Json(ret)))
+}
+
+/// Upsert ops observability anomaly-state map for current workspace.
+#[utoipa::path(
+    put,
+    path = "/api/debate/ops/observability/anomaly-state",
+    request_body = UpdateOpsObservabilityAnomalyStateInput,
+    responses(
+        (status = 200, description = "Updated ops observability config", body = crate::GetOpsObservabilityConfigOutput),
+        (status = 409, description = "Permission conflict", body = ErrorOutput),
+    ),
+    security(
+        ("token" = [])
+    )
+)]
+pub(crate) async fn upsert_ops_observability_anomaly_state_handler(
+    Extension(user): Extension<User>,
+    State(state): State<AppState>,
+    Json(input): Json<UpdateOpsObservabilityAnomalyStateInput>,
+) -> Result<impl IntoResponse, AppError> {
+    let ret = state
+        .upsert_ops_observability_anomaly_state(&user, input)
+        .await?;
     Ok((StatusCode::OK, Json(ret)))
 }
 
@@ -561,6 +630,7 @@ mod tests {
     use anyhow::Result;
     use chrono::{Duration, Utc};
     use http_body_util::BodyExt;
+    use std::collections::HashMap;
     use std::sync::Arc;
 
     async fn seed_topic_and_session(state: &AppState, ws_id: i64, status: &str) -> Result<i64> {
@@ -962,6 +1032,123 @@ mod tests {
             }
             Err(other) => panic!("unexpected error: {}", other),
         }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn get_ops_observability_config_handler_should_return_default_snapshot() -> Result<()> {
+        let (_tdb, state) = AppState::new_for_test().await?;
+        state.update_workspace_owner(1, 1).await?;
+        let owner = state.find_user_by_id(1).await?.expect("owner should exist");
+
+        let response = get_ops_observability_config_handler(Extension(owner), State(state))
+            .await?
+            .into_response();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response.into_body().collect().await?.to_bytes();
+        let ret: serde_json::Value = serde_json::from_slice(&body)?;
+        assert_eq!(ret["thresholds"]["lowSuccessRateThreshold"], 80.0);
+        assert_eq!(ret["anomalyState"].as_object().map(|v| v.len()), Some(0));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn ops_observability_config_handlers_should_require_judge_review_permission() -> Result<()>
+    {
+        let (_tdb, state) = AppState::new_for_test().await?;
+        state.update_workspace_owner(1, 1).await?;
+        let non_owner = state.find_user_by_id(3).await?.expect("user should exist");
+
+        let get_err = match get_ops_observability_config_handler(
+            Extension(non_owner.clone()),
+            State(state.clone()),
+        )
+        .await
+        {
+            Ok(_) => panic!("user without ops role should be rejected"),
+            Err(err) => err,
+        };
+        match get_err {
+            AppError::DebateConflict(msg) => {
+                assert!(msg.starts_with("ops_permission_denied:judge_review:"));
+            }
+            other => panic!("unexpected get error: {}", other),
+        }
+
+        let put_err = match upsert_ops_observability_thresholds_handler(
+            Extension(non_owner),
+            State(state),
+            Json(OpsObservabilityThresholds::default()),
+        )
+        .await
+        {
+            Ok(_) => panic!("user without ops role should be rejected"),
+            Err(err) => err,
+        };
+        match put_err {
+            AppError::DebateConflict(msg) => {
+                assert!(msg.starts_with("ops_permission_denied:judge_review:"));
+            }
+            other => panic!("unexpected put error: {}", other),
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn ops_observability_config_handlers_should_allow_ops_viewer_update() -> Result<()> {
+        let (_tdb, state) = AppState::new_for_test().await?;
+        state.update_workspace_owner(1, 1).await?;
+        let owner = state.find_user_by_id(1).await?.expect("owner should exist");
+        let viewer = state
+            .find_user_by_id(2)
+            .await?
+            .expect("viewer should exist");
+        state
+            .upsert_ops_role_assignment_by_owner(
+                &owner,
+                viewer.id as u64,
+                UpsertOpsRoleInput {
+                    role: "ops_viewer".to_string(),
+                },
+            )
+            .await?;
+
+        let threshold_resp = upsert_ops_observability_thresholds_handler(
+            Extension(viewer.clone()),
+            State(state.clone()),
+            Json(OpsObservabilityThresholds {
+                low_success_rate_threshold: 76.0,
+                high_retry_threshold: 1.2,
+                high_coalesced_threshold: 2.2,
+                high_db_latency_threshold_ms: 1300,
+                low_cache_hit_rate_threshold: 18.0,
+                min_request_for_cache_hit_check: 26,
+            }),
+        )
+        .await?
+        .into_response();
+        assert_eq!(threshold_resp.status(), StatusCode::OK);
+
+        let anomaly_resp = upsert_ops_observability_anomaly_state_handler(
+            Extension(viewer),
+            State(state),
+            Json(UpdateOpsObservabilityAnomalyStateInput {
+                anomaly_state: HashMap::from([(
+                    "high_retry:8".to_string(),
+                    crate::OpsObservabilityAnomalyStateValue {
+                        acknowledged_at_ms: 1000,
+                        suppress_until_ms: Utc::now().timestamp_millis() + 10_000,
+                    },
+                )]),
+            }),
+        )
+        .await?
+        .into_response();
+        assert_eq!(anomaly_resp.status(), StatusCode::OK);
+        let body = anomaly_resp.into_body().collect().await?.to_bytes();
+        let ret: serde_json::Value = serde_json::from_slice(&body)?;
+        assert_eq!(ret["thresholds"]["lowSuccessRateThreshold"], 76.0);
+        assert!(ret["anomalyState"]["high_retry:8"].is_object());
         Ok(())
     }
 }

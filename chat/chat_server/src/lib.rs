@@ -97,6 +97,18 @@ pub async fn get_router(state: AppState) -> Result<Router, AppError> {
         .route("/ops/rbac/me", get(get_ops_rbac_me_handler))
         .route("/ops/rbac/roles", get(list_ops_role_assignments_handler))
         .route(
+            "/ops/observability/config",
+            get(get_ops_observability_config_handler),
+        )
+        .route(
+            "/ops/observability/thresholds",
+            put(upsert_ops_observability_thresholds_handler),
+        )
+        .route(
+            "/ops/observability/anomaly-state",
+            put(upsert_ops_observability_anomaly_state_handler),
+        )
+        .route(
             "/ops/rbac/roles/:user_id",
             put(upsert_ops_role_assignment_handler).delete(revoke_ops_role_assignment_handler),
         )

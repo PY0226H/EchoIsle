@@ -5,6 +5,7 @@ mod file;
 mod judge;
 mod judge_dispatch;
 mod messages;
+mod ops_observability;
 mod payment;
 mod rbac;
 mod user;
@@ -30,6 +31,10 @@ pub use judge::{
 pub(crate) use judge_dispatch::AiJudgeDispatchMetrics;
 pub use judge_dispatch::GetJudgeDispatchMetricsOutput;
 pub use messages::{CreateMessage, ListMessages};
+pub use ops_observability::{
+    GetOpsObservabilityConfigOutput, OpsObservabilityAnomalyStateValue, OpsObservabilityThresholds,
+    UpdateOpsObservabilityAnomalyStateInput,
+};
 pub use payment::{
     GetIapOrderByTransaction, GetIapOrderByTransactionOutput, IapOrderSnapshot, IapProduct,
     ListIapProducts, ListWalletLedger, VerifyIapOrderInput, VerifyIapOrderOutput,

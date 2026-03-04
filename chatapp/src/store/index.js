@@ -460,6 +460,36 @@ export default createStore({
       commit('setOpsRbacMe', payload);
       return payload;
     },
+    async getOpsObservabilityConfig({ state }) {
+      const response = await network(this, 'get', '/debate/ops/observability/config', null, {
+        Authorization: `Bearer ${state.token}`,
+      });
+      return response.data || null;
+    },
+    async upsertOpsObservabilityThresholds({ state }, payload = {}) {
+      const response = await network(
+        this,
+        'put',
+        '/debate/ops/observability/thresholds',
+        payload,
+        {
+          Authorization: `Bearer ${state.token}`,
+        },
+      );
+      return response.data || null;
+    },
+    async upsertOpsObservabilityAnomalyState({ state }, payload = {}) {
+      const response = await network(
+        this,
+        'put',
+        '/debate/ops/observability/anomaly-state',
+        payload,
+        {
+          Authorization: `Bearer ${state.token}`,
+        },
+      );
+      return response.data || null;
+    },
     async upsertOpsRoleAssignment({ state }, { userId, role } = {}) {
       if (!userId) {
         throw new Error('userId is required');
