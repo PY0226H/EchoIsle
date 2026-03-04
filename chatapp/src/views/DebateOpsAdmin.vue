@@ -496,6 +496,185 @@
             </table>
           </div>
         </div>
+
+        <div class="bg-white border rounded-lg p-4 space-y-3">
+          <div class="flex items-start justify-between gap-3">
+            <div>
+              <div class="text-sm font-semibold text-gray-900">裁判观测汇总（Ops Dashboard）</div>
+              <div class="text-xs text-gray-500 mt-1">
+                updated: {{ formatDateTime(observabilityUpdatedAt) }} ·
+                metrics: {{ formatDateTime(observabilityMetricsUpdatedAt) }}
+              </div>
+            </div>
+            <button
+              @click="refreshJudgeObservability"
+              :disabled="observabilityLoading || !canJudgeReview"
+              class="px-3 py-1 rounded border text-xs bg-white hover:bg-gray-100 disabled:opacity-50"
+            >
+              {{ observabilityLoading ? '刷新中...' : '刷新观测汇总' }}
+            </button>
+          </div>
+
+          <div v-if="observabilityErrorText" class="bg-red-50 text-red-700 border border-red-200 rounded p-2 text-xs">
+            {{ observabilityErrorText }}
+          </div>
+          <div
+            v-if="observabilityMetricsErrorText"
+            class="bg-red-50 text-red-700 border border-red-200 rounded p-2 text-xs"
+          >
+            {{ observabilityMetricsErrorText }}
+          </div>
+
+          <div class="grid grid-cols-1 md:grid-cols-4 gap-2">
+            <label class="text-xs text-gray-600">
+              时间窗口（小时）
+              <input
+                v-model.number="observabilityFilter.hours"
+                type="number"
+                min="1"
+                max="168"
+                class="w-full border rounded px-2 py-1 mt-1"
+              />
+            </label>
+            <label class="text-xs text-gray-600">
+              返回上限
+              <input
+                v-model.number="observabilityFilter.limit"
+                type="number"
+                min="1"
+                max="200"
+                class="w-full border rounded px-2 py-1 mt-1"
+              />
+            </label>
+            <label class="text-xs text-gray-600">
+              会话 ID（可选）
+              <input
+                v-model.trim="observabilityFilter.debateSessionId"
+                type="text"
+                placeholder="例如 123"
+                class="w-full border rounded px-2 py-1 mt-1"
+              />
+            </label>
+            <div class="flex items-end gap-2">
+              <button
+                @click="refreshJudgeObservability"
+                :disabled="observabilityLoading || !canJudgeReview"
+                class="px-3 py-2 rounded bg-slate-700 text-white text-xs disabled:opacity-50"
+              >
+                查询
+              </button>
+              <button
+                @click="clearObservabilitySessionFilter"
+                :disabled="observabilityLoading"
+                class="px-3 py-2 rounded border text-xs bg-white hover:bg-gray-100 disabled:opacity-50"
+              >
+                清空会话
+              </button>
+            </div>
+          </div>
+
+          <div class="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-8 gap-2 text-xs">
+            <div class="rounded border bg-gray-50 p-2">
+              <div class="text-gray-500">Requests</div>
+              <div class="font-semibold text-gray-900">{{ observabilityMetrics.requestTotal }}</div>
+            </div>
+            <div class="rounded border bg-gray-50 p-2">
+              <div class="text-gray-500">Cache Hit</div>
+              <div class="font-semibold text-emerald-700">{{ observabilityMetrics.cacheHitTotal }}</div>
+            </div>
+            <div class="rounded border bg-gray-50 p-2">
+              <div class="text-gray-500">Cache Miss</div>
+              <div class="font-semibold text-amber-700">{{ observabilityMetrics.cacheMissTotal }}</div>
+            </div>
+            <div class="rounded border bg-gray-50 p-2">
+              <div class="text-gray-500">Hit Rate</div>
+              <div class="font-semibold text-indigo-700">{{ formatPercent(observabilityMetrics.cacheHitRate) }}</div>
+            </div>
+            <div class="rounded border bg-gray-50 p-2">
+              <div class="text-gray-500">Miss Rate</div>
+              <div class="font-semibold text-orange-700">{{ formatPercent(observabilityCacheMissRate) }}</div>
+            </div>
+            <div class="rounded border bg-gray-50 p-2">
+              <div class="text-gray-500">DB Queries</div>
+              <div class="font-semibold text-gray-900">{{ observabilityMetrics.dbQueryTotal }}</div>
+            </div>
+            <div class="rounded border bg-gray-50 p-2">
+              <div class="text-gray-500">DB Errors</div>
+              <div class="font-semibold text-rose-700">{{ observabilityMetrics.dbErrorTotal }}</div>
+            </div>
+            <div class="rounded border bg-gray-50 p-2">
+              <div class="text-gray-500">Avg DB Latency</div>
+              <div class="font-semibold text-gray-900">{{ formatDecimal(observabilityMetrics.avgDbLatencyMs) }} ms</div>
+            </div>
+          </div>
+
+          <div v-if="observabilityAnomalies.length > 0" class="space-y-2">
+            <div
+              v-for="anomaly in observabilityAnomalies"
+              :key="anomaly.code"
+              class="border rounded p-2 text-xs"
+              :class="observabilityAlertClass(anomaly.level)"
+            >
+              {{ anomaly.text }}
+            </div>
+          </div>
+          <div v-else class="rounded border border-emerald-200 bg-emerald-50 text-emerald-700 p-2 text-xs">
+            当前窗口未发现明显异常。
+          </div>
+
+          <div class="overflow-x-auto">
+            <table class="min-w-full text-xs">
+              <thead>
+                <tr class="text-left text-gray-500 border-b">
+                  <th class="py-2 pr-3">Session</th>
+                  <th class="py-2 pr-3">Source</th>
+                  <th class="py-2 pr-3 text-right">Success</th>
+                  <th class="py-2 pr-3 text-right">Runs</th>
+                  <th class="py-2 pr-3 text-right">Failure</th>
+                  <th class="py-2 pr-3 text-right">Avg Retry</th>
+                  <th class="py-2 pr-3 text-right">Avg Coalesced</th>
+                  <th class="py-2 pr-3">Last Seen</th>
+                  <th class="py-2 pr-3">Action</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr
+                  v-for="row in observabilityRows"
+                  :key="observabilityRowKey(row)"
+                  class="border-b last:border-b-0"
+                >
+                  <td class="py-2 pr-3 text-gray-900">{{ row.debateSessionId || '-' }}</td>
+                  <td class="py-2 pr-3 text-gray-700">{{ row.sourceEventType || '-' }}</td>
+                  <td class="py-2 pr-3 text-right text-gray-900">{{ formatPercent(row.successRate) }}</td>
+                  <td class="py-2 pr-3 text-right text-gray-900">{{ row.totalRuns || 0 }}</td>
+                  <td class="py-2 pr-3 text-right text-gray-900">{{ row.failureRuns || 0 }}</td>
+                  <td class="py-2 pr-3 text-right text-gray-900">{{ formatDecimal(row.avgRetryCount) }}</td>
+                  <td class="py-2 pr-3 text-right text-gray-900">{{ formatDecimal(row.avgCoalescedEvents) }}</td>
+                  <td class="py-2 pr-3 text-gray-700">{{ formatDateTime(row.lastSeenAtMs) }}</td>
+                  <td class="py-2 pr-3">
+                    <div class="flex flex-wrap gap-1">
+                      <button
+                        @click="focusObservabilitySession(row.debateSessionId)"
+                        class="px-2 py-1 rounded border border-gray-300 bg-white hover:bg-gray-100"
+                      >
+                        按会话过滤
+                      </button>
+                      <button
+                        @click="openSessionJudgeReport(row.debateSessionId)"
+                        class="px-2 py-1 rounded border border-gray-300 bg-white hover:bg-gray-100"
+                      >
+                        查看判决
+                      </button>
+                    </div>
+                  </td>
+                </tr>
+                <tr v-if="observabilityRows.length === 0">
+                  <td colspan="9" class="py-4 text-center text-gray-500">当前窗口暂无汇总数据</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
       </div>
     </div>
   </div>
@@ -510,6 +689,11 @@ import {
   getOpsSessionWindowState,
   nextQuickStatusActions as resolveNextQuickStatusActions,
 } from '../debate-ops-utils';
+import { normalizeJudgeRefreshSummaryQuery } from '../judge-refresh-summary-utils';
+import {
+  buildJudgeObservabilityAnomalies,
+  normalizeObservabilitySessionId,
+} from '../judge-observability-utils';
 import {
   emptyOpsRbacMe,
   normalizeOpsRbacMe,
@@ -572,6 +756,8 @@ export default {
       loading: false,
       reviewLoading: false,
       roleLoading: false,
+      observabilityLoading: false,
+      observabilityMetricsLoading: false,
       createTopicLoading: false,
       createSessionLoading: false,
       updateTopicLoading: false,
@@ -581,13 +767,28 @@ export default {
       errorText: '',
       reviewErrorText: '',
       roleErrorText: '',
+      observabilityErrorText: '',
+      observabilityMetricsErrorText: '',
       topics: [],
       sessions: [],
       reviewRows: [],
       roleAssignments: [],
+      observabilityRows: [],
       reviewMeta: {
         scannedCount: 0,
         returnedCount: 0,
+      },
+      observabilityUpdatedAt: null,
+      observabilityMetricsUpdatedAt: null,
+      observabilityMetrics: {
+        requestTotal: 0,
+        cacheHitTotal: 0,
+        cacheMissTotal: 0,
+        cacheHitRate: 0,
+        dbQueryTotal: 0,
+        dbErrorTotal: 0,
+        avgDbLatencyMs: 0,
+        lastDbLatencyMs: 0,
       },
       opsRbacMe: emptyOpsRbacMe(),
       roleForm: {
@@ -602,6 +803,11 @@ export default {
         hasVerdictEvidence: '',
         anomalyOnly: true,
         limit: 50,
+      },
+      observabilityFilter: {
+        hours: 24,
+        limit: 20,
+        debateSessionId: '',
       },
       topicForm: {
         title: '',
@@ -636,6 +842,16 @@ export default {
     canRoleManage() {
       return !!this.opsRbacMe?.permissions?.roleManage;
     },
+    observabilityAnomalies() {
+      return buildJudgeObservabilityAnomalies({
+        rows: this.observabilityRows,
+        metrics: this.observabilityMetrics,
+      });
+    },
+    observabilityCacheMissRate() {
+      const missRate = 100 - Number(this.observabilityMetrics?.cacheHitRate || 0);
+      return Math.max(0, missRate);
+    },
   },
   methods: {
     resolveErrorText(error, fallback) {
@@ -651,6 +867,29 @@ export default {
       }
       const date = new Date(value);
       return Number.isNaN(date.getTime()) ? '-' : date.toLocaleString();
+    },
+    formatPercent(value) {
+      const n = Number(value);
+      if (!Number.isFinite(n)) {
+        return '-';
+      }
+      return `${n.toFixed(2)}%`;
+    },
+    formatDecimal(value) {
+      const n = Number(value);
+      if (!Number.isFinite(n)) {
+        return '-';
+      }
+      return n.toFixed(2);
+    },
+    observabilityRowKey(row) {
+      return `${row?.debateSessionId || ''}:${row?.sourceEventType || ''}`;
+    },
+    observabilityAlertClass(level) {
+      if (level === 'danger') {
+        return 'bg-red-50 border-red-200 text-red-700';
+      }
+      return 'bg-amber-50 border-amber-200 text-amber-800';
     },
     topicTitle(topicId) {
       const topic = this.topics.find((item) => Number(item.id) === Number(topicId));
@@ -819,6 +1058,90 @@ export default {
         this.rejudgeReviewSessionId = 0;
       }
     },
+    buildObservabilityPayload() {
+      return normalizeJudgeRefreshSummaryQuery({
+        hours: this.observabilityFilter.hours,
+        limit: this.observabilityFilter.limit,
+        debateSessionId: this.observabilityFilter.debateSessionId,
+      });
+    },
+    async refreshJudgeObservabilityMetrics({ silent = false, suppressOnError = false } = {}) {
+      if (!this.canJudgeReview) {
+        this.observabilityMetrics = {
+          requestTotal: 0,
+          cacheHitTotal: 0,
+          cacheMissTotal: 0,
+          cacheHitRate: 0,
+          dbQueryTotal: 0,
+          dbErrorTotal: 0,
+          avgDbLatencyMs: 0,
+          lastDbLatencyMs: 0,
+        };
+        this.observabilityMetricsUpdatedAt = null;
+        this.observabilityMetricsErrorText = '当前账号没有裁判观测权限';
+        return;
+      }
+      if (!silent) {
+        this.observabilityMetricsLoading = true;
+        this.observabilityMetricsErrorText = '';
+      }
+      try {
+        const payload = await this.$store.dispatch('fetchJudgeRefreshSummaryMetrics');
+        this.observabilityMetrics = {
+          ...this.observabilityMetrics,
+          ...(payload || {}),
+        };
+        this.observabilityMetricsUpdatedAt = Date.now();
+      } catch (error) {
+        if (!silent && !suppressOnError) {
+          this.observabilityMetricsErrorText = this.resolveErrorText(error, '加载观测指标失败');
+        }
+      } finally {
+        if (!silent) {
+          this.observabilityMetricsLoading = false;
+        }
+      }
+    },
+    async refreshJudgeObservability({ silent = false } = {}) {
+      if (!this.canJudgeReview) {
+        this.observabilityRows = [];
+        this.observabilityUpdatedAt = null;
+        this.observabilityErrorText = '当前账号没有裁判观测权限';
+        return;
+      }
+      if (!silent) {
+        this.observabilityLoading = true;
+        this.observabilityErrorText = '';
+      }
+      try {
+        const payload = this.buildObservabilityPayload();
+        const response = await this.$store.dispatch('fetchJudgeRefreshSummary', payload);
+        this.observabilityFilter.hours = Number(response?.windowHours || payload.hours);
+        this.observabilityFilter.limit = Number(response?.limit || payload.limit);
+        this.observabilityRows = Array.isArray(response?.rows) ? response.rows : [];
+        this.observabilityUpdatedAt = Date.now();
+        await this.refreshJudgeObservabilityMetrics({ silent, suppressOnError: silent });
+      } catch (error) {
+        if (!silent) {
+          this.observabilityErrorText = this.resolveErrorText(error, '加载裁判观测汇总失败');
+        }
+      } finally {
+        if (!silent) {
+          this.observabilityLoading = false;
+        }
+      }
+    },
+    async focusObservabilitySession(sessionIdRaw) {
+      const sessionId = normalizeObservabilitySessionId(sessionIdRaw);
+      if (!sessionId) {
+        return;
+      }
+      this.observabilityFilter.debateSessionId = String(sessionId);
+      await this.refreshJudgeObservability();
+    },
+    clearObservabilitySessionFilter() {
+      this.observabilityFilter.debateSessionId = '';
+    },
     buildSessionDraftForTiming(form) {
       return {
         status: String(form?.status || 'scheduled'),
@@ -943,6 +1266,16 @@ export default {
         };
         this.reviewErrorText = this.canJudgeReview ? '' : '当前账号没有判决审阅权限';
         this.roleErrorText = this.canRoleManage ? '' : '仅 workspace owner 可管理 Ops 角色';
+        if (this.canJudgeReview) {
+          this.observabilityErrorText = '';
+          this.observabilityMetricsErrorText = '';
+          await this.refreshJudgeObservability({ silent: true });
+        } else {
+          this.observabilityRows = [];
+          this.observabilityUpdatedAt = null;
+          this.observabilityErrorText = '当前账号没有裁判观测权限';
+          this.observabilityMetricsErrorText = '当前账号没有裁判观测权限';
+        }
         if (!this.topicEditForm.topicId && this.topics.length > 0) {
           this.topicEditForm.topicId = String(this.topics[0].id);
         }
