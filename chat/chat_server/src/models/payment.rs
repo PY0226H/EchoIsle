@@ -221,6 +221,11 @@ fn extract_apple_status(payload: &Value) -> Option<i64> {
     payload.get("status").and_then(Value::as_i64)
 }
 
+fn is_retryable_apple_status(status_code: i64) -> bool {
+    // Apple verify transient failures should not be persisted as terminal rejected orders.
+    status_code == 21005 || status_code == 21009 || (21100..=21199).contains(&status_code)
+}
+
 fn extract_receipt_records(payload: &Value) -> Vec<ReceiptRecord> {
     let mut out = Vec::new();
     for items in [
@@ -365,6 +370,13 @@ async fn verify_with_apple(
         status_code = extract_apple_status(&payload).ok_or_else(|| {
             AppError::PaymentError("apple production payload missing status".to_string())
         })?;
+    }
+
+    if status_code != 0 && is_retryable_apple_status(status_code) {
+        return Err(AppError::PaymentError(format!(
+            "apple verify transient status {status_code} on {} endpoint",
+            endpoint.label()
+        )));
     }
 
     let records = extract_receipt_records(&payload);

@@ -1,4 +1,4 @@
-use std::{process::Command, sync::Arc, time::SystemTime};
+use std::{path::Path, process::Command, sync::Arc, time::SystemTime};
 
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Manager};
@@ -184,11 +184,64 @@ fn parse_native_bridge_payload(
     })
 }
 
+fn has_simulate_arg(args: &[String]) -> bool {
+    args.iter().any(|arg| {
+        let normalized = arg.trim().to_ascii_lowercase();
+        normalized == "--simulate" || normalized == "-simulate"
+    })
+}
+
+fn validate_native_bridge_policy(
+    iap_config: &IapConfig,
+    runtime_is_production: bool,
+    has_json_override: bool,
+) -> Result<(), String> {
+    if !runtime_is_production {
+        return Ok(());
+    }
+
+    if has_json_override {
+        return Err(
+            "AICOMM_IAP_NATIVE_BRIDGE_RESPONSE_JSON is forbidden in production runtime".to_string(),
+        );
+    }
+
+    if has_simulate_arg(&iap_config.native_bridge.args) {
+        return Err(
+            "iap.native_bridge.args cannot include --simulate in production runtime".to_string(),
+        );
+    }
+
+    let bridge_bin = iap_config.native_bridge.bin.trim();
+    if bridge_bin.is_empty() {
+        return Err(
+            "iap purchase mode=native requires iap.native_bridge.bin to be configured".to_string(),
+        );
+    }
+
+    if !Path::new(bridge_bin).is_absolute() {
+        return Err(
+            "iap.native_bridge.bin must be an absolute path in production runtime".to_string(),
+        );
+    }
+
+    Ok(())
+}
+
 fn run_native_bridge_purchase(
     product_id: &str,
     iap_config: &IapConfig,
+    runtime_is_production: bool,
 ) -> Result<IapPurchasePayload, String> {
-    if let Ok(raw_payload) = std::env::var("AICOMM_IAP_NATIVE_BRIDGE_RESPONSE_JSON") {
+    let json_override = std::env::var("AICOMM_IAP_NATIVE_BRIDGE_RESPONSE_JSON").ok();
+    let has_json_override = json_override
+        .as_deref()
+        .map(str::trim)
+        .map(|v| !v.is_empty())
+        .unwrap_or(false);
+    validate_native_bridge_policy(iap_config, runtime_is_production, has_json_override)?;
+
+    if let Some(raw_payload) = json_override {
         if !raw_payload.trim().is_empty() {
             return parse_native_bridge_payload(&raw_payload, product_id);
         }
@@ -246,7 +299,7 @@ pub(crate) fn iap_purchase_product(
     }
 
     if mode == IapPurchaseMode::Native {
-        return run_native_bridge_purchase(&product_id, &app_config.iap);
+        return run_native_bridge_purchase(&product_id, &app_config.iap, runtime_is_production());
     }
 
     Ok(build_mock_purchase_payload(&product_id))
@@ -371,5 +424,79 @@ mod tests {
             parse_native_bridge_payload(&raw_missing_receipt.to_string(), "com.acme.coins.100")
                 .expect_err("missing receipt should fail");
         assert!(err2.contains("receiptData"));
+    }
+
+    #[test]
+    fn has_simulate_arg_should_match_simulate_flags() {
+        assert!(has_simulate_arg(&["--simulate".to_string()]));
+        assert!(has_simulate_arg(&["-simulate".to_string()]));
+        assert!(!has_simulate_arg(&["--foo".to_string()]));
+        assert!(!has_simulate_arg(&[]));
+    }
+
+    #[test]
+    fn validate_native_bridge_policy_should_allow_non_production_relaxed_mode() {
+        let cfg = IapConfig {
+            purchase_mode: "native".to_string(),
+            native_bridge: crate::config::IapNativeBridgeConfig {
+                bin: "relative/bin".to_string(),
+                args: vec!["--simulate".to_string()],
+            },
+        };
+        validate_native_bridge_policy(&cfg, false, true).expect("non-production should allow");
+    }
+
+    #[test]
+    fn validate_native_bridge_policy_should_block_json_override_in_production() {
+        let cfg = IapConfig {
+            purchase_mode: "native".to_string(),
+            native_bridge: crate::config::IapNativeBridgeConfig {
+                bin: "/tmp/native-bridge".to_string(),
+                args: vec![],
+            },
+        };
+        let err =
+            validate_native_bridge_policy(&cfg, true, true).expect_err("should reject override");
+        assert!(err.contains("AICOMM_IAP_NATIVE_BRIDGE_RESPONSE_JSON"));
+    }
+
+    #[test]
+    fn validate_native_bridge_policy_should_block_simulate_arg_in_production() {
+        let cfg = IapConfig {
+            purchase_mode: "native".to_string(),
+            native_bridge: crate::config::IapNativeBridgeConfig {
+                bin: "/tmp/native-bridge".to_string(),
+                args: vec!["--simulate".to_string()],
+            },
+        };
+        let err =
+            validate_native_bridge_policy(&cfg, true, false).expect_err("should reject simulate");
+        assert!(err.contains("--simulate"));
+    }
+
+    #[test]
+    fn validate_native_bridge_policy_should_require_absolute_path_in_production() {
+        let cfg = IapConfig {
+            purchase_mode: "native".to_string(),
+            native_bridge: crate::config::IapNativeBridgeConfig {
+                bin: "scripts/native-bridge".to_string(),
+                args: vec![],
+            },
+        };
+        let err = validate_native_bridge_policy(&cfg, true, false)
+            .expect_err("should reject relative path");
+        assert!(err.contains("absolute path"));
+    }
+
+    #[test]
+    fn validate_native_bridge_policy_should_allow_absolute_path_in_production() {
+        let cfg = IapConfig {
+            purchase_mode: "native".to_string(),
+            native_bridge: crate::config::IapNativeBridgeConfig {
+                bin: "/usr/local/bin/native-bridge".to_string(),
+                args: vec![],
+            },
+        };
+        validate_native_bridge_policy(&cfg, true, false).expect("absolute path should pass");
     }
 }

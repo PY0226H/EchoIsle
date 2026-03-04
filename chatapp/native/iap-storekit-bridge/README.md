@@ -69,3 +69,9 @@ iap:
     bin: "/Users/panyihang/Documents/aicomm/chatapp/native/iap-storekit-bridge/run.sh"
     args: []
 ```
+
+Production constraints (`chatapp/src-tauri`):
+
+- `AICOMM_IAP_NATIVE_BRIDGE_RESPONSE_JSON` is forbidden in production runtime.
+- `iap.native_bridge.args` cannot include `--simulate` in production runtime.
+- `iap.native_bridge.bin` must be an absolute path in production runtime.

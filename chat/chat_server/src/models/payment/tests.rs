@@ -142,6 +142,16 @@ fn normalize_verify_mode_should_default_to_apple() {
     assert_eq!(normalize_verify_mode("unknown"), "apple");
 }
 
+#[test]
+fn is_retryable_apple_status_should_match_transient_codes() {
+    assert!(is_retryable_apple_status(21005));
+    assert!(is_retryable_apple_status(21009));
+    assert!(is_retryable_apple_status(21100));
+    assert!(is_retryable_apple_status(21199));
+    assert!(!is_retryable_apple_status(0));
+    assert!(!is_retryable_apple_status(21003));
+}
+
 #[tokio::test]
 async fn verify_receipt_should_use_apple_production_and_mark_verified() -> Result<()> {
     let (config, requests, server) = start_apple_verify_stub(vec![json!({
@@ -248,6 +258,34 @@ async fn verify_receipt_should_fallback_to_sandbox_when_prod_returns_21007() -> 
     assert_eq!(requests.len(), 2);
     assert_eq!(requests[0].0, "/prod");
     assert_eq!(requests[1].0, "/sandbox");
+    server.abort();
+    Ok(())
+}
+
+#[tokio::test]
+async fn verify_receipt_should_return_error_for_retryable_apple_status() -> Result<()> {
+    let (config, requests, server) = start_apple_verify_stub(vec![json!({
+        "status": 21005,
+        "environment": "Production"
+    })])
+    .await?;
+
+    let err = verify_receipt(
+        &config,
+        "com.aicomm.coins.60",
+        "tx-apple-retryable-1",
+        None,
+        "receipt_retryable_1",
+    )
+    .await
+    .expect_err("retryable status should return error");
+
+    assert!(matches!(err, AppError::PaymentError(_)));
+    assert!(err.to_string().contains("transient status 21005"));
+
+    let requests = requests.lock().await;
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].0, "/prod");
     server.abort();
     Ok(())
 }
@@ -425,6 +463,67 @@ async fn verify_iap_order_should_reject_cross_user_transaction_replay() -> Resul
         .await
         .expect_err("cross user replay should fail");
     assert!(matches!(err, AppError::PaymentConflict(_)));
+    Ok(())
+}
+
+#[tokio::test]
+async fn verify_iap_order_should_allow_retry_after_transient_apple_status() -> Result<()> {
+    let (payment_config, requests, server) = start_apple_verify_stub(vec![
+        json!({
+            "status": 21005,
+            "environment": "Production"
+        }),
+        json!({
+            "status": 0,
+            "environment": "Production",
+            "latest_receipt_info": [
+                {
+                    "transaction_id": "tx-apple-retry-1",
+                    "product_id": "com.aicomm.coins.60"
+                }
+            ]
+        }),
+    ])
+    .await?;
+
+    let (_tdb, mut state) = AppState::new_for_test().await?;
+    let inner = Arc::get_mut(&mut state.inner).expect("state should be unique");
+    inner.config.payment = payment_config;
+
+    let user = state
+        .find_user_by_id(1)
+        .await?
+        .expect("user id 1 should exist");
+    let input = verify_input("tx-apple-retry-1", "receipt_retryable_then_ok");
+
+    let first_err = state
+        .verify_iap_order(&user, input.clone())
+        .await
+        .expect_err("first call should fail with retryable status");
+    assert!(matches!(first_err, AppError::PaymentError(_)));
+    assert!(first_err.to_string().contains("transient status 21005"));
+
+    let first_query = state
+        .get_iap_order_by_transaction(
+            &user,
+            GetIapOrderByTransaction {
+                transaction_id: "tx-apple-retry-1".to_string(),
+            },
+        )
+        .await?;
+    assert!(!first_query.found);
+
+    let second = state.verify_iap_order(&user, input).await?;
+    assert_eq!(second.status, "verified");
+    assert_eq!(second.verify_mode, "apple");
+    assert!(second.credited);
+    assert_eq!(second.wallet_balance, 60);
+
+    let requests = requests.lock().await;
+    assert_eq!(requests.len(), 2);
+    assert_eq!(requests[0].0, "/prod");
+    assert_eq!(requests[1].0, "/prod");
+    server.abort();
     Ok(())
 }
 
