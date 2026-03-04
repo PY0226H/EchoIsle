@@ -1,4 +1,5 @@
 use super::*;
+use crate::models::OpsPermission;
 use std::collections::HashMap;
 
 fn normalize_ops_review_limit(limit: Option<u32>) -> i64 {
@@ -42,23 +43,6 @@ fn detect_ops_review_abnormal_flags(item: &JudgeReviewOpsItem) -> Vec<String> {
 }
 
 impl AppState {
-    async fn ensure_workspace_owner_for_judge_ops(&self, user: &User) -> Result<(), AppError> {
-        let owner_row: Option<(i64,)> =
-            sqlx::query_as("SELECT owner_id FROM workspaces WHERE id = $1")
-                .bind(user.ws_id)
-                .fetch_optional(&self.pool)
-                .await?;
-        let Some((owner_id,)) = owner_row else {
-            return Err(AppError::NotFound(format!("workspace id {}", user.ws_id)));
-        };
-        if owner_id != user.id {
-            return Err(AppError::DebateConflict(
-                "only workspace owner can manage debate operations".to_string(),
-            ));
-        }
-        Ok(())
-    }
-
     async fn request_judge_job_internal(
         &self,
         session_id: u64,
@@ -256,7 +240,8 @@ impl AppState {
         session_id: u64,
         user: &User,
     ) -> Result<RequestJudgeJobOutput, AppError> {
-        self.ensure_workspace_owner_for_judge_ops(user).await?;
+        self.ensure_ops_permission(user, OpsPermission::JudgeRejudge)
+            .await?;
         self.request_judge_job_internal(
             session_id,
             user,
@@ -275,7 +260,8 @@ impl AppState {
         user: &User,
         query: ListJudgeReviewOpsQuery,
     ) -> Result<ListJudgeReviewOpsOutput, AppError> {
-        self.ensure_workspace_owner_for_judge_ops(user).await?;
+        self.ensure_ops_permission(user, OpsPermission::JudgeReview)
+            .await?;
         if let (Some(from), Some(to)) = (query.from, query.to) {
             if from > to {
                 return Err(AppError::DebateError("from must be <= to".to_string()));

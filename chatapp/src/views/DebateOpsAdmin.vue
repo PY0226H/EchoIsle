@@ -23,6 +23,81 @@
           {{ errorText }}
         </div>
 
+        <div class="bg-white border rounded-lg p-4 space-y-3">
+          <div class="flex items-start justify-between gap-3">
+            <div>
+              <div class="text-sm font-semibold text-gray-900">Ops RBAC 角色管理</div>
+              <div class="text-xs text-gray-500 mt-1">仅 workspace owner 可授予/撤销角色。</div>
+            </div>
+            <button
+              @click="refreshRoleAssignments"
+              :disabled="roleLoading"
+              class="px-3 py-1 rounded border text-xs bg-white hover:bg-gray-100 disabled:opacity-50"
+            >
+              {{ roleLoading ? '刷新中...' : '刷新角色列表' }}
+            </button>
+          </div>
+
+          <div v-if="roleErrorText" class="bg-red-50 text-red-700 border border-red-200 rounded p-2 text-xs">
+            {{ roleErrorText }}
+          </div>
+
+          <div class="grid grid-cols-1 md:grid-cols-3 gap-2">
+            <select v-model="roleForm.userId" class="border rounded px-3 py-2 text-sm">
+              <option value="">选择用户</option>
+              <option v-for="user in workspaceUsers()" :key="user.id" :value="String(user.id)">
+                {{ user.fullname }} (#{{ user.id }}) · {{ user.email }}
+              </option>
+            </select>
+            <select v-model="roleForm.role" class="border rounded px-3 py-2 text-sm">
+              <option value="ops_admin">ops_admin</option>
+              <option value="ops_reviewer">ops_reviewer</option>
+              <option value="ops_viewer">ops_viewer</option>
+            </select>
+            <button
+              @click="upsertRoleAssignment"
+              :disabled="roleLoading || !roleForm.userId"
+              class="px-3 py-2 rounded bg-slate-700 text-white text-sm disabled:opacity-50"
+            >
+              {{ roleLoading ? '处理中...' : '授予/更新角色' }}
+            </button>
+          </div>
+
+          <div class="overflow-x-auto">
+            <table class="min-w-full text-xs">
+              <thead>
+                <tr class="text-left text-gray-500 border-b">
+                  <th class="py-2 pr-3">User</th>
+                  <th class="py-2 pr-3">Role</th>
+                  <th class="py-2 pr-3">GrantedBy</th>
+                  <th class="py-2 pr-3">UpdatedAt</th>
+                  <th class="py-2 pr-3">Action</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr v-for="item in roleAssignments" :key="item.userId" class="border-b last:border-b-0">
+                  <td class="py-2 pr-3 text-gray-900">{{ userLabel(item.userId) }}</td>
+                  <td class="py-2 pr-3 text-gray-700">{{ roleLabel(item.role) }}</td>
+                  <td class="py-2 pr-3 text-gray-700">{{ userLabel(item.grantedBy) }}</td>
+                  <td class="py-2 pr-3 text-gray-700">{{ formatDateTime(item.updatedAt) }}</td>
+                  <td class="py-2 pr-3">
+                    <button
+                      @click="revokeRoleAssignment(item.userId)"
+                      :disabled="roleLoading"
+                      class="px-2 py-1 rounded border border-rose-300 bg-rose-50 text-rose-700 hover:bg-rose-100 disabled:opacity-50"
+                    >
+                      撤销
+                    </button>
+                  </td>
+                </tr>
+                <tr v-if="roleAssignments.length === 0">
+                  <td colspan="5" class="py-3 text-center text-gray-500">暂无已授予角色</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+
         <div class="grid grid-cols-1 lg:grid-cols-2 gap-4">
           <div class="bg-white border rounded-lg p-4 space-y-3">
             <div class="text-sm font-semibold text-gray-900">创建辩题</div>
@@ -468,6 +543,7 @@ export default {
     return {
       loading: false,
       reviewLoading: false,
+      roleLoading: false,
       createTopicLoading: false,
       createSessionLoading: false,
       updateTopicLoading: false,
@@ -476,12 +552,18 @@ export default {
       rejudgeReviewSessionId: 0,
       errorText: '',
       reviewErrorText: '',
+      roleErrorText: '',
       topics: [],
       sessions: [],
       reviewRows: [],
+      roleAssignments: [],
       reviewMeta: {
         scannedCount: 0,
         returnedCount: 0,
+      },
+      roleForm: {
+        userId: '',
+        role: 'ops_reviewer',
       },
       reviewFilter: {
         fromLocal: toLocalInputValue(minus24Hours),
@@ -533,6 +615,82 @@ export default {
         return '';
       }
       return date.toISOString();
+    },
+    workspaceUsers() {
+      const usersMap = this.$store?.state?.users || {};
+      return Object.values(usersMap).sort((a, b) => Number(a.id || 0) - Number(b.id || 0));
+    },
+    roleLabel(role) {
+      const value = String(role || '');
+      if (value === 'ops_admin') {
+        return 'ops_admin（场次管理+审阅+复核）';
+      }
+      if (value === 'ops_reviewer') {
+        return 'ops_reviewer（审阅+复核）';
+      }
+      if (value === 'ops_viewer') {
+        return 'ops_viewer（仅审阅）';
+      }
+      return value || '-';
+    },
+    userLabel(userId) {
+      const id = Number(userId || 0);
+      if (!id) {
+        return '-';
+      }
+      const usersMap = this.$store?.state?.users || {};
+      const user = usersMap[id];
+      if (!user) {
+        return `#${id}`;
+      }
+      return `${user.fullname || 'unknown'} (#${id})`;
+    },
+    async refreshRoleAssignments() {
+      this.roleLoading = true;
+      this.roleErrorText = '';
+      try {
+        const response = await this.$store.dispatch('listOpsRoleAssignments');
+        this.roleAssignments = Array.isArray(response?.items) ? response.items : [];
+      } catch (error) {
+        this.roleErrorText = error?.response?.data?.error || error?.message || '加载角色列表失败';
+      } finally {
+        this.roleLoading = false;
+      }
+    },
+    async upsertRoleAssignment() {
+      const userId = Number(this.roleForm.userId || 0);
+      if (!userId) {
+        return;
+      }
+      this.roleLoading = true;
+      this.roleErrorText = '';
+      try {
+        await this.$store.dispatch('upsertOpsRoleAssignment', {
+          userId,
+          role: this.roleForm.role,
+        });
+        await this.refreshRoleAssignments();
+      } catch (error) {
+        this.roleErrorText = error?.response?.data?.error || error?.message || '授予角色失败';
+      } finally {
+        this.roleLoading = false;
+      }
+    },
+    async revokeRoleAssignment(userIdRaw) {
+      const userId = Number(userIdRaw || 0);
+      if (!userId) {
+        return;
+      }
+      this.roleLoading = true;
+      this.roleErrorText = '';
+      try {
+        await this.$store.dispatch('revokeOpsRoleAssignment', { userId });
+        await this.refreshRoleAssignments();
+      } catch (error) {
+        this.roleErrorText = error?.response?.data?.error || error?.message || '撤销角色失败';
+      } finally {
+        this.roleLoading = false;
+      }
     },
     judgeReviewAbnormalText(flags) {
       const values = Array.isArray(flags) ? flags : [];
@@ -688,19 +846,22 @@ export default {
       this.loading = true;
       this.errorText = '';
       try {
-        const [topics, sessions, reviews] = await Promise.all([
+        const [topics, sessions, reviews, roleAssignments] = await Promise.all([
           this.$store.dispatch('listDebateTopics', { activeOnly: false, limit: 200 }),
           this.$store.dispatch('listDebateSessions', { limit: 200 }),
           this.$store.dispatch('listJudgeReviewsOps', this.buildJudgeReviewPayload()),
+          this.$store.dispatch('listOpsRoleAssignments'),
         ]);
         this.topics = topics || [];
         this.sessions = sessions || [];
         this.reviewRows = Array.isArray(reviews?.items) ? reviews.items : [];
+        this.roleAssignments = Array.isArray(roleAssignments?.items) ? roleAssignments.items : [];
         this.reviewMeta = {
           scannedCount: Number(reviews?.scannedCount || 0),
           returnedCount: Number(reviews?.returnedCount || this.reviewRows.length),
         };
         this.reviewErrorText = '';
+        this.roleErrorText = '';
         if (!this.topicEditForm.topicId && this.topics.length > 0) {
           this.topicEditForm.topicId = String(this.topics[0].id);
         }

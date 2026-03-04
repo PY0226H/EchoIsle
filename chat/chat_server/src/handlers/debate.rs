@@ -3,7 +3,7 @@ use crate::{
     ListDebateMessages, ListDebatePinnedMessages, ListDebateSessions, ListDebateTopics,
     ListJudgeReviewOpsQuery, OpsCreateDebateSessionInput, OpsCreateDebateTopicInput,
     OpsUpdateDebateSessionInput, OpsUpdateDebateTopicInput, PinDebateMessageInput,
-    RequestJudgeJobInput, SubmitDrawVoteInput,
+    RequestJudgeJobInput, SubmitDrawVoteInput, UpsertOpsRoleInput,
 };
 use axum::{
     extract::{Path, Query, State},
@@ -36,7 +36,7 @@ pub(crate) async fn list_debate_topics_handler(
     Ok((StatusCode::OK, Json(topics)))
 }
 
-/// Create debate topic by workspace owner (ops).
+/// Create debate topic by authorized ops role.
 #[utoipa::path(
     post,
     path = "/api/debate/ops/topics",
@@ -60,7 +60,7 @@ pub(crate) async fn create_debate_topic_ops_handler(
     Ok((StatusCode::CREATED, Json(topic)))
 }
 
-/// Update debate topic by workspace owner (ops).
+/// Update debate topic by authorized ops role.
 #[utoipa::path(
     put,
     path = "/api/debate/ops/topics/{id}",
@@ -88,7 +88,7 @@ pub(crate) async fn update_debate_topic_ops_handler(
     Ok((StatusCode::OK, Json(topic)))
 }
 
-/// Create debate session by workspace owner (ops).
+/// Create debate session by authorized ops role.
 #[utoipa::path(
     post,
     path = "/api/debate/ops/sessions",
@@ -112,7 +112,7 @@ pub(crate) async fn create_debate_session_ops_handler(
     Ok((StatusCode::CREATED, Json(session)))
 }
 
-/// Update debate session by workspace owner (ops).
+/// Update debate session by authorized ops role.
 #[utoipa::path(
     put,
     path = "/api/debate/ops/sessions/{id}",
@@ -140,6 +140,81 @@ pub(crate) async fn update_debate_session_ops_handler(
         .update_debate_session_by_owner(&user, id, input)
         .await?;
     Ok((StatusCode::OK, Json(session)))
+}
+
+/// List workspace ops role assignments (owner only).
+#[utoipa::path(
+    get,
+    path = "/api/debate/ops/rbac/roles",
+    responses(
+        (status = 200, description = "Ops role assignments", body = crate::ListOpsRoleAssignmentsOutput),
+        (status = 409, description = "Permission conflict", body = ErrorOutput),
+    ),
+    security(
+        ("token" = [])
+    )
+)]
+pub(crate) async fn list_ops_role_assignments_handler(
+    Extension(user): Extension<User>,
+    State(state): State<AppState>,
+) -> Result<impl IntoResponse, AppError> {
+    let ret = state.list_ops_role_assignments_by_owner(&user).await?;
+    Ok((StatusCode::OK, Json(ret)))
+}
+
+/// Upsert an ops role assignment (owner only).
+#[utoipa::path(
+    put,
+    path = "/api/debate/ops/rbac/roles/{userId}",
+    params(
+        ("userId" = u64, Path, description = "Target user id")
+    ),
+    request_body = UpsertOpsRoleInput,
+    responses(
+        (status = 200, description = "Updated ops role assignment", body = crate::OpsRoleAssignment),
+        (status = 404, description = "Target user not found", body = ErrorOutput),
+        (status = 409, description = "Permission conflict", body = ErrorOutput),
+    ),
+    security(
+        ("token" = [])
+    )
+)]
+pub(crate) async fn upsert_ops_role_assignment_handler(
+    Extension(user): Extension<User>,
+    State(state): State<AppState>,
+    Path(user_id): Path<u64>,
+    Json(input): Json<UpsertOpsRoleInput>,
+) -> Result<impl IntoResponse, AppError> {
+    let ret = state
+        .upsert_ops_role_assignment_by_owner(&user, user_id, input)
+        .await?;
+    Ok((StatusCode::OK, Json(ret)))
+}
+
+/// Revoke an ops role assignment (owner only).
+#[utoipa::path(
+    delete,
+    path = "/api/debate/ops/rbac/roles/{userId}",
+    params(
+        ("userId" = u64, Path, description = "Target user id")
+    ),
+    responses(
+        (status = 200, description = "Revoke result", body = crate::RevokeOpsRoleOutput),
+        (status = 409, description = "Permission conflict", body = ErrorOutput),
+    ),
+    security(
+        ("token" = [])
+    )
+)]
+pub(crate) async fn revoke_ops_role_assignment_handler(
+    Extension(user): Extension<User>,
+    State(state): State<AppState>,
+    Path(user_id): Path<u64>,
+) -> Result<impl IntoResponse, AppError> {
+    let ret = state
+        .revoke_ops_role_assignment_by_owner(&user, user_id)
+        .await?;
+    Ok((StatusCode::OK, Json(ret)))
 }
 
 /// List judge reports for ops review with evidence/anomaly filters.
@@ -761,6 +836,48 @@ mod tests {
         let body = response.into_body().collect().await?.to_bytes();
         let ret: serde_json::Value = serde_json::from_slice(&body)?;
         assert_eq!(ret["rejudgeTriggered"], true);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn ops_rbac_role_handlers_should_upsert_list_and_revoke() -> Result<()> {
+        let (_tdb, state) = AppState::new_for_test().await?;
+        state.update_workspace_owner(1, 1).await?;
+        let owner = state.find_user_by_id(1).await?.expect("owner should exist");
+
+        let upsert_resp = upsert_ops_role_assignment_handler(
+            Extension(owner.clone()),
+            State(state.clone()),
+            Path(2_u64),
+            Json(UpsertOpsRoleInput {
+                role: "ops_reviewer".to_string(),
+            }),
+        )
+        .await?
+        .into_response();
+        assert_eq!(upsert_resp.status(), StatusCode::OK);
+        let upsert_body = upsert_resp.into_body().collect().await?.to_bytes();
+        let upsert_json: serde_json::Value = serde_json::from_slice(&upsert_body)?;
+        assert_eq!(upsert_json["userId"], 2);
+        assert_eq!(upsert_json["role"], "ops_reviewer");
+
+        let list_resp =
+            list_ops_role_assignments_handler(Extension(owner.clone()), State(state.clone()))
+                .await?
+                .into_response();
+        assert_eq!(list_resp.status(), StatusCode::OK);
+        let list_body = list_resp.into_body().collect().await?.to_bytes();
+        let list_json: serde_json::Value = serde_json::from_slice(&list_body)?;
+        assert_eq!(list_json["items"].as_array().map(Vec::len), Some(1));
+
+        let revoke_resp =
+            revoke_ops_role_assignment_handler(Extension(owner), State(state), Path(2_u64))
+                .await?
+                .into_response();
+        assert_eq!(revoke_resp.status(), StatusCode::OK);
+        let revoke_body = revoke_resp.into_body().collect().await?.to_bytes();
+        let revoke_json: serde_json::Value = serde_json::from_slice(&revoke_body)?;
+        assert_eq!(revoke_json["removed"], true);
         Ok(())
     }
 }

@@ -146,6 +146,44 @@ async fn create_debate_topic_by_owner_should_work_and_reject_non_owner() -> Resu
 }
 
 #[tokio::test]
+async fn create_debate_topic_by_owner_should_allow_ops_admin_role() -> Result<()> {
+    let (_tdb, state) = AppState::new_for_test().await?;
+    state.update_workspace_owner(1, 1).await?;
+    let owner = state.find_user_by_id(1).await?.expect("owner should exist");
+    let ops_admin = state
+        .find_user_by_id(2)
+        .await?
+        .expect("ops admin should exist");
+
+    state
+        .upsert_ops_role_assignment_by_owner(
+            &owner,
+            ops_admin.id as u64,
+            crate::UpsertOpsRoleInput {
+                role: "ops_admin".to_string(),
+            },
+        )
+        .await?;
+
+    let topic = state
+        .create_debate_topic_by_owner(
+            &ops_admin,
+            OpsCreateDebateTopicInput {
+                title: "ops-admin-topic".to_string(),
+                description: "rbac create topic".to_string(),
+                category: "game".to_string(),
+                stance_pro: "支持".to_string(),
+                stance_con: "反对".to_string(),
+                context_seed: None,
+                is_active: true,
+            },
+        )
+        .await?;
+    assert_eq!(topic.created_by, ops_admin.id);
+    Ok(())
+}
+
+#[tokio::test]
 async fn create_debate_session_by_owner_should_validate_status_and_topic() -> Result<()> {
     let (_tdb, state) = AppState::new_for_test().await?;
     state.update_workspace_owner(1, 1).await?;

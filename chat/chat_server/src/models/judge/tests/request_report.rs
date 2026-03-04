@@ -798,3 +798,78 @@ async fn request_judge_rejudge_by_owner_should_enforce_owner_and_report_requirem
     assert_eq!(second.style_mode_source, "existing_running_job");
     Ok(())
 }
+
+#[tokio::test]
+async fn list_judge_reviews_by_owner_should_allow_ops_viewer_but_forbid_rejudge() -> Result<()> {
+    let (_tdb, state) = AppState::new_for_test().await?;
+    state.update_workspace_owner(1, 1).await?;
+    let owner = state.find_user_by_id(1).await?.expect("owner should exist");
+    let ops_viewer = state
+        .find_user_by_id(2)
+        .await?
+        .expect("viewer should exist");
+
+    state
+        .upsert_ops_role_assignment_by_owner(
+            &owner,
+            ops_viewer.id as u64,
+            crate::UpsertOpsRoleInput {
+                role: "ops_viewer".to_string(),
+            },
+        )
+        .await?;
+
+    let session_id = seed_topic_and_session(&state, 1, "closed").await?;
+    let job_id = seed_running_judge_job(&state, session_id).await?;
+    state
+        .submit_judge_report(
+            job_id as u64,
+            SubmitJudgeReportInput {
+                winner: "pro".to_string(),
+                pro_score: 83,
+                con_score: 78,
+                logic_pro: 82,
+                logic_con: 77,
+                evidence_pro: 84,
+                evidence_con: 79,
+                rebuttal_pro: 81,
+                rebuttal_con: 76,
+                clarity_pro: 85,
+                clarity_con: 80,
+                pro_summary: "pro".to_string(),
+                con_summary: "con".to_string(),
+                rationale: "rationale".to_string(),
+                style_mode: Some("rational".to_string()),
+                needs_draw_vote: false,
+                rejudge_triggered: false,
+                payload: serde_json::json!({"trace":"viewer-review"}),
+                winner_first: Some("pro".to_string()),
+                winner_second: Some("pro".to_string()),
+                stage_summaries: vec![],
+            },
+        )
+        .await?;
+
+    let reviews = state
+        .list_judge_reviews_by_owner(
+            &ops_viewer,
+            ListJudgeReviewOpsQuery {
+                from: None,
+                to: None,
+                winner: None,
+                rejudge_triggered: None,
+                has_verdict_evidence: None,
+                anomaly_only: false,
+                limit: Some(20),
+            },
+        )
+        .await?;
+    assert!(!reviews.items.is_empty());
+
+    let rejudge_err = state
+        .request_judge_rejudge_by_owner(session_id as u64, &ops_viewer)
+        .await
+        .expect_err("ops_viewer should not trigger rejudge");
+    assert!(matches!(rejudge_err, AppError::DebateConflict(_)));
+    Ok(())
+}

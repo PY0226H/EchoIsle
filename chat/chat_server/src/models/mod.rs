@@ -6,6 +6,7 @@ mod judge;
 mod judge_dispatch;
 mod messages;
 mod payment;
+mod rbac;
 mod user;
 mod workspace;
 
@@ -33,6 +34,10 @@ pub use payment::{
     GetIapOrderByTransaction, GetIapOrderByTransactionOutput, IapOrderSnapshot, IapProduct,
     ListIapProducts, ListWalletLedger, VerifyIapOrderInput, VerifyIapOrderOutput,
     WalletBalanceOutput, WalletLedgerItem,
+};
+pub(crate) use rbac::OpsPermission;
+pub use rbac::{
+    ListOpsRoleAssignmentsOutput, OpsRoleAssignment, RevokeOpsRoleOutput, UpsertOpsRoleInput,
 };
 use serde::{Deserialize, Serialize};
 pub use user::{CreateUser, SigninUser};

@@ -1,30 +1,15 @@
 use super::*;
+use crate::models::OpsPermission;
 
 #[allow(dead_code)]
 impl AppState {
-    async fn ensure_workspace_owner(&self, ws_id: i64, user_id: i64) -> Result<(), AppError> {
-        let owner_row: Option<(i64,)> =
-            sqlx::query_as("SELECT owner_id FROM workspaces WHERE id = $1")
-                .bind(ws_id)
-                .fetch_optional(&self.pool)
-                .await?;
-        let Some((owner_id,)) = owner_row else {
-            return Err(AppError::NotFound(format!("workspace id {}", ws_id)));
-        };
-        if owner_id != user_id {
-            return Err(AppError::DebateConflict(
-                "only workspace owner can manage debate operations".to_string(),
-            ));
-        }
-        Ok(())
-    }
-
     pub async fn create_debate_topic_by_owner(
         &self,
         user: &User,
         input: OpsCreateDebateTopicInput,
     ) -> Result<DebateTopic, AppError> {
-        self.ensure_workspace_owner(user.ws_id, user.id).await?;
+        self.ensure_ops_permission(user, OpsPermission::DebateManage)
+            .await?;
 
         let title = normalize_ops_topic_field(&input.title, "title", DEBATE_TOPIC_TITLE_MAX_LEN)?;
         let description = normalize_ops_topic_field(&input.description, "description", 4000)?;
@@ -71,7 +56,8 @@ impl AppState {
         user: &User,
         input: OpsCreateDebateSessionInput,
     ) -> Result<DebateSessionSummary, AppError> {
-        self.ensure_workspace_owner(user.ws_id, user.id).await?;
+        self.ensure_ops_permission(user, OpsPermission::DebateManage)
+            .await?;
 
         let status = normalize_ops_session_status(input.status)?;
         if status.len() > DEBATE_SESSION_STATUS_MAX_LEN {
@@ -152,7 +138,8 @@ impl AppState {
         topic_id: u64,
         input: OpsUpdateDebateTopicInput,
     ) -> Result<DebateTopic, AppError> {
-        self.ensure_workspace_owner(user.ws_id, user.id).await?;
+        self.ensure_ops_permission(user, OpsPermission::DebateManage)
+            .await?;
 
         let title = normalize_ops_topic_field(&input.title, "title", DEBATE_TOPIC_TITLE_MAX_LEN)?;
         let description = normalize_ops_topic_field(&input.description, "description", 4000)?;
@@ -206,7 +193,8 @@ impl AppState {
         session_id: u64,
         input: OpsUpdateDebateSessionInput,
     ) -> Result<DebateSessionSummary, AppError> {
-        self.ensure_workspace_owner(user.ws_id, user.id).await?;
+        self.ensure_ops_permission(user, OpsPermission::DebateManage)
+            .await?;
 
         let status_input = normalize_ops_manage_session_status(input.status)?;
         let mut tx = self.pool.begin().await?;

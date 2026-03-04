@@ -710,7 +710,7 @@ async fn debate_ops_should_reject_non_owner_management_actions() -> Result<()> {
         .await?;
     assert!(create_topic_error
         .to_string()
-        .contains("only workspace owner can manage debate operations"));
+        .contains("missing ops role assignment"));
 
     let update_topic_error: serde_json::Value = member
         .put(
@@ -729,7 +729,7 @@ async fn debate_ops_should_reject_non_owner_management_actions() -> Result<()> {
         .await?;
     assert!(update_topic_error
         .to_string()
-        .contains("only workspace owner can manage debate operations"));
+        .contains("missing ops role assignment"));
 
     let create_session_error: serde_json::Value = member
         .post(
@@ -746,7 +746,7 @@ async fn debate_ops_should_reject_non_owner_management_actions() -> Result<()> {
         .await?;
     assert!(create_session_error
         .to_string()
-        .contains("only workspace owner can manage debate operations"));
+        .contains("missing ops role assignment"));
 
     let update_session_error: serde_json::Value = member
         .put(
@@ -762,8 +762,88 @@ async fn debate_ops_should_reject_non_owner_management_actions() -> Result<()> {
         .await?;
     assert!(update_session_error
         .to_string()
-        .contains("only workspace owner can manage debate operations"));
+        .contains("missing ops role assignment"));
 
+    Ok(())
+}
+
+#[tokio::test]
+async fn debate_ops_assigned_admin_role_should_allow_management_actions() -> Result<()> {
+    let (_tdb, state) = AppState::new_for_test().await?;
+    let server = TestServer::new(state.clone()).await?;
+
+    let now_ms = SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis();
+    let workspace = format!("mvp-ops-rbac-{now_ms}");
+    let ops_admin_email = format!("ops-admin-{now_ms}@acme.org");
+    let owner = server
+        .signup(
+            &workspace,
+            "Owner RBAC",
+            &format!("owner-rbac-{now_ms}@acme.org"),
+            "123456",
+        )
+        .await?;
+    let ops_admin = server
+        .signup(&workspace, "Ops Admin", &ops_admin_email, "123456")
+        .await?;
+
+    let users: Vec<serde_json::Value> = owner.get("/api/users", StatusCode::OK).await?;
+    let ops_admin_id = users
+        .iter()
+        .find(|v| v["email"].as_str() == Some(ops_admin_email.as_str()))
+        .and_then(|v| v["id"].as_u64())
+        .expect("ops admin id should exist");
+
+    let _: serde_json::Value = owner
+        .put(
+            format!("/api/debate/ops/rbac/roles/{ops_admin_id}").as_str(),
+            &serde_json::json!({ "role": "ops_admin" }),
+            StatusCode::OK,
+        )
+        .await?;
+
+    let topic: DebateTopic = ops_admin
+        .post(
+            "/api/debate/ops/topics",
+            &OpsCreateDebateTopicInput {
+                title: "RBAC 授权辩题".to_string(),
+                description: "验证 ops_admin 角色可执行场次管理动作".to_string(),
+                category: "game".to_string(),
+                stance_pro: "应允许".to_string(),
+                stance_con: "不应允许".to_string(),
+                context_seed: Some("rbac ops admin".to_string()),
+                is_active: true,
+            },
+            StatusCode::CREATED,
+        )
+        .await?;
+    assert_eq!(topic.created_by as u64, ops_admin_id);
+
+    let _: serde_json::Value = owner
+        .delete(
+            format!("/api/debate/ops/rbac/roles/{ops_admin_id}").as_str(),
+            StatusCode::OK,
+        )
+        .await?;
+
+    let create_topic_error: serde_json::Value = ops_admin
+        .post(
+            "/api/debate/ops/topics",
+            &OpsCreateDebateTopicInput {
+                title: "RBAC 撤销后创建".to_string(),
+                description: "should fail".to_string(),
+                category: "game".to_string(),
+                stance_pro: "pro".to_string(),
+                stance_con: "con".to_string(),
+                context_seed: None,
+                is_active: true,
+            },
+            StatusCode::CONFLICT,
+        )
+        .await?;
+    assert!(create_topic_error
+        .to_string()
+        .contains("missing ops role assignment"));
     Ok(())
 }
 
@@ -1089,6 +1169,20 @@ impl ApiSession {
         let res = self
             .http
             .get(format!("http://{}{}", self.addr, path))
+            .header("Authorization", format!("Bearer {}", self.token))
+            .send()
+            .await?;
+        assert_eq!(res.status(), expected, "path={path}");
+        Ok(res.json::<R>().await?)
+    }
+
+    async fn delete<R>(&self, path: &str, expected: StatusCode) -> Result<R>
+    where
+        R: DeserializeOwned,
+    {
+        let res = self
+            .http
+            .delete(format!("http://{}{}", self.addr, path))
             .header("Authorization", format!("Bearer {}", self.token))
             .send()
             .await?;

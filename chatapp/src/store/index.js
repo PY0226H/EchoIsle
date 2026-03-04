@@ -441,6 +441,45 @@ export default createStore({
       });
       return response.data || { scannedCount: 0, returnedCount: 0, items: [] };
     },
+    async listOpsRoleAssignments({ state }) {
+      const response = await network(this, 'get', '/debate/ops/rbac/roles', null, {
+        Authorization: `Bearer ${state.token}`,
+      });
+      return response.data || { items: [] };
+    },
+    async upsertOpsRoleAssignment({ state }, { userId, role } = {}) {
+      if (!userId) {
+        throw new Error('userId is required');
+      }
+      if (!role || !String(role).trim()) {
+        throw new Error('role is required');
+      }
+      const response = await network(
+        this,
+        'put',
+        `/debate/ops/rbac/roles/${Number(userId)}`,
+        { role: String(role).trim() },
+        {
+          Authorization: `Bearer ${state.token}`,
+        },
+      );
+      return response.data;
+    },
+    async revokeOpsRoleAssignment({ state }, { userId } = {}) {
+      if (!userId) {
+        throw new Error('userId is required');
+      }
+      const response = await network(
+        this,
+        'delete',
+        `/debate/ops/rbac/roles/${Number(userId)}`,
+        null,
+        {
+          Authorization: `Bearer ${state.token}`,
+        },
+      );
+      return response.data;
+    },
     async requestJudgeRejudgeOps({ state }, { sessionId } = {}) {
       if (!sessionId) {
         throw new Error('sessionId is required');
