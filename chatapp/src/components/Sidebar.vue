@@ -18,8 +18,14 @@
       <h2 class="text-xs uppercase text-gray-400 mb-2">Navigation</h2>
       <ul>
         <li
-          @click="goRoute('/')"
-          :class="['px-2 py-1 rounded cursor-pointer mb-1', { 'bg-blue-600': isRouteActive('/') }]"
+          @click="goRoute('/home')"
+          :class="['px-2 py-1 rounded cursor-pointer mb-1', { 'bg-blue-600': isRouteActive('/home') }]"
+        >
+          Home
+        </li>
+        <li
+          @click="goRoute('/chat')"
+          :class="['px-2 py-1 rounded cursor-pointer mb-1', { 'bg-blue-600': isRouteActive('/chat') }]"
         >
           Chat
         </li>
@@ -46,6 +52,18 @@
           :class="['px-2 py-1 rounded cursor-pointer mt-1', { 'bg-blue-600': isRouteActive('/wallet') }]"
         >
           Wallet
+        </li>
+        <li
+          @click="goRoute('/me')"
+          :class="['px-2 py-1 rounded cursor-pointer mt-1', { 'bg-blue-600': isRouteActive('/me') }]"
+        >
+          Me
+        </li>
+        <li
+          @click="goRoute('/notifications')"
+          :class="['px-2 py-1 rounded cursor-pointer mt-1', { 'bg-blue-600': isRouteActive('/notifications') }]"
+        >
+          Notifications
         </li>
       </ul>
     </div>
@@ -150,6 +168,18 @@ export default {
       if (path === '/debate') {
         return this.$route.path.startsWith('/debate') && !this.$route.path.startsWith('/debate/ops');
       }
+      if (path === '/chat') {
+        return this.$route.path === '/chat';
+      }
+      if (path === '/home') {
+        return this.$route.path === '/home';
+      }
+      if (path === '/notifications') {
+        return this.$route.path.startsWith('/notifications');
+      }
+      if (path === '/me') {
+        return this.$route.path.startsWith('/me');
+      }
       return this.$route.path === path;
     },
     selectChannel(channelId) {
@@ -157,8 +187,8 @@ export default {
       const to = `/chats/${channelId}`;
       this.$store.dispatch('navigation', { from, to });
       this.$store.dispatch('setActiveChannel', channelId);
-      if (this.$route.path !== '/') {
-        this.$router.push('/');
+      if (this.$route.path !== '/chat') {
+        this.$router.push('/chat');
       }
     },
   },

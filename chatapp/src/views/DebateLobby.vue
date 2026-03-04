@@ -135,6 +135,14 @@ export default {
   components: {
     Sidebar,
   },
+  watch: {
+    '$route.query': {
+      deep: true,
+      handler() {
+        this.applyRouteFilters();
+      },
+    },
+  },
   data() {
     return {
       topics: [],
@@ -159,6 +167,18 @@ export default {
     },
   },
   methods: {
+    applyRouteFilters() {
+      const routeQuery = this.$route?.query || {};
+      if (routeQuery.topic != null) {
+        this.selectedTopicId = String(routeQuery.topic || '').trim();
+      }
+      if (routeQuery.q != null) {
+        this.keyword = String(routeQuery.q || '').trim();
+      }
+      if (routeQuery.status != null) {
+        this.statusFilter = String(routeQuery.status || '').trim() || this.statusFilter;
+      }
+    },
     topicTitle(topicId) {
       const topic = this.topics.find((item) => item.id === topicId);
       return topic?.title || `topic#${topicId}`;
@@ -206,6 +226,7 @@ export default {
     },
   },
   async mounted() {
+    this.applyRouteFilters();
     await this.refreshLobby();
   },
 };

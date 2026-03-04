@@ -1,20 +1,27 @@
 import { createRouter, createWebHistory } from 'vue-router';
 import Login from '../views/Login.vue';
 import Register from '../views/Register.vue';
+import Home from '../views/Home.vue';
 import Chat from '../views/Chat.vue';
 import JudgeReport from '../views/JudgeReport.vue';
 import DebateLobby from '../views/DebateLobby.vue';
 import DebateRoom from '../views/DebateRoom.vue';
 import Wallet from '../views/Wallet.vue';
+import Me from '../views/Me.vue';
+import Notifications from '../views/Notifications.vue';
 import DebateOpsAdmin from '../views/DebateOpsAdmin.vue';
 
 const routes = [
-  { path: '/', name: 'Chat', component: Chat, meta: { requiresAuth: true } },
+  { path: '/', redirect: '/home' },
+  { path: '/home', name: 'Home', component: Home, meta: { requiresAuth: true } },
+  { path: '/chat', name: 'Chat', component: Chat, meta: { requiresAuth: true } },
   { path: '/debate', name: 'DebateLobby', component: DebateLobby, meta: { requiresAuth: true } },
   { path: '/debate/sessions/:id', name: 'DebateRoom', component: DebateRoom, meta: { requiresAuth: true } },
   { path: '/debate/ops', name: 'DebateOpsAdmin', component: DebateOpsAdmin, meta: { requiresAuth: true } },
   { path: '/judge-report', name: 'JudgeReport', component: JudgeReport, meta: { requiresAuth: true } },
   { path: '/wallet', name: 'Wallet', component: Wallet, meta: { requiresAuth: true } },
+  { path: '/me', name: 'Me', component: Me, meta: { requiresAuth: true } },
+  { path: '/notifications', name: 'Notifications', component: Notifications, meta: { requiresAuth: true } },
   { path: '/login', name: 'Login', component: Login },
   { path: '/register', name: 'Register', component: Register },
 

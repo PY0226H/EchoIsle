@@ -52,7 +52,7 @@ export default {
         });
 
         console.log('Signin successful, user:', user);
-        this.$router.push('/'); // Redirect to chat after successful signup
+        this.$router.push('/home'); // Redirect to home after successful signin
       } catch (error) {
         console.error('Signin failed:', error);
         // Handle signin failure, show error message to user, etc.
