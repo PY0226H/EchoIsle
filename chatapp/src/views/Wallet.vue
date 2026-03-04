@@ -40,6 +40,63 @@
           </button>
         </div>
 
+        <div v-if="tauriReady" class="bg-white border rounded-lg p-4 space-y-2">
+          <div class="flex items-center justify-between">
+            <div class="text-sm font-semibold text-gray-900">Native Bridge 诊断</div>
+            <button
+              @click="refreshNativeBridgeDiagnostics"
+              :disabled="nativeBridgeDiagnosticsLoading"
+              class="px-3 py-1.5 text-xs rounded border bg-white hover:bg-gray-100 disabled:opacity-50"
+            >
+              {{ nativeBridgeDiagnosticsLoading ? '检查中...' : '刷新诊断' }}
+            </button>
+          </div>
+          <div v-if="!nativeBridgeDiagnostics" class="text-sm text-gray-600">
+            尚未获取诊断信息。
+          </div>
+          <div v-else class="text-xs text-gray-700 space-y-1">
+            <div>
+              mode: {{ nativeBridgeDiagnostics.purchaseMode }}
+              · runtime: {{ nativeBridgeDiagnostics.runtimeEnv || '-' }}
+              · production: {{ nativeBridgeDiagnostics.runtimeIsProduction }}
+            </div>
+            <div>
+              allowlistConfigured: {{ nativeBridgeDiagnostics.allowedProductIdsConfigured }}
+              · allowlistSize: {{ nativeAllowedProductIds.length }}
+            </div>
+            <div>
+              bin: {{ nativeBridgeDiagnostics.nativeBridgeBin || '(empty)' }}
+              · exists: {{ nativeBridgeDiagnostics.nativeBridgeBinExists }}
+              · executable: {{ nativeBridgeDiagnostics.nativeBridgeBinExecutable }}
+            </div>
+            <div>
+              simulateArg: {{ nativeBridgeDiagnostics.hasSimulateArg }}
+              · jsonOverride: {{ nativeBridgeDiagnostics.jsonOverridePresent }}
+              · policyOk: {{ nativeBridgeDiagnostics.productionPolicyOk }}
+            </div>
+            <div
+              class="font-semibold"
+              :class="nativeBridgeDiagnostics.readyForNativePurchase ? 'text-emerald-700' : 'text-amber-700'"
+            >
+              {{ nativeBridgeDiagnostics.readyForNativePurchase
+                ? '当前环境可进行 Native 购买联调'
+                : '当前环境未满足 Native 购买联调条件' }}
+            </div>
+            <div v-if="nativeBridgeDiagnostics.productionPolicyError" class="text-red-700">
+              policyError: {{ nativeBridgeDiagnostics.productionPolicyError }}
+            </div>
+            <div v-if="nativeBridgeDiagnostics.invalidAllowedProductIds.length > 0" class="text-red-700">
+              invalidAllowlist: {{ nativeBridgeDiagnostics.invalidAllowedProductIds.join(', ') }}
+            </div>
+            <div v-if="backendProductsNotAllowlisted.length > 0" class="text-amber-700">
+              backendOnlyProducts: {{ backendProductsNotAllowlisted.join(', ') }}
+            </div>
+            <div v-if="allowlistedProductsMissingBackend.length > 0" class="text-amber-700">
+              allowlistOnlyProducts: {{ allowlistedProductsMissingBackend.join(', ') }}
+            </div>
+          </div>
+        </div>
+
         <div class="bg-white border rounded-lg p-4 space-y-3">
           <div class="flex items-center justify-between">
             <div class="text-sm font-semibold text-gray-900">IAP 商品</div>
@@ -268,7 +325,11 @@
 
 <script>
 import Sidebar from '../components/Sidebar.vue';
-import { isTauriRuntime, purchaseIapViaTauri } from '../iap-bridge';
+import {
+  getIapNativeBridgeDiagnostics,
+  isTauriRuntime,
+  purchaseIapViaTauri,
+} from '../iap-bridge';
 import {
   DEFAULT_PENDING_IAP_RETRY_POLICY,
   filterRetryablePendingIap,
@@ -295,6 +356,8 @@ export default {
       errorText: '',
       successText: '',
       tauriReady: false,
+      nativeBridgeDiagnostics: null,
+      nativeBridgeDiagnosticsLoading: false,
       pendingQueue: [],
       pendingRetryPolicy: { ...DEFAULT_PENDING_IAP_RETRY_POLICY },
       retryingMap: {},
@@ -313,6 +376,30 @@ export default {
   computed: {
     exhaustedPendingCount() {
       return this.pendingQueue.filter((item) => this.isPendingExhausted(item)).length;
+    },
+    nativeAllowedProductIds() {
+      const ids = this.nativeBridgeDiagnostics?.allowedProductIds;
+      return Array.isArray(ids) ? ids : [];
+    },
+    backendProductsNotAllowlisted() {
+      if (this.nativeAllowedProductIds.length === 0) {
+        return [];
+      }
+      const allowedSet = new Set(this.nativeAllowedProductIds);
+      return this.products
+        .map((product) => String(product?.productId || '').trim())
+        .filter((id) => id && !allowedSet.has(id));
+    },
+    allowlistedProductsMissingBackend() {
+      if (this.nativeAllowedProductIds.length === 0) {
+        return [];
+      }
+      const backendSet = new Set(
+        this.products
+          .map((product) => String(product?.productId || '').trim())
+          .filter((id) => id),
+      );
+      return this.nativeAllowedProductIds.filter((id) => !backendSet.has(id));
     },
   },
   methods: {
@@ -348,6 +435,22 @@ export default {
     },
     loadPendingQueue() {
       this.pendingQueue = readPendingIapQueue();
+    },
+    async refreshNativeBridgeDiagnostics({ silent = false } = {}) {
+      if (!this.tauriReady) {
+        this.nativeBridgeDiagnostics = null;
+        return;
+      }
+      this.nativeBridgeDiagnosticsLoading = true;
+      try {
+        this.nativeBridgeDiagnostics = await getIapNativeBridgeDiagnostics();
+      } catch (error) {
+        if (!silent) {
+          this.errorText = error?.message || 'native bridge diagnostics failed';
+        }
+      } finally {
+        this.nativeBridgeDiagnosticsLoading = false;
+      }
     },
     markRetrying(transactionId, retrying) {
       if (!transactionId) {
@@ -528,7 +631,17 @@ export default {
           this.errorText = `Tauri 购买验单失败，交易已入待重试队列：tx=${purchase.transactionId}`;
         }
       } catch (error) {
-        this.errorText = error?.response?.data?.error || error?.message || 'Tauri 购买验单失败';
+        const code = String(error?.code || '').trim().toLowerCase();
+        if (code === 'purchase_pending') {
+          this.successText = '购买已提交且处于待处理状态，请稍后完成支付后再重试验单。';
+          this.errorText = '';
+        } else if (code === 'purchase_cancelled') {
+          this.errorText = '购买已取消，未发生扣费。';
+        } else if (code === 'product_not_found') {
+          this.errorText = 'StoreKit 未找到该商品，请检查商品配置与沙盒账号权限。';
+        } else {
+          this.errorText = error?.response?.data?.error || error?.message || 'Tauri 购买验单失败';
+        }
       } finally {
         this.verifying = false;
       }
@@ -551,7 +664,11 @@ export default {
       this.errorText = '';
       this.successText = '';
       try {
-        await Promise.all([this.refreshProducts(), this.refreshWallet(), this.refreshLedger()]);
+        const tasks = [this.refreshProducts(), this.refreshWallet(), this.refreshLedger()];
+        if (this.tauriReady) {
+          tasks.push(this.refreshNativeBridgeDiagnostics({ silent: true }));
+        }
+        await Promise.all(tasks);
       } catch (error) {
         this.errorText = error?.response?.data?.error || error?.message || '刷新失败';
       } finally {

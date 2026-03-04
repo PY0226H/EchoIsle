@@ -65,6 +65,9 @@ AICOMM_IAP_SIMULATE=1 ./.build/release/iap-storekit-bridge --product-id com.acme
 ```yaml
 iap:
   purchase_mode: "native"
+  allowed_product_ids:
+    - "com.aicomm.coins.60"
+    - "com.aicomm.coins.120"
   native_bridge:
     bin: "/Users/panyihang/Documents/aicomm/chatapp/native/iap-storekit-bridge/run.sh"
     args: []
@@ -75,3 +78,24 @@ Production constraints (`chatapp/src-tauri`):
 - `AICOMM_IAP_NATIVE_BRIDGE_RESPONSE_JSON` is forbidden in production runtime.
 - `iap.native_bridge.args` cannot include `--simulate` in production runtime.
 - `iap.native_bridge.bin` must be an absolute path in production runtime.
+- `iap.allowed_product_ids` must be non-empty in production runtime.
+
+## Error contract
+
+When bridge exits non-zero, it prints structured JSON to stderr:
+
+```json
+{
+  "code": "purchase_pending",
+  "error": "purchase is pending"
+}
+```
+
+Typical `code` values:
+- `purchase_pending`
+- `purchase_cancelled`
+- `product_not_found`
+- `purchase_unverified`
+- `receipt_missing`
+
+`chatapp/src-tauri` converts this to a typed command error and `chatapp/src/iap-bridge.js` maps it to frontend-friendly messages for true-device debugging.

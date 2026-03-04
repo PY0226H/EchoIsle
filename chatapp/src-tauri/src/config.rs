@@ -14,6 +14,8 @@ pub struct IapConfig {
     #[serde(default = "default_iap_purchase_mode")]
     pub purchase_mode: String,
     #[serde(default)]
+    pub allowed_product_ids: Vec<String>,
+    #[serde(default)]
     pub native_bridge: IapNativeBridgeConfig,
 }
 
@@ -29,6 +31,7 @@ impl Default for IapConfig {
     fn default() -> Self {
         Self {
             purchase_mode: default_iap_purchase_mode(),
+            allowed_product_ids: vec![],
             native_bridge: IapNativeBridgeConfig::default(),
         }
     }

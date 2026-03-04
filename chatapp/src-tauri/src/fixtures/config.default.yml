@@ -3,6 +3,7 @@ server:
   notification: "http://localhost:6687/events"
 iap:
   purchase_mode: "mock"
+  allowed_product_ids: []
   native_bridge:
     bin: ""
     args: []

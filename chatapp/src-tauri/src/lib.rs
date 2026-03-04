@@ -3,7 +3,9 @@ mod config;
 mod utils;
 
 use arc_swap::ArcSwap;
-use commands::{get_app_dir, get_config, greet, iap_purchase_product};
+use commands::{
+    get_app_dir, get_config, greet, iap_get_native_bridge_diagnostics, iap_purchase_product,
+};
 use config::AppConfig;
 use std::sync::Arc;
 use tauri::{
@@ -31,6 +33,7 @@ pub fn app() -> anyhow::Result<Builder<Wry>> {
             greet,
             get_app_dir,
             get_config,
+            iap_get_native_bridge_diagnostics,
             iap_purchase_product
         ])
         .setup(setup)

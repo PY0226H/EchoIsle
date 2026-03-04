@@ -11,6 +11,11 @@ private struct PurchasePayload: Encodable {
     let source: String
 }
 
+private struct BridgeErrorOutput: Encodable {
+    let code: String
+    let error: String
+}
+
 private enum BridgeError: Error, CustomStringConvertible {
     case invalidArgs(String)
     case unsupportedPlatform(String)
@@ -20,6 +25,27 @@ private enum BridgeError: Error, CustomStringConvertible {
     case purchaseUnverified(String)
     case receiptMissing(String)
     case internalError(String)
+
+    var code: String {
+        switch self {
+        case .invalidArgs:
+            return "invalid_args"
+        case .unsupportedPlatform:
+            return "unsupported_platform"
+        case .productNotFound:
+            return "product_not_found"
+        case .purchasePending:
+            return "purchase_pending"
+        case .purchaseCancelled:
+            return "purchase_cancelled"
+        case .purchaseUnverified:
+            return "purchase_unverified"
+        case .receiptMissing:
+            return "receipt_missing"
+        case .internalError:
+            return "internal_error"
+        }
+    }
 
     var description: String {
         switch self {
@@ -206,9 +232,13 @@ struct Main {
             FileHandle.standardOutput.write((text + "\n").data(using: .utf8)!)
             Foundation.exit(0)
         } catch {
-            let msg = (error as? BridgeError)?.description ?? error.localizedDescription
-            let output = "{\"error\":\"\(msg.replacingOccurrences(of: "\"", with: "\\\""))\"}\n"
-            FileHandle.standardError.write(output.data(using: .utf8)!)
+            let bridgeError = error as? BridgeError
+            let payload = BridgeErrorOutput(
+                code: bridgeError?.code ?? "internal_error",
+                error: bridgeError?.description ?? error.localizedDescription
+            )
+            let text = (try? jsonString(payload)) ?? "{\"code\":\"internal_error\",\"error\":\"internal error\"}"
+            FileHandle.standardError.write((text + "\n").data(using: .utf8)!)
             Foundation.exit(1)
         }
     }
