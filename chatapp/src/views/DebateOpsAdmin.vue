@@ -23,6 +23,29 @@
           {{ errorText }}
         </div>
 
+        <div class="bg-slate-50 border border-slate-200 rounded-lg p-3 text-xs text-slate-700 space-y-2">
+          <div>
+            当前身份：
+            <span v-if="opsRbacMe.isOwner" class="font-semibold text-slate-900">workspace owner</span>
+            <span v-else-if="opsRbacMe.role" class="font-semibold text-slate-900">{{ opsRbacMe.role }}</span>
+            <span v-else class="font-semibold text-slate-900">普通成员（未分配 Ops 角色）</span>
+          </div>
+          <div class="flex flex-wrap gap-2">
+            <span class="px-2 py-1 rounded bg-white border">
+              场次管理: {{ canDebateManage ? 'yes' : 'no' }}
+            </span>
+            <span class="px-2 py-1 rounded bg-white border">
+              判决审阅: {{ canJudgeReview ? 'yes' : 'no' }}
+            </span>
+            <span class="px-2 py-1 rounded bg-white border">
+              复核触发: {{ canJudgeRejudge ? 'yes' : 'no' }}
+            </span>
+            <span class="px-2 py-1 rounded bg-white border">
+              角色管理: {{ canRoleManage ? 'yes' : 'no' }}
+            </span>
+          </div>
+        </div>
+
         <div class="bg-white border rounded-lg p-4 space-y-3">
           <div class="flex items-start justify-between gap-3">
             <div>
@@ -31,7 +54,7 @@
             </div>
             <button
               @click="refreshRoleAssignments"
-              :disabled="roleLoading"
+              :disabled="roleLoading || !canRoleManage"
               class="px-3 py-1 rounded border text-xs bg-white hover:bg-gray-100 disabled:opacity-50"
             >
               {{ roleLoading ? '刷新中...' : '刷新角色列表' }}
@@ -56,7 +79,7 @@
             </select>
             <button
               @click="upsertRoleAssignment"
-              :disabled="roleLoading || !roleForm.userId"
+              :disabled="roleLoading || !canRoleManage || !roleForm.userId"
               class="px-3 py-2 rounded bg-slate-700 text-white text-sm disabled:opacity-50"
             >
               {{ roleLoading ? '处理中...' : '授予/更新角色' }}
@@ -83,7 +106,7 @@
                   <td class="py-2 pr-3">
                     <button
                       @click="revokeRoleAssignment(item.userId)"
-                      :disabled="roleLoading"
+                      :disabled="roleLoading || !canRoleManage"
                       class="px-2 py-1 rounded border border-rose-300 bg-rose-50 text-rose-700 hover:bg-rose-100 disabled:opacity-50"
                     >
                       撤销
@@ -127,7 +150,7 @@
             />
             <button
               @click="createTopic"
-              :disabled="createTopicLoading"
+              :disabled="createTopicLoading || !canDebateManage"
               class="px-3 py-2 rounded bg-emerald-600 text-white text-sm disabled:opacity-50"
             >
               {{ createTopicLoading ? '创建中...' : '创建辩题' }}
@@ -174,7 +197,7 @@
             </div>
             <button
               @click="createSession"
-              :disabled="createSessionLoading"
+              :disabled="createSessionLoading || !canDebateManage"
               class="px-3 py-2 rounded bg-indigo-600 text-white text-sm disabled:opacity-50"
             >
               {{ createSessionLoading ? '创建中...' : '创建场次' }}
@@ -217,7 +240,7 @@
             />
             <button
               @click="updateTopic"
-              :disabled="updateTopicLoading || !topicEditForm.topicId"
+              :disabled="updateTopicLoading || !canDebateManage || !topicEditForm.topicId"
               class="px-3 py-2 rounded bg-amber-600 text-white text-sm disabled:opacity-50"
             >
               {{ updateTopicLoading ? '保存中...' : '保存辩题' }}
@@ -269,7 +292,7 @@
             <div class="flex flex-wrap gap-2">
               <button
                 @click="updateSession"
-                :disabled="updateSessionLoading || !sessionEditForm.sessionId"
+                :disabled="updateSessionLoading || !canDebateManage || !sessionEditForm.sessionId"
                 class="px-3 py-2 rounded bg-violet-600 text-white text-sm disabled:opacity-50"
               >
                 {{ updateSessionLoading ? '保存中...' : '保存场次' }}
@@ -327,7 +350,7 @@
                     <button
                       v-if="hasRecommendedAction(item)"
                       @click="applyRecommendedAction(item)"
-                      :disabled="quickUpdateSessionId === item.id"
+                      :disabled="quickUpdateSessionId === item.id || !canDebateManage"
                       class="px-2 py-1 rounded border border-emerald-300 text-xs bg-emerald-50 text-emerald-700 hover:bg-emerald-100 disabled:opacity-50"
                     >
                       {{ quickUpdateSessionId === item.id ? '处理中...' : recommendedActionLabel(item) }}
@@ -346,7 +369,7 @@
                         v-for="nextStatus in nextQuickStatusActions(item.status)"
                         :key="`${item.id}-${nextStatus}`"
                         @click="quickUpdateSessionStatus(item, nextStatus)"
-                        :disabled="quickUpdateSessionId === item.id"
+                        :disabled="quickUpdateSessionId === item.id || !canDebateManage"
                         class="px-2 py-1 rounded border border-gray-300 text-xs bg-white hover:bg-gray-100 disabled:opacity-50"
                       >
                         {{ quickUpdateSessionId === item.id ? '处理中...' : `设为 ${nextStatus}` }}
@@ -372,7 +395,7 @@
             </div>
             <button
               @click="refreshJudgeReviews"
-              :disabled="reviewLoading"
+              :disabled="reviewLoading || !canJudgeReview"
               class="px-3 py-1 rounded border text-xs bg-white hover:bg-gray-100 disabled:opacity-50"
             >
               {{ reviewLoading ? '刷新中...' : '刷新审阅列表' }}
@@ -458,7 +481,7 @@
                       </button>
                       <button
                         @click="triggerJudgeRejudge(row.sessionId)"
-                        :disabled="rejudgeReviewSessionId === row.sessionId"
+                        :disabled="rejudgeReviewSessionId === row.sessionId || !canJudgeRejudge"
                         class="px-2 py-1 rounded border border-amber-300 bg-amber-50 text-amber-700 hover:bg-amber-100 disabled:opacity-50"
                       >
                         {{ rejudgeReviewSessionId === row.sessionId ? '处理中...' : '触发复核' }}
@@ -487,6 +510,11 @@ import {
   getOpsSessionWindowState,
   nextQuickStatusActions as resolveNextQuickStatusActions,
 } from '../debate-ops-utils';
+import {
+  emptyOpsRbacMe,
+  normalizeOpsRbacMe,
+  resolveOpsErrorText,
+} from '../ops-permission-utils';
 
 function toLocalInputValue(date) {
   const d = new Date(date);
@@ -561,6 +589,7 @@ export default {
         scannedCount: 0,
         returnedCount: 0,
       },
+      opsRbacMe: emptyOpsRbacMe(),
       roleForm: {
         userId: '',
         role: 'ops_reviewer',
@@ -594,7 +623,28 @@ export default {
       sessionEditForm: emptySessionEditForm(now),
     };
   },
+  computed: {
+    canDebateManage() {
+      return !!this.opsRbacMe?.permissions?.debateManage;
+    },
+    canJudgeReview() {
+      return !!this.opsRbacMe?.permissions?.judgeReview;
+    },
+    canJudgeRejudge() {
+      return !!this.opsRbacMe?.permissions?.judgeRejudge;
+    },
+    canRoleManage() {
+      return !!this.opsRbacMe?.permissions?.roleManage;
+    },
+  },
   methods: {
+    resolveErrorText(error, fallback) {
+      return resolveOpsErrorText(error, fallback);
+    },
+    async syncOpsRbacSnapshot() {
+      const ret = await this.$store.dispatch('getOpsRbacMe');
+      this.opsRbacMe = normalizeOpsRbacMe(ret);
+    },
     formatDateTime(value) {
       if (!value) {
         return '-';
@@ -646,18 +696,27 @@ export default {
       return `${user.fullname || 'unknown'} (#${id})`;
     },
     async refreshRoleAssignments() {
+      if (!this.canRoleManage) {
+        this.roleAssignments = [];
+        this.roleErrorText = '仅 workspace owner 可管理 Ops 角色';
+        return;
+      }
       this.roleLoading = true;
       this.roleErrorText = '';
       try {
         const response = await this.$store.dispatch('listOpsRoleAssignments');
         this.roleAssignments = Array.isArray(response?.items) ? response.items : [];
       } catch (error) {
-        this.roleErrorText = error?.response?.data?.error || error?.message || '加载角色列表失败';
+        this.roleErrorText = this.resolveErrorText(error, '加载角色列表失败');
       } finally {
         this.roleLoading = false;
       }
     },
     async upsertRoleAssignment() {
+      if (!this.canRoleManage) {
+        this.roleErrorText = '仅 workspace owner 可管理 Ops 角色';
+        return;
+      }
       const userId = Number(this.roleForm.userId || 0);
       if (!userId) {
         return;
@@ -671,12 +730,16 @@ export default {
         });
         await this.refreshRoleAssignments();
       } catch (error) {
-        this.roleErrorText = error?.response?.data?.error || error?.message || '授予角色失败';
+        this.roleErrorText = this.resolveErrorText(error, '授予角色失败');
       } finally {
         this.roleLoading = false;
       }
     },
     async revokeRoleAssignment(userIdRaw) {
+      if (!this.canRoleManage) {
+        this.roleErrorText = '仅 workspace owner 可管理 Ops 角色';
+        return;
+      }
       const userId = Number(userIdRaw || 0);
       if (!userId) {
         return;
@@ -687,7 +750,7 @@ export default {
         await this.$store.dispatch('revokeOpsRoleAssignment', { userId });
         await this.refreshRoleAssignments();
       } catch (error) {
-        this.roleErrorText = error?.response?.data?.error || error?.message || '撤销角色失败';
+        this.roleErrorText = this.resolveErrorText(error, '撤销角色失败');
       } finally {
         this.roleLoading = false;
       }
@@ -711,6 +774,15 @@ export default {
       };
     },
     async refreshJudgeReviews() {
+      if (!this.canJudgeReview) {
+        this.reviewRows = [];
+        this.reviewMeta = {
+          scannedCount: 0,
+          returnedCount: 0,
+        };
+        this.reviewErrorText = '当前账号没有判决审阅权限';
+        return;
+      }
       this.reviewLoading = true;
       this.reviewErrorText = '';
       try {
@@ -722,12 +794,16 @@ export default {
           returnedCount: Number(response?.returnedCount || this.reviewRows.length),
         };
       } catch (error) {
-        this.reviewErrorText = error?.response?.data?.error || error?.message || '加载判决审阅列表失败';
+        this.reviewErrorText = this.resolveErrorText(error, '加载判决审阅列表失败');
       } finally {
         this.reviewLoading = false;
       }
     },
     async triggerJudgeRejudge(sessionIdRaw) {
+      if (!this.canJudgeRejudge) {
+        this.reviewErrorText = '当前账号没有触发复核权限';
+        return;
+      }
       const sessionId = Number(sessionIdRaw);
       if (!sessionId) {
         return;
@@ -738,7 +814,7 @@ export default {
         await this.$store.dispatch('requestJudgeRejudgeOps', { sessionId });
         await this.refreshJudgeReviews();
       } catch (error) {
-        this.reviewErrorText = error?.response?.data?.error || error?.message || '触发复核失败';
+        this.reviewErrorText = this.resolveErrorText(error, '触发复核失败');
       } finally {
         this.rejudgeReviewSessionId = 0;
       }
@@ -846,11 +922,16 @@ export default {
       this.loading = true;
       this.errorText = '';
       try {
+        await this.syncOpsRbacSnapshot();
         const [topics, sessions, reviews, roleAssignments] = await Promise.all([
           this.$store.dispatch('listDebateTopics', { activeOnly: false, limit: 200 }),
           this.$store.dispatch('listDebateSessions', { limit: 200 }),
-          this.$store.dispatch('listJudgeReviewsOps', this.buildJudgeReviewPayload()),
-          this.$store.dispatch('listOpsRoleAssignments'),
+          this.canJudgeReview
+            ? this.$store.dispatch('listJudgeReviewsOps', this.buildJudgeReviewPayload())
+            : Promise.resolve({ scannedCount: 0, returnedCount: 0, items: [] }),
+          this.canRoleManage
+            ? this.$store.dispatch('listOpsRoleAssignments')
+            : Promise.resolve({ items: [] }),
         ]);
         this.topics = topics || [];
         this.sessions = sessions || [];
@@ -860,8 +941,8 @@ export default {
           scannedCount: Number(reviews?.scannedCount || 0),
           returnedCount: Number(reviews?.returnedCount || this.reviewRows.length),
         };
-        this.reviewErrorText = '';
-        this.roleErrorText = '';
+        this.reviewErrorText = this.canJudgeReview ? '' : '当前账号没有判决审阅权限';
+        this.roleErrorText = this.canRoleManage ? '' : '仅 workspace owner 可管理 Ops 角色';
         if (!this.topicEditForm.topicId && this.topics.length > 0) {
           this.topicEditForm.topicId = String(this.topics[0].id);
         }
@@ -871,7 +952,7 @@ export default {
         this.syncTopicEditFormFromId(this.topicEditForm.topicId);
         this.syncSessionEditFormFromId(this.sessionEditForm.sessionId);
       } catch (error) {
-        this.errorText = error?.response?.data?.error || error?.message || '刷新失败';
+        this.errorText = this.resolveErrorText(error, '刷新失败');
       } finally {
         this.loading = false;
       }
@@ -886,6 +967,10 @@ export default {
       await this.upsertTopic('update');
     },
     async upsertTopic(mode = 'create') {
+      if (!this.canDebateManage) {
+        this.errorText = '当前账号没有场次管理权限';
+        return;
+      }
       const isCreate = mode === 'create';
       if (!isCreate && !this.topicEditForm.topicId) {
         return;
@@ -924,8 +1009,7 @@ export default {
         }
         await this.refreshData();
       } catch (error) {
-        this.errorText =
-          error?.response?.data?.error || error?.message || (isCreate ? '创建辩题失败' : '更新辩题失败');
+        this.errorText = this.resolveErrorText(error, isCreate ? '创建辩题失败' : '更新辩题失败');
       } finally {
         if (isCreate) {
           this.createTopicLoading = false;
@@ -938,6 +1022,10 @@ export default {
       await this.upsertSession('update');
     },
     async upsertSession(mode = 'create') {
+      if (!this.canDebateManage) {
+        this.errorText = '当前账号没有场次管理权限';
+        return;
+      }
       const isCreate = mode === 'create';
       if (!isCreate && !this.sessionEditForm.sessionId) {
         return;
@@ -975,8 +1063,7 @@ export default {
         }
         await this.refreshData();
       } catch (error) {
-        this.errorText =
-          error?.response?.data?.error || error?.message || (isCreate ? '创建场次失败' : '更新场次失败');
+        this.errorText = this.resolveErrorText(error, isCreate ? '创建场次失败' : '更新场次失败');
       } finally {
         if (isCreate) {
           this.createSessionLoading = false;
@@ -986,6 +1073,10 @@ export default {
       }
     },
     async quickUpdateSessionStatus(session, nextStatus) {
+      if (!this.canDebateManage) {
+        this.errorText = '当前账号没有场次管理权限';
+        return;
+      }
       const sessionId = Number(session?.id || 0);
       if (!sessionId) {
         return;
@@ -997,7 +1088,7 @@ export default {
         await this.$store.dispatch('updateDebateSessionOps', payload);
         await this.refreshData();
       } catch (error) {
-        this.errorText = error?.response?.data?.error || error?.message || '快速更新场次状态失败';
+        this.errorText = this.resolveErrorText(error, '快速更新场次状态失败');
       } finally {
         this.quickUpdateSessionId = 0;
       }

@@ -77,6 +77,7 @@ export default createStore({
     sseReconnectTimer: null,
     latestJudgeReportEvent: null,
     latestDrawVoteResolvedEvent: null,
+    opsRbacMe: null,
   },
   mutations: {
     setSSE(state, sse) {
@@ -102,6 +103,9 @@ export default createStore({
     },
     setLatestDrawVoteResolvedEvent(state, event) {
       state.latestDrawVoteResolvedEvent = event;
+    },
+    setOpsRbacMe(state, payload) {
+      state.opsRbacMe = payload;
     },
     setWorkspace(state, workspace) {
       state.workspace = workspace;
@@ -273,6 +277,7 @@ export default createStore({
       commit('setChannels', []);
       commit('setLatestJudgeReportEvent', null);
       commit('setLatestDrawVoteResolvedEvent', null);
+      commit('setOpsRbacMe', null);
 
       // close SSE
       this.dispatch('closeSSE');
@@ -446,6 +451,14 @@ export default createStore({
         Authorization: `Bearer ${state.token}`,
       });
       return response.data || { items: [] };
+    },
+    async getOpsRbacMe({ state, commit }) {
+      const response = await network(this, 'get', '/debate/ops/rbac/me', null, {
+        Authorization: `Bearer ${state.token}`,
+      });
+      const payload = response.data || null;
+      commit('setOpsRbacMe', payload);
+      return payload;
     },
     async upsertOpsRoleAssignment({ state }, { userId, role } = {}) {
       if (!userId) {
@@ -1058,6 +1071,9 @@ export default createStore({
     },
     getLatestDrawVoteResolvedEvent(state) {
       return state.latestDrawVoteResolvedEvent;
+    },
+    getOpsRbacMe(state) {
+      return state.opsRbacMe;
     },
   },
 });

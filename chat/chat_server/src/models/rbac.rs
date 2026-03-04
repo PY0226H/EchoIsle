@@ -16,6 +16,22 @@ pub(crate) enum OpsPermission {
     JudgeRejudge,
 }
 
+fn permission_key(permission: OpsPermission) -> &'static str {
+    match permission {
+        OpsPermission::DebateManage => "debate_manage",
+        OpsPermission::JudgeReview => "judge_review",
+        OpsPermission::JudgeRejudge => "judge_rejudge",
+    }
+}
+
+fn permission_denied(permission: OpsPermission, reason: &str) -> AppError {
+    AppError::DebateConflict(format!(
+        "ops_permission_denied:{}:{}",
+        permission_key(permission),
+        reason
+    ))
+}
+
 #[derive(Debug, Clone, ToSchema, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UpsertOpsRoleInput {
@@ -45,6 +61,25 @@ pub struct ListOpsRoleAssignmentsOutput {
 pub struct RevokeOpsRoleOutput {
     pub user_id: u64,
     pub removed: bool,
+}
+
+#[derive(Debug, Clone, ToSchema, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OpsPermissionFlags {
+    pub debate_manage: bool,
+    pub judge_review: bool,
+    pub judge_rejudge: bool,
+    pub role_manage: bool,
+}
+
+#[derive(Debug, Clone, ToSchema, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GetOpsRbacMeOutput {
+    pub user_id: u64,
+    pub ws_id: u64,
+    pub is_owner: bool,
+    pub role: Option<String>,
+    pub permissions: OpsPermissionFlags,
 }
 
 #[derive(Debug, Clone, FromRow)]
@@ -95,23 +130,23 @@ fn map_assignment_row(row: OpsRoleAssignmentRow) -> OpsRoleAssignment {
 }
 
 impl AppState {
-    pub(crate) async fn ensure_ops_permission(
-        &self,
-        user: &User,
-        permission: OpsPermission,
-    ) -> Result<(), AppError> {
+    async fn get_workspace_owner_id(&self, ws_id: i64) -> Result<i64, AppError> {
         let owner_row: Option<(i64,)> =
             sqlx::query_as("SELECT owner_id FROM workspaces WHERE id = $1")
-                .bind(user.ws_id)
+                .bind(ws_id)
                 .fetch_optional(&self.pool)
                 .await?;
         let Some((owner_id,)) = owner_row else {
-            return Err(AppError::NotFound(format!("workspace id {}", user.ws_id)));
+            return Err(AppError::NotFound(format!("workspace id {ws_id}")));
         };
-        if owner_id == user.id {
-            return Ok(());
-        }
+        Ok(owner_id)
+    }
 
+    async fn find_ops_role_for_user(
+        &self,
+        ws_id: i64,
+        user_id: i64,
+    ) -> Result<Option<String>, AppError> {
         let role_row: Option<(String,)> = sqlx::query_as(
             r#"
             SELECT role
@@ -119,36 +154,85 @@ impl AppState {
             WHERE ws_id = $1 AND user_id = $2
             "#,
         )
-        .bind(user.ws_id)
-        .bind(user.id)
+        .bind(ws_id)
+        .bind(user_id)
         .fetch_optional(&self.pool)
         .await?;
-        let Some((role,)) = role_row else {
-            return Err(AppError::DebateConflict(
-                "missing ops role assignment".to_string(),
-            ));
+        Ok(role_row.map(|v| v.0))
+    }
+
+    pub async fn get_ops_rbac_me(&self, user: &User) -> Result<GetOpsRbacMeOutput, AppError> {
+        let owner_id = self.get_workspace_owner_id(user.ws_id).await?;
+        if owner_id == user.id {
+            return Ok(GetOpsRbacMeOutput {
+                user_id: user.id as u64,
+                ws_id: user.ws_id as u64,
+                is_owner: true,
+                role: None,
+                permissions: OpsPermissionFlags {
+                    debate_manage: true,
+                    judge_review: true,
+                    judge_rejudge: true,
+                    role_manage: true,
+                },
+            });
+        }
+
+        let role = self.find_ops_role_for_user(user.ws_id, user.id).await?;
+        let permissions = if let Some(role_value) = role.as_deref() {
+            OpsPermissionFlags {
+                debate_manage: role_grants_permission(role_value, OpsPermission::DebateManage),
+                judge_review: role_grants_permission(role_value, OpsPermission::JudgeReview),
+                judge_rejudge: role_grants_permission(role_value, OpsPermission::JudgeRejudge),
+                role_manage: false,
+            }
+        } else {
+            OpsPermissionFlags {
+                debate_manage: false,
+                judge_review: false,
+                judge_rejudge: false,
+                role_manage: false,
+            }
+        };
+
+        Ok(GetOpsRbacMeOutput {
+            user_id: user.id as u64,
+            ws_id: user.ws_id as u64,
+            is_owner: false,
+            role,
+            permissions,
+        })
+    }
+
+    pub(crate) async fn ensure_ops_permission(
+        &self,
+        user: &User,
+        permission: OpsPermission,
+    ) -> Result<(), AppError> {
+        let owner_id = self.get_workspace_owner_id(user.ws_id).await?;
+        if owner_id == user.id {
+            return Ok(());
+        }
+
+        let role = self.find_ops_role_for_user(user.ws_id, user.id).await?;
+        let Some(role) = role else {
+            return Err(permission_denied(permission, "missing ops role assignment"));
         };
         if !role_grants_permission(&role, permission) {
-            return Err(AppError::DebateConflict(format!(
-                "ops role {} cannot access this operation",
-                role
-            )));
+            return Err(permission_denied(
+                permission,
+                format!("ops role {} cannot access this operation", role).as_str(),
+            ));
         }
         Ok(())
     }
 
     async fn ensure_workspace_owner_for_ops_rbac(&self, user: &User) -> Result<(), AppError> {
-        let owner_row: Option<(i64,)> =
-            sqlx::query_as("SELECT owner_id FROM workspaces WHERE id = $1")
-                .bind(user.ws_id)
-                .fetch_optional(&self.pool)
-                .await?;
-        let Some((owner_id,)) = owner_row else {
-            return Err(AppError::NotFound(format!("workspace id {}", user.ws_id)));
-        };
+        let owner_id = self.get_workspace_owner_id(user.ws_id).await?;
         if owner_id != user.id {
             return Err(AppError::DebateConflict(
-                "only workspace owner can manage ops roles".to_string(),
+                "ops_permission_denied:role_manage:only workspace owner can manage ops roles"
+                    .to_string(),
             ));
         }
         Ok(())
@@ -320,12 +404,58 @@ mod tests {
             .ensure_ops_permission(&user, OpsPermission::DebateManage)
             .await
             .expect_err("viewer should not manage debate");
-        assert!(matches!(manage_err, AppError::DebateConflict(_)));
+        match manage_err {
+            AppError::DebateConflict(msg) => {
+                assert!(msg.contains("ops_permission_denied:debate_manage:"))
+            }
+            other => panic!("unexpected error: {}", other),
+        }
         let rejudge_err = state
             .ensure_ops_permission(&user, OpsPermission::JudgeRejudge)
             .await
             .expect_err("viewer should not rejudge");
-        assert!(matches!(rejudge_err, AppError::DebateConflict(_)));
+        match rejudge_err {
+            AppError::DebateConflict(msg) => {
+                assert!(msg.contains("ops_permission_denied:judge_rejudge:"))
+            }
+            other => panic!("unexpected error: {}", other),
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn get_ops_rbac_me_should_return_permissions_snapshot() -> Result<()> {
+        let (_tdb, state) = AppState::new_for_test().await?;
+        state.update_workspace_owner(1, 1).await?;
+        let owner = state.find_user_by_id(1).await?.expect("owner should exist");
+        let viewer = state
+            .find_user_by_id(2)
+            .await?
+            .expect("viewer should exist");
+
+        let owner_snapshot = state.get_ops_rbac_me(&owner).await?;
+        assert!(owner_snapshot.is_owner);
+        assert!(owner_snapshot.permissions.debate_manage);
+        assert!(owner_snapshot.permissions.judge_review);
+        assert!(owner_snapshot.permissions.judge_rejudge);
+        assert!(owner_snapshot.permissions.role_manage);
+
+        state
+            .upsert_ops_role_assignment_by_owner(
+                &owner,
+                viewer.id as u64,
+                UpsertOpsRoleInput {
+                    role: "ops_viewer".to_string(),
+                },
+            )
+            .await?;
+        let viewer_snapshot = state.get_ops_rbac_me(&viewer).await?;
+        assert!(!viewer_snapshot.is_owner);
+        assert_eq!(viewer_snapshot.role.as_deref(), Some("ops_viewer"));
+        assert!(!viewer_snapshot.permissions.debate_manage);
+        assert!(viewer_snapshot.permissions.judge_review);
+        assert!(!viewer_snapshot.permissions.judge_rejudge);
+        assert!(!viewer_snapshot.permissions.role_manage);
         Ok(())
     }
 

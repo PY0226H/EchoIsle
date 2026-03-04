@@ -162,6 +162,25 @@ pub(crate) async fn list_ops_role_assignments_handler(
     Ok((StatusCode::OK, Json(ret)))
 }
 
+/// Get current user's ops RBAC capability snapshot.
+#[utoipa::path(
+    get,
+    path = "/api/debate/ops/rbac/me",
+    responses(
+        (status = 200, description = "Current ops RBAC capabilities", body = crate::GetOpsRbacMeOutput),
+    ),
+    security(
+        ("token" = [])
+    )
+)]
+pub(crate) async fn get_ops_rbac_me_handler(
+    Extension(user): Extension<User>,
+    State(state): State<AppState>,
+) -> Result<impl IntoResponse, AppError> {
+    let ret = state.get_ops_rbac_me(&user).await?;
+    Ok((StatusCode::OK, Json(ret)))
+}
+
 /// Upsert an ops role assignment (owner only).
 #[utoipa::path(
     put,
@@ -878,6 +897,71 @@ mod tests {
         let revoke_body = revoke_resp.into_body().collect().await?.to_bytes();
         let revoke_json: serde_json::Value = serde_json::from_slice(&revoke_body)?;
         assert_eq!(revoke_json["removed"], true);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn get_ops_rbac_me_handler_should_return_owner_and_role_snapshot() -> Result<()> {
+        let (_tdb, state) = AppState::new_for_test().await?;
+        state.update_workspace_owner(1, 1).await?;
+        let owner = state.find_user_by_id(1).await?.expect("owner should exist");
+        let viewer = state
+            .find_user_by_id(2)
+            .await?
+            .expect("viewer should exist");
+
+        state
+            .upsert_ops_role_assignment_by_owner(
+                &owner,
+                viewer.id as u64,
+                UpsertOpsRoleInput {
+                    role: "ops_viewer".to_string(),
+                },
+            )
+            .await?;
+
+        let owner_resp = get_ops_rbac_me_handler(Extension(owner), State(state.clone()))
+            .await?
+            .into_response();
+        assert_eq!(owner_resp.status(), StatusCode::OK);
+        let owner_body = owner_resp.into_body().collect().await?.to_bytes();
+        let owner_json: serde_json::Value = serde_json::from_slice(&owner_body)?;
+        assert_eq!(owner_json["isOwner"], true);
+        assert_eq!(owner_json["permissions"]["debateManage"], true);
+        assert_eq!(owner_json["permissions"]["judgeReview"], true);
+        assert_eq!(owner_json["permissions"]["judgeRejudge"], true);
+        assert_eq!(owner_json["permissions"]["roleManage"], true);
+
+        let viewer_resp = get_ops_rbac_me_handler(Extension(viewer), State(state))
+            .await?
+            .into_response();
+        assert_eq!(viewer_resp.status(), StatusCode::OK);
+        let viewer_body = viewer_resp.into_body().collect().await?.to_bytes();
+        let viewer_json: serde_json::Value = serde_json::from_slice(&viewer_body)?;
+        assert_eq!(viewer_json["isOwner"], false);
+        assert_eq!(viewer_json["role"], "ops_viewer");
+        assert_eq!(viewer_json["permissions"]["debateManage"], false);
+        assert_eq!(viewer_json["permissions"]["judgeReview"], true);
+        assert_eq!(viewer_json["permissions"]["judgeRejudge"], false);
+        assert_eq!(viewer_json["permissions"]["roleManage"], false);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn list_ops_role_assignments_handler_should_return_standardized_denied_error_for_non_owner(
+    ) -> Result<()> {
+        let (_tdb, state) = AppState::new_for_test().await?;
+        state.update_workspace_owner(1, 1).await?;
+        let non_owner = state.find_user_by_id(2).await?.expect("user should exist");
+
+        let result = list_ops_role_assignments_handler(Extension(non_owner), State(state)).await;
+        match result {
+            Ok(_) => panic!("non owner should be rejected"),
+            Err(AppError::DebateConflict(msg)) => {
+                assert!(msg.starts_with("ops_permission_denied:role_manage:"));
+            }
+            Err(other) => panic!("unexpected error: {}", other),
+        }
         Ok(())
     }
 }

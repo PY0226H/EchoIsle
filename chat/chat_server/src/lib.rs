@@ -94,6 +94,7 @@ pub async fn get_router(state: AppState) -> Result<Router, AppError> {
         .route("/ops/topics/:id", put(update_debate_topic_ops_handler))
         .route("/ops/sessions", post(create_debate_session_ops_handler))
         .route("/ops/sessions/:id", put(update_debate_session_ops_handler))
+        .route("/ops/rbac/me", get(get_ops_rbac_me_handler))
         .route("/ops/rbac/roles", get(list_ops_role_assignments_handler))
         .route(
             "/ops/rbac/roles/:user_id",

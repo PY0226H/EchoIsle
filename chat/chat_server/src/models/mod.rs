@@ -37,7 +37,8 @@ pub use payment::{
 };
 pub(crate) use rbac::OpsPermission;
 pub use rbac::{
-    ListOpsRoleAssignmentsOutput, OpsRoleAssignment, RevokeOpsRoleOutput, UpsertOpsRoleInput,
+    GetOpsRbacMeOutput, ListOpsRoleAssignmentsOutput, OpsPermissionFlags, OpsRoleAssignment,
+    RevokeOpsRoleOutput, UpsertOpsRoleInput,
 };
 use serde::{Deserialize, Serialize};
 pub use user::{CreateUser, SigninUser};
