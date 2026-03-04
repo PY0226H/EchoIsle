@@ -140,6 +140,7 @@ pub struct DrawVoteDetail {
     pub report_id: u64,
     pub status: String,
     pub resolution: String,
+    pub decision_source: String,
     pub threshold_percent: i32,
     pub eligible_voters: i32,
     pub required_voters: i32,

@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import {
   drawVoteChoiceText,
+  drawVoteDecisionSourceText,
   drawVoteResolutionText,
   isDrawVoteOpen,
   mergeJudgeReportWindow,
@@ -58,6 +59,9 @@ assert.equal(isDrawVoteOpen({ status: 'decided' }), false);
 assert.equal(drawVoteResolutionText('accept_draw'), '用户同意平局，不开启二番战');
 assert.equal(drawVoteResolutionText('open_rematch'), '用户不同意平局，将开启二番战');
 assert.equal(drawVoteResolutionText(''), '暂无决议');
+assert.equal(drawVoteDecisionSourceText('threshold_reached'), '达到投票门槛后完成判定');
+assert.equal(drawVoteDecisionSourceText('vote_timeout'), '投票超时后完成判定');
+assert.equal(drawVoteDecisionSourceText(''), '投票进行中，尚未完成判定');
 assert.equal(drawVoteChoiceText(true), '已投：同意平局');
 assert.equal(drawVoteChoiceText(false), '已投：不同意平局');
 assert.equal(drawVoteChoiceText(undefined), '你还未投票');

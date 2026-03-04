@@ -281,6 +281,10 @@
                   投票截止时间：{{ formatDateTime(drawVote.votingEndsAt) }}
                 </div>
 
+                <div class="text-xs text-gray-500">
+                  判定来源：{{ drawVoteDecisionSourceText(drawVote.decisionSource) }}
+                </div>
+
                 <div v-if="canSubmitVote" class="flex flex-wrap gap-2">
                   <button
                     @click="submitVote(true)"
@@ -377,6 +381,7 @@
 import Sidebar from '../components/Sidebar.vue';
 import {
   drawVoteChoiceText as drawVoteChoiceTextLabel,
+  drawVoteDecisionSourceText as drawVoteDecisionSourceTextLabel,
   drawVoteResolutionText as drawVoteResolutionLabel,
   isDrawVoteOpen,
   mergeJudgeReportWindow,
@@ -527,6 +532,9 @@ export default {
     },
     drawVoteChoiceText(myVote) {
       return drawVoteChoiceTextLabel(myVote);
+    },
+    drawVoteDecisionSourceText(decisionSource) {
+      return drawVoteDecisionSourceTextLabel(decisionSource);
     },
     drawVoteResolutionText(resolution) {
       return drawVoteResolutionLabel(resolution);

@@ -121,6 +121,9 @@
               <div class="text-xs text-gray-700">
                 投票截止：{{ formatDateTime(drawVote.votingEndsAt) }}
               </div>
+              <div class="text-xs text-gray-700">
+                判定来源：{{ drawVoteDecisionSourceText(drawVote.decisionSource) }}
+              </div>
               <div v-if="drawVoteStatus === 'open'" class="text-xs text-gray-700">
                 剩余时间：{{ drawVoteRemainingText }}
               </div>
@@ -264,6 +267,7 @@ import Sidebar from '../components/Sidebar.vue';
 import { getNotifyBase } from '../utils';
 import {
   drawVoteChoiceText as drawVoteChoiceTextLabel,
+  drawVoteDecisionSourceText as drawVoteDecisionSourceTextLabel,
   drawVoteResolutionText as drawVoteResolutionTextLabel,
 } from '../judge-report-utils';
 import {
@@ -486,6 +490,9 @@ export default {
     },
     drawVoteChoiceText(myVote) {
       return drawVoteChoiceTextLabel(myVote);
+    },
+    drawVoteDecisionSourceText(decisionSource) {
+      return drawVoteDecisionSourceTextLabel(decisionSource);
     },
     drawVoteResolutionText(resolution) {
       return drawVoteResolutionTextLabel(resolution);

@@ -63,6 +63,17 @@ export function drawVoteResolutionText(resolution) {
   }
 }
 
+export function drawVoteDecisionSourceText(decisionSource) {
+  switch (String(decisionSource || '')) {
+    case 'threshold_reached':
+      return '达到投票门槛后完成判定';
+    case 'vote_timeout':
+      return '投票超时后完成判定';
+    default:
+      return '投票进行中，尚未完成判定';
+  }
+}
+
 export function drawVoteChoiceText(agreeDraw) {
   if (agreeDraw === true) {
     return '已投：同意平局';

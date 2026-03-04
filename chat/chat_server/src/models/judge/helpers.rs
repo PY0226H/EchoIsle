@@ -220,11 +220,13 @@ pub(super) fn map_draw_vote_detail(
     stats: DrawVoteStatsRow,
     my_vote: Option<bool>,
 ) -> DrawVoteDetail {
+    let decision_source = draw_vote_decision_source(&vote, &stats);
     DrawVoteDetail {
         vote_id: vote.id as u64,
         report_id: vote.report_id as u64,
         status: vote.status,
         resolution: vote.resolution,
+        decision_source: decision_source.to_string(),
         threshold_percent: vote.threshold_percent,
         eligible_voters: vote.eligible_voters,
         required_voters: vote.required_voters,
@@ -235,5 +237,16 @@ pub(super) fn map_draw_vote_detail(
         decided_at: vote.decided_at,
         my_vote,
         rematch_session_id: vote.rematch_session_id.map(|v| v as u64),
+    }
+}
+
+fn draw_vote_decision_source(vote: &DrawVoteRow, stats: &DrawVoteStatsRow) -> &'static str {
+    match vote.status.as_str() {
+        "decided" => "threshold_reached",
+        "expired" => "vote_timeout",
+        "open" => "pending",
+        _ if stats.participated_voters >= vote.required_voters => "threshold_reached",
+        _ if vote.decided_at.is_some() => "vote_timeout",
+        _ => "pending",
     }
 }

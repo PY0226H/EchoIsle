@@ -43,7 +43,7 @@ impl AppState {
         let Some((status, resolution)) = decision else {
             return Ok(vote);
         };
-        let vote = if resolution == "open_rematch" && vote.rematch_session_id.is_none() {
+        let vote = if resolution == "open_rematch" {
             Self::ensure_rematch_session_for_vote(tx, vote).await?
         } else {
             vote
@@ -88,41 +88,38 @@ impl AppState {
         tx: &mut Transaction<'_, Postgres>,
         vote: DrawVoteRow,
     ) -> Result<DrawVoteRow, AppError> {
-        if vote.rematch_session_id.is_some() {
-            return Ok(vote);
-        }
+        let source: DebateSessionForRematch = sqlx::query_as(
+            r#"
+            SELECT
+                id, ws_id, topic_id, scheduled_start_at, actual_start_at, end_at,
+                max_participants_per_side, rematch_round
+            FROM debate_sessions
+            WHERE id = $1
+            FOR UPDATE
+            "#,
+        )
+        .bind(vote.session_id)
+        .fetch_one(&mut **tx)
+        .await?;
+        let (scheduled_start_at, end_at, next_round) = Self::rematch_schedule_from_source(&source);
 
         let existing: Option<(i64,)> = sqlx::query_as(
             r#"
             SELECT id
             FROM debate_sessions
-            WHERE parent_session_id = $1
-            ORDER BY rematch_round DESC, created_at DESC
+            WHERE parent_session_id = $1 AND rematch_round = $2
+            ORDER BY created_at DESC
             LIMIT 1
             "#,
         )
-        .bind(vote.session_id)
+        .bind(source.id)
+        .bind(next_round)
         .fetch_optional(&mut **tx)
         .await?;
 
         let rematch_session_id = if let Some((session_id,)) = existing {
             session_id
         } else {
-            let source: DebateSessionForRematch = sqlx::query_as(
-                r#"
-                SELECT
-                    id, ws_id, topic_id, scheduled_start_at, actual_start_at, end_at,
-                    max_participants_per_side, rematch_round
-                FROM debate_sessions
-                WHERE id = $1
-                FOR UPDATE
-                "#,
-            )
-            .bind(vote.session_id)
-            .fetch_one(&mut **tx)
-            .await?;
-            let (scheduled_start_at, end_at, next_round) =
-                Self::rematch_schedule_from_source(&source);
             let rematch_id: (i64,) = sqlx::query_as(
                 r#"
                 INSERT INTO debate_sessions(
@@ -149,6 +146,10 @@ impl AppState {
             .await?;
             rematch_id.0
         };
+
+        if vote.rematch_session_id == Some(rematch_session_id) {
+            return Ok(vote);
+        }
 
         let updated: DrawVoteRow = sqlx::query_as(
             r#"
@@ -284,7 +285,7 @@ impl AppState {
 
         let stats = Self::load_draw_vote_stats(&mut tx, vote.id).await?;
         let mut vote = Self::maybe_finalize_draw_vote(&mut tx, vote, &stats).await?;
-        if vote.resolution == "open_rematch" && vote.rematch_session_id.is_none() {
+        if vote.resolution == "open_rematch" {
             vote = Self::ensure_rematch_session_for_vote(&mut tx, vote).await?;
         }
         let my_vote: Option<(bool,)> = sqlx::query_as(
@@ -429,7 +430,7 @@ impl AppState {
 
         let stats = Self::load_draw_vote_stats(&mut tx, vote.id).await?;
         let mut vote = Self::maybe_finalize_draw_vote(&mut tx, vote, &stats).await?;
-        if vote.resolution == "open_rematch" && vote.rematch_session_id.is_none() {
+        if vote.resolution == "open_rematch" {
             vote = Self::ensure_rematch_session_for_vote(&mut tx, vote).await?;
         }
 
