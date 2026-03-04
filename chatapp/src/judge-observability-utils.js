@@ -3,28 +3,110 @@ function toNumber(value, fallback = 0) {
   return Number.isFinite(n) ? n : fallback;
 }
 
+export const DEFAULT_OBSERVABILITY_THRESHOLDS = {
+  lowSuccessRateThreshold: 80,
+  highRetryThreshold: 1,
+  highCoalescedThreshold: 2,
+  highDbLatencyThresholdMs: 1200,
+  lowCacheHitRateThreshold: 20,
+  minRequestForCacheHitCheck: 20,
+};
+
+function clampFloat(value, min, max, fallback) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) {
+    return fallback;
+  }
+  return Math.min(max, Math.max(min, n));
+}
+
+function clampInt(value, min, max, fallback) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) {
+    return fallback;
+  }
+  const v = Math.trunc(n);
+  return Math.min(max, Math.max(min, v));
+}
+
+export function normalizeObservabilityThresholds(input = {}) {
+  return {
+    lowSuccessRateThreshold: clampFloat(
+      input.lowSuccessRateThreshold,
+      1,
+      99.99,
+      DEFAULT_OBSERVABILITY_THRESHOLDS.lowSuccessRateThreshold,
+    ),
+    highRetryThreshold: clampFloat(
+      input.highRetryThreshold,
+      0.1,
+      10,
+      DEFAULT_OBSERVABILITY_THRESHOLDS.highRetryThreshold,
+    ),
+    highCoalescedThreshold: clampFloat(
+      input.highCoalescedThreshold,
+      0.1,
+      20,
+      DEFAULT_OBSERVABILITY_THRESHOLDS.highCoalescedThreshold,
+    ),
+    highDbLatencyThresholdMs: clampInt(
+      input.highDbLatencyThresholdMs,
+      1,
+      60_000,
+      DEFAULT_OBSERVABILITY_THRESHOLDS.highDbLatencyThresholdMs,
+    ),
+    lowCacheHitRateThreshold: clampFloat(
+      input.lowCacheHitRateThreshold,
+      0,
+      99.99,
+      DEFAULT_OBSERVABILITY_THRESHOLDS.lowCacheHitRateThreshold,
+    ),
+    minRequestForCacheHitCheck: clampInt(
+      input.minRequestForCacheHitCheck,
+      1,
+      1_000_000,
+      DEFAULT_OBSERVABILITY_THRESHOLDS.minRequestForCacheHitCheck,
+    ),
+  };
+}
+
 function topRowsByMetric(rows, predicate, limit = 3) {
   return rows
     .filter((row) => predicate(row))
     .slice(0, limit)
-    .map((row) => {
-      const sessionId = String(row?.debateSessionId || '-');
-      const source = String(row?.sourceEventType || '-');
-      return `session#${sessionId}/${source}`;
-    });
+    .map((row) => ({
+      sessionId: String(row?.debateSessionId || '-'),
+      source: String(row?.sourceEventType || '-'),
+      label: `session#${String(row?.debateSessionId || '-')}/${String(row?.sourceEventType || '-')}`,
+    }));
+}
+
+function pickSessionIds(rows = [], limit = 3) {
+  const ids = [];
+  rows.forEach((item) => {
+    const normalized = normalizeObservabilitySessionId(item?.sessionId);
+    if (!normalized) {
+      return;
+    }
+    if (!ids.includes(normalized)) {
+      ids.push(normalized);
+    }
+  });
+  return ids.slice(0, limit);
 }
 
 export function buildJudgeObservabilityAnomalies(
   { rows = [], metrics = {} } = {},
-  {
-    lowSuccessRateThreshold = 80,
-    highRetryThreshold = 1,
-    highCoalescedThreshold = 2,
-    highDbLatencyThresholdMs = 1200,
-    lowCacheHitRateThreshold = 20,
-    minRequestForCacheHitCheck = 20,
-  } = {},
+  inputThresholds = {},
 ) {
+  const {
+    lowSuccessRateThreshold,
+    highRetryThreshold,
+    highCoalescedThreshold,
+    highDbLatencyThresholdMs,
+    lowCacheHitRateThreshold,
+    minRequestForCacheHitCheck,
+  } = normalizeObservabilityThresholds(inputThresholds);
   const normalizedRows = Array.isArray(rows) ? rows : [];
   const anomalies = [];
 
@@ -33,6 +115,8 @@ export function buildJudgeObservabilityAnomalies(
       level: 'warning',
       code: 'summary_empty',
       text: '当前窗口暂无裁判刷新汇总数据，请确认 analytics 事件链路是否正常上报。',
+      action: 'refresh_summary',
+      sessionIds: [],
     });
   }
 
@@ -44,7 +128,9 @@ export function buildJudgeObservabilityAnomalies(
     anomalies.push({
       level: 'danger',
       code: 'low_success_rate',
-      text: `存在低成功率刷新链路：${lowSuccessRows.join(', ')}`,
+      text: `存在低成功率刷新链路：${lowSuccessRows.map((item) => item.label).join(', ')}`,
+      action: 'review_sessions',
+      sessionIds: pickSessionIds(lowSuccessRows),
     });
   }
 
@@ -56,7 +142,9 @@ export function buildJudgeObservabilityAnomalies(
     anomalies.push({
       level: 'warning',
       code: 'high_retry',
-      text: `存在高重试链路：${highRetryRows.join(', ')}`,
+      text: `存在高重试链路：${highRetryRows.map((item) => item.label).join(', ')}`,
+      action: 'review_sessions',
+      sessionIds: pickSessionIds(highRetryRows),
     });
   }
 
@@ -69,7 +157,9 @@ export function buildJudgeObservabilityAnomalies(
     anomalies.push({
       level: 'warning',
       code: 'high_coalesced',
-      text: `存在高合并事件链路：${highCoalescedRows.join(', ')}`,
+      text: `存在高合并事件链路：${highCoalescedRows.map((item) => item.label).join(', ')}`,
+      action: 'review_sessions',
+      sessionIds: pickSessionIds(highCoalescedRows),
     });
   }
 
@@ -79,6 +169,8 @@ export function buildJudgeObservabilityAnomalies(
       level: 'danger',
       code: 'db_errors',
       text: `summary 查询出现 DB 错误 ${dbErrorTotal} 次，请优先排查 analytics 查询链路。`,
+      action: 'refresh_metrics',
+      sessionIds: [],
     });
   }
 
@@ -88,6 +180,8 @@ export function buildJudgeObservabilityAnomalies(
       level: 'warning',
       code: 'high_db_latency',
       text: `summary 平均 DB 延迟 ${avgDbLatencyMs.toFixed(2)}ms，已超过阈值 ${highDbLatencyThresholdMs}ms。`,
+      action: 'refresh_metrics',
+      sessionIds: [],
     });
   }
 
@@ -98,6 +192,8 @@ export function buildJudgeObservabilityAnomalies(
       level: 'warning',
       code: 'low_cache_hit_rate',
       text: `summary 缓存命中率 ${cacheHitRate.toFixed(2)}% 偏低，请关注查询压力与缓存策略。`,
+      action: 'refresh_summary',
+      sessionIds: [],
     });
   }
 

@@ -506,13 +506,21 @@
                 metrics: {{ formatDateTime(observabilityMetricsUpdatedAt) }}
               </div>
             </div>
-            <button
-              @click="refreshJudgeObservability"
-              :disabled="observabilityLoading || !canJudgeReview"
-              class="px-3 py-1 rounded border text-xs bg-white hover:bg-gray-100 disabled:opacity-50"
-            >
-              {{ observabilityLoading ? '刷新中...' : '刷新观测汇总' }}
-            </button>
+            <div class="flex items-center gap-2">
+              <button
+                @click="toggleObservabilityThresholdSettings"
+                class="px-3 py-1 rounded border text-xs bg-white hover:bg-gray-100"
+              >
+                {{ observabilityThresholdSettingsOpen ? '收起阈值设置' : '阈值设置' }}
+              </button>
+              <button
+                @click="refreshJudgeObservability"
+                :disabled="observabilityLoading || !canJudgeReview"
+                class="px-3 py-1 rounded border text-xs bg-white hover:bg-gray-100 disabled:opacity-50"
+              >
+                {{ observabilityLoading ? '刷新中...' : '刷新观测汇总' }}
+              </button>
+            </div>
           </div>
 
           <div v-if="observabilityErrorText" class="bg-red-50 text-red-700 border border-red-200 rounded p-2 text-xs">
@@ -573,6 +581,96 @@
             </div>
           </div>
 
+          <div
+            v-if="observabilityThresholdSettingsOpen"
+            class="rounded border border-slate-200 bg-slate-50 p-3 space-y-3"
+          >
+            <div class="text-xs font-semibold text-slate-800">异常阈值配置</div>
+            <div class="grid grid-cols-1 md:grid-cols-3 gap-2">
+              <label class="text-xs text-gray-600">
+                低成功率阈值（%）
+                <input
+                  v-model.number="observabilityThresholds.lowSuccessRateThreshold"
+                  type="number"
+                  min="1"
+                  max="99.99"
+                  step="0.01"
+                  class="w-full border rounded px-2 py-1 mt-1"
+                />
+              </label>
+              <label class="text-xs text-gray-600">
+                高重试阈值
+                <input
+                  v-model.number="observabilityThresholds.highRetryThreshold"
+                  type="number"
+                  min="0.1"
+                  max="10"
+                  step="0.1"
+                  class="w-full border rounded px-2 py-1 mt-1"
+                />
+              </label>
+              <label class="text-xs text-gray-600">
+                高合并事件阈值
+                <input
+                  v-model.number="observabilityThresholds.highCoalescedThreshold"
+                  type="number"
+                  min="0.1"
+                  max="20"
+                  step="0.1"
+                  class="w-full border rounded px-2 py-1 mt-1"
+                />
+              </label>
+              <label class="text-xs text-gray-600">
+                高 DB 延迟阈值（ms）
+                <input
+                  v-model.number="observabilityThresholds.highDbLatencyThresholdMs"
+                  type="number"
+                  min="1"
+                  max="60000"
+                  class="w-full border rounded px-2 py-1 mt-1"
+                />
+              </label>
+              <label class="text-xs text-gray-600">
+                低缓存命中率阈值（%）
+                <input
+                  v-model.number="observabilityThresholds.lowCacheHitRateThreshold"
+                  type="number"
+                  min="0"
+                  max="99.99"
+                  step="0.01"
+                  class="w-full border rounded px-2 py-1 mt-1"
+                />
+              </label>
+              <label class="text-xs text-gray-600">
+                缓存检查最小请求数
+                <input
+                  v-model.number="observabilityThresholds.minRequestForCacheHitCheck"
+                  type="number"
+                  min="1"
+                  max="1000000"
+                  class="w-full border rounded px-2 py-1 mt-1"
+                />
+              </label>
+            </div>
+            <div class="flex items-center gap-2">
+              <button
+                @click="persistObservabilityThresholds"
+                class="px-3 py-1 rounded bg-slate-700 text-white text-xs"
+              >
+                保存阈值
+              </button>
+              <button
+                @click="resetObservabilityThresholds"
+                class="px-3 py-1 rounded border text-xs bg-white hover:bg-gray-100"
+              >
+                恢复默认
+              </button>
+              <div v-if="observabilityThresholdNoticeText" class="text-xs text-emerald-700">
+                {{ observabilityThresholdNoticeText }}
+              </div>
+            </div>
+          </div>
+
           <div class="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-8 gap-2 text-xs">
             <div class="rounded border bg-gray-50 p-2">
               <div class="text-gray-500">Requests</div>
@@ -612,10 +710,30 @@
             <div
               v-for="anomaly in observabilityAnomalies"
               :key="anomaly.code"
-              class="border rounded p-2 text-xs"
+              class="border rounded p-2 text-xs flex items-start justify-between gap-2"
               :class="observabilityAlertClass(anomaly.level)"
             >
-              {{ anomaly.text }}
+              <div class="space-y-1">
+                <div>{{ anomaly.text }}</div>
+                <div
+                  v-if="Array.isArray(anomaly.sessionIds) && anomaly.sessionIds.length > 0"
+                  class="text-[11px] opacity-80"
+                >
+                  sessions: {{ anomaly.sessionIds.join(', ') }}
+                </div>
+              </div>
+              <button
+                @click="applyObservabilityAnomaly(anomaly)"
+                :disabled="
+                  !canApplyAnomalyAction(anomaly)
+                  || observabilityLoading
+                  || observabilityMetricsLoading
+                  || reviewLoading
+                "
+                class="px-2 py-1 rounded border border-current bg-white/70 hover:bg-white disabled:opacity-50 whitespace-nowrap"
+              >
+                {{ anomalyActionLabel(anomaly) }}
+              </button>
             </div>
           </div>
           <div v-else class="rounded border border-emerald-200 bg-emerald-50 text-emerald-700 p-2 text-xs">
@@ -691,8 +809,10 @@ import {
 } from '../debate-ops-utils';
 import { normalizeJudgeRefreshSummaryQuery } from '../judge-refresh-summary-utils';
 import {
+  DEFAULT_OBSERVABILITY_THRESHOLDS,
   buildJudgeObservabilityAnomalies,
   normalizeObservabilitySessionId,
+  normalizeObservabilityThresholds,
 } from '../judge-observability-utils';
 import {
   emptyOpsRbacMe,
@@ -744,6 +864,8 @@ function parseOptionalBoolean(value) {
   return null;
 }
 
+const OBSERVABILITY_THRESHOLDS_STORAGE_KEY = 'ops_observability_thresholds_v1';
+
 export default {
   components: {
     Sidebar,
@@ -769,6 +891,7 @@ export default {
       roleErrorText: '',
       observabilityErrorText: '',
       observabilityMetricsErrorText: '',
+      observabilityThresholdNoticeText: '',
       topics: [],
       sessions: [],
       reviewRows: [],
@@ -809,6 +932,8 @@ export default {
         limit: 20,
         debateSessionId: '',
       },
+      observabilityThresholds: normalizeObservabilityThresholds(DEFAULT_OBSERVABILITY_THRESHOLDS),
+      observabilityThresholdSettingsOpen: false,
       topicForm: {
         title: '',
         description: '',
@@ -846,7 +971,7 @@ export default {
       return buildJudgeObservabilityAnomalies({
         rows: this.observabilityRows,
         metrics: this.observabilityMetrics,
-      });
+      }, this.observabilityThresholds);
     },
     observabilityCacheMissRate() {
       const missRate = 100 - Number(this.observabilityMetrics?.cacheHitRate || 0);
@@ -890,6 +1015,91 @@ export default {
         return 'bg-red-50 border-red-200 text-red-700';
       }
       return 'bg-amber-50 border-amber-200 text-amber-800';
+    },
+    toggleObservabilityThresholdSettings() {
+      this.observabilityThresholdSettingsOpen = !this.observabilityThresholdSettingsOpen;
+    },
+    loadObservabilityThresholds() {
+      const raw = localStorage.getItem(OBSERVABILITY_THRESHOLDS_STORAGE_KEY);
+      if (!raw) {
+        this.observabilityThresholds = normalizeObservabilityThresholds(
+          DEFAULT_OBSERVABILITY_THRESHOLDS,
+        );
+        return;
+      }
+      try {
+        const parsed = JSON.parse(raw);
+        this.observabilityThresholds = normalizeObservabilityThresholds(parsed);
+      } catch (_error) {
+        this.observabilityThresholds = normalizeObservabilityThresholds(
+          DEFAULT_OBSERVABILITY_THRESHOLDS,
+        );
+      }
+    },
+    persistObservabilityThresholds() {
+      const normalized = normalizeObservabilityThresholds(this.observabilityThresholds);
+      this.observabilityThresholds = normalized;
+      localStorage.setItem(
+        OBSERVABILITY_THRESHOLDS_STORAGE_KEY,
+        JSON.stringify(normalized),
+      );
+      this.observabilityThresholdNoticeText = '阈值已保存';
+    },
+    resetObservabilityThresholds() {
+      this.observabilityThresholds = normalizeObservabilityThresholds(
+        DEFAULT_OBSERVABILITY_THRESHOLDS,
+      );
+      localStorage.removeItem(OBSERVABILITY_THRESHOLDS_STORAGE_KEY);
+      this.observabilityThresholdNoticeText = '已恢复默认阈值';
+    },
+    anomalyActionLabel(anomaly) {
+      if (!anomaly) {
+        return '';
+      }
+      if (anomaly.action === 'review_sessions') {
+        return '联动审阅';
+      }
+      if (anomaly.action === 'refresh_metrics') {
+        return '刷新指标';
+      }
+      return '刷新汇总';
+    },
+    canApplyAnomalyAction(anomaly) {
+      if (!anomaly || !this.canJudgeReview) {
+        return false;
+      }
+      if (anomaly.action === 'review_sessions') {
+        return Array.isArray(anomaly.sessionIds) && anomaly.sessionIds.length > 0;
+      }
+      return true;
+    },
+    setReviewWindowFromObservabilityHours() {
+      const hours = Number(this.observabilityFilter.hours || 24);
+      const now = new Date();
+      const from = new Date(now.getTime() - Math.max(1, hours) * 60 * 60 * 1000);
+      this.reviewFilter.fromLocal = toLocalInputValue(from);
+      this.reviewFilter.toLocal = toLocalInputValue(now);
+      this.reviewFilter.anomalyOnly = true;
+    },
+    async applyObservabilityAnomaly(anomaly) {
+      if (!this.canApplyAnomalyAction(anomaly)) {
+        return;
+      }
+      if (anomaly.action === 'review_sessions') {
+        const sessionId = normalizeObservabilitySessionId(anomaly.sessionIds[0]);
+        if (sessionId) {
+          this.observabilityFilter.debateSessionId = String(sessionId);
+          await this.refreshJudgeObservability();
+          this.setReviewWindowFromObservabilityHours();
+          await this.refreshJudgeReviews();
+          return;
+        }
+      }
+      if (anomaly.action === 'refresh_metrics') {
+        await this.refreshJudgeObservabilityMetrics();
+        return;
+      }
+      await this.refreshJudgeObservability();
     },
     topicTitle(topicId) {
       const topic = this.topics.find((item) => Number(item.id) === Number(topicId));
@@ -1448,6 +1658,7 @@ export default {
     },
   },
   async mounted() {
+    this.loadObservabilityThresholds();
     await this.refreshData();
   },
 };

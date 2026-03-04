@@ -1,8 +1,10 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import {
+  DEFAULT_OBSERVABILITY_THRESHOLDS,
   buildJudgeObservabilityAnomalies,
   normalizeObservabilitySessionId,
+  normalizeObservabilityThresholds,
 } from './judge-observability-utils.js';
 
 test('normalizeObservabilitySessionId should normalize valid id', () => {
@@ -14,6 +16,8 @@ test('normalizeObservabilitySessionId should normalize valid id', () => {
 test('buildJudgeObservabilityAnomalies should report summary empty', () => {
   const ret = buildJudgeObservabilityAnomalies({ rows: [], metrics: {} });
   assert.equal(ret.some((item) => item.code === 'summary_empty'), true);
+  const anomaly = ret.find((item) => item.code === 'summary_empty');
+  assert.equal(anomaly.action, 'refresh_summary');
 });
 
 test('buildJudgeObservabilityAnomalies should report low success and retries', () => {
@@ -43,6 +47,9 @@ test('buildJudgeObservabilityAnomalies should report low success and retries', (
   assert.equal(codes.includes('db_errors'), true);
   assert.equal(codes.includes('high_db_latency'), true);
   assert.equal(codes.includes('low_cache_hit_rate'), true);
+  const lowSuccess = ret.find((item) => item.code === 'low_success_rate');
+  assert.deepEqual(lowSuccess.sessionIds, [8]);
+  assert.equal(lowSuccess.action, 'review_sessions');
 });
 
 test('buildJudgeObservabilityAnomalies should return empty for healthy rows', () => {
@@ -65,4 +72,23 @@ test('buildJudgeObservabilityAnomalies should return empty for healthy rows', ()
     },
   });
   assert.deepEqual(ret, []);
+});
+
+test('normalizeObservabilityThresholds should fallback and clamp', () => {
+  const ret = normalizeObservabilityThresholds({
+    lowSuccessRateThreshold: 0,
+    highRetryThreshold: 'x',
+    highCoalescedThreshold: 99,
+    highDbLatencyThresholdMs: -10,
+    lowCacheHitRateThreshold: 1000,
+    minRequestForCacheHitCheck: 0,
+  });
+  assert.deepEqual(ret, {
+    lowSuccessRateThreshold: 1,
+    highRetryThreshold: DEFAULT_OBSERVABILITY_THRESHOLDS.highRetryThreshold,
+    highCoalescedThreshold: 20,
+    highDbLatencyThresholdMs: 1,
+    lowCacheHitRateThreshold: 99.99,
+    minRequestForCacheHitCheck: 1,
+  });
 });
