@@ -1,14 +1,22 @@
 use crate::{
+    handlers::{
+        build_rate_limit_headers, enforce_rate_limit, rate_limit_exceeded_response,
+        release_idempotency_best_effort, try_acquire_idempotency_or_fail_open,
+    },
     AppError, AppState, GetIapOrderByTransaction, ListIapProducts, ListWalletLedger,
     VerifyIapOrderInput,
 };
 use axum::{
     extract::{Query, State},
-    http::StatusCode,
+    http::{HeaderMap, StatusCode},
     response::IntoResponse,
     Extension, Json,
 };
 use chat_core::User;
+
+const IAP_VERIFY_RATE_LIMIT_PER_WINDOW: u64 = 30;
+const IAP_VERIFY_RATE_LIMIT_WINDOW_SECS: u64 = 60;
+const IAP_VERIFY_IDEMPOTENCY_TTL_SECS: u64 = 120;
 
 /// List purchasable IAP products.
 #[utoipa::path(
@@ -50,10 +58,59 @@ pub(crate) async fn list_iap_products_handler(
 pub(crate) async fn verify_iap_order_handler(
     Extension(user): Extension<User>,
     State(state): State<AppState>,
+    headers: HeaderMap,
     Json(input): Json<VerifyIapOrderInput>,
 ) -> Result<impl IntoResponse, AppError> {
-    let ret = state.verify_iap_order(&user, input).await?;
-    Ok((StatusCode::OK, Json(ret)))
+    let limiter_key = format!(
+        "ws:{}:user:{}:tx:{}",
+        user.ws_id,
+        user.id,
+        input.transaction_id.trim()
+    );
+    let decision = enforce_rate_limit(
+        &state,
+        "iap_verify",
+        &limiter_key,
+        IAP_VERIFY_RATE_LIMIT_PER_WINDOW,
+        IAP_VERIFY_RATE_LIMIT_WINDOW_SECS,
+    )
+    .await;
+    let rate_headers = build_rate_limit_headers(&decision)?;
+    if !decision.allowed {
+        return Ok(rate_limit_exceeded_response("iap_verify", rate_headers));
+    }
+
+    let request_idempotency_key = headers
+        .get("idempotency-key")
+        .and_then(|v| v.to_str().ok())
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(|| input.transaction_id.trim().to_string());
+    let acquired = try_acquire_idempotency_or_fail_open(
+        &state,
+        "iap_verify",
+        &request_idempotency_key,
+        IAP_VERIFY_IDEMPOTENCY_TTL_SECS,
+    )
+    .await;
+    if !acquired {
+        return Ok((
+            StatusCode::CONFLICT,
+            rate_headers,
+            Json(crate::ErrorOutput::new("idempotency_conflict:iap_verify")),
+        )
+            .into_response());
+    }
+
+    let ret = match state.verify_iap_order(&user, input).await {
+        Ok(v) => v,
+        Err(err) => {
+            release_idempotency_best_effort(&state, "iap_verify", &request_idempotency_key).await;
+            return Err(err);
+        }
+    };
+    Ok((StatusCode::OK, rate_headers, Json(ret)).into_response())
 }
 
 /// Query existing IAP order by transaction id for current user.

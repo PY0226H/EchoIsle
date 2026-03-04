@@ -20,6 +20,15 @@ pub struct RedisHealthOutput {
     pub message: String,
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RateLimitDecision {
+    pub allowed: bool,
+    pub limit: u64,
+    pub remaining: u64,
+    pub reset_at_epoch_secs: u64,
+}
+
 #[derive(Clone)]
 pub(crate) enum RedisStore {
     Disabled {
@@ -111,6 +120,116 @@ impl RedisStore {
             },
         }
     }
+
+    pub async fn check_rate_limit(
+        &self,
+        scope: &str,
+        raw_key: &str,
+        limit: u64,
+        window_secs: u64,
+    ) -> anyhow::Result<RateLimitDecision> {
+        let now_secs = chrono::Utc::now().timestamp().max(0) as u64;
+        if limit == 0 || window_secs == 0 {
+            return Ok(RateLimitDecision {
+                allowed: true,
+                limit,
+                remaining: limit,
+                reset_at_epoch_secs: now_secs,
+            });
+        }
+
+        match self {
+            Self::Disabled { .. } => Ok(RateLimitDecision {
+                allowed: true,
+                limit,
+                remaining: limit,
+                reset_at_epoch_secs: now_secs + window_secs,
+            }),
+            Self::Enabled(inner) => {
+                let mut conn = inner.manager.clone();
+                let redis_key = self.namespaced_key(&format!("rate_limit:{scope}"), raw_key);
+                let current: i64 = redis::cmd("INCR")
+                    .arg(&redis_key)
+                    .query_async(&mut conn)
+                    .await
+                    .context("redis INCR rate limit failed")?;
+                if current <= 1 {
+                    let _: i64 = redis::cmd("EXPIRE")
+                        .arg(&redis_key)
+                        .arg(window_secs as i64)
+                        .query_async(&mut conn)
+                        .await
+                        .context("redis EXPIRE rate limit key failed")?;
+                }
+                let mut ttl_secs: i64 = redis::cmd("TTL")
+                    .arg(&redis_key)
+                    .query_async(&mut conn)
+                    .await
+                    .context("redis TTL rate limit key failed")?;
+                if ttl_secs < 0 {
+                    let _: i64 = redis::cmd("EXPIRE")
+                        .arg(&redis_key)
+                        .arg(window_secs as i64)
+                        .query_async(&mut conn)
+                        .await
+                        .context("redis EXPIRE fallback rate limit key failed")?;
+                    ttl_secs = window_secs as i64;
+                }
+                let current_u64 = current.max(0) as u64;
+                let remaining = limit.saturating_sub(current_u64);
+                Ok(RateLimitDecision {
+                    allowed: current_u64 <= limit,
+                    limit,
+                    remaining,
+                    reset_at_epoch_secs: now_secs + (ttl_secs.max(0) as u64),
+                })
+            }
+        }
+    }
+
+    pub async fn try_acquire_idempotency(
+        &self,
+        scope: &str,
+        raw_key: &str,
+        ttl_secs: u64,
+    ) -> anyhow::Result<bool> {
+        if ttl_secs == 0 {
+            return Ok(true);
+        }
+        match self {
+            Self::Disabled { .. } => Ok(true),
+            Self::Enabled(inner) => {
+                let mut conn = inner.manager.clone();
+                let redis_key = self.namespaced_key(&format!("idempotency:{scope}"), raw_key);
+                let ret: Option<String> = redis::cmd("SET")
+                    .arg(&redis_key)
+                    .arg("1")
+                    .arg("NX")
+                    .arg("EX")
+                    .arg(ttl_secs as i64)
+                    .query_async(&mut conn)
+                    .await
+                    .context("redis SET NX EX idempotency lock failed")?;
+                Ok(ret.is_some())
+            }
+        }
+    }
+
+    pub async fn release_idempotency(&self, scope: &str, raw_key: &str) -> anyhow::Result<()> {
+        match self {
+            Self::Disabled { .. } => Ok(()),
+            Self::Enabled(inner) => {
+                let mut conn = inner.manager.clone();
+                let redis_key = self.namespaced_key(&format!("idempotency:{scope}"), raw_key);
+                let _: i64 = redis::cmd("DEL")
+                    .arg(&redis_key)
+                    .query_async(&mut conn)
+                    .await
+                    .context("redis DEL idempotency lock failed")?;
+                Ok(())
+            }
+        }
+    }
 }
 
 impl RedisStoreInner {
@@ -160,5 +279,35 @@ mod tests {
             message: "disabled".to_string(),
         };
         assert_eq!(store.namespaced_key("idem", "k1"), "idem:k1");
+    }
+
+    #[tokio::test]
+    async fn check_rate_limit_should_allow_when_store_disabled() {
+        let config = RedisConfig::default();
+        let store = RedisStore::Disabled {
+            config,
+            message: "disabled".to_string(),
+        };
+        let ret = store
+            .check_rate_limit("signin", "alice@example.com", 20, 60)
+            .await
+            .expect("disabled store should not fail");
+        assert!(ret.allowed);
+        assert_eq!(ret.limit, 20);
+        assert_eq!(ret.remaining, 20);
+    }
+
+    #[tokio::test]
+    async fn try_acquire_idempotency_should_allow_when_store_disabled() {
+        let config = RedisConfig::default();
+        let store = RedisStore::Disabled {
+            config,
+            message: "disabled".to_string(),
+        };
+        let ret = store
+            .try_acquire_idempotency("judge_request", "1:2", 30)
+            .await
+            .expect("disabled store should not fail");
+        assert!(ret);
     }
 }

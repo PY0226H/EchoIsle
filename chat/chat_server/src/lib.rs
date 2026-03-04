@@ -30,6 +30,7 @@ pub(crate) use event_bus::{
     DebateSessionStatusChangedEvent, EventBus,
 };
 pub use models::*;
+pub(crate) use redis_store::RateLimitDecision;
 pub use redis_store::RedisHealthOutput;
 
 use axum::{
@@ -231,8 +232,8 @@ impl AppState {
             .context("init redis store failed")?;
         let event_bus = EventBus::from_config(&config.kafka).context("init event bus failed")?;
         event_bus
-            .maybe_spawn_bootstrap_consumer()
-            .context("start bootstrap kafka consumer failed")?;
+            .maybe_spawn_consumer_worker(pool.clone())
+            .context("start kafka consumer worker failed")?;
         let state = Self {
             inner: Arc::new(AppStateInner {
                 config,

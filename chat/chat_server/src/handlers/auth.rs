@@ -1,4 +1,5 @@
 use crate::{
+    handlers::{build_rate_limit_headers, enforce_rate_limit, rate_limit_exceeded_response},
     models::{CreateUser, SigninUser},
     AppError, AppState, ErrorOutput,
 };
@@ -10,6 +11,9 @@ use utoipa::ToSchema;
 pub struct AuthOutput {
     token: String,
 }
+
+const SIGNIN_RATE_LIMIT_PER_WINDOW: u64 = 20;
+const SIGNIN_RATE_LIMIT_WINDOW_SECS: u64 = 60;
 
 #[utoipa::path(
     post,
@@ -45,16 +49,30 @@ pub(crate) async fn signin_handler(
     State(state): State<AppState>,
     Json(input): Json<SigninUser>,
 ) -> Result<impl IntoResponse, AppError> {
+    let email_key = input.email.trim().to_ascii_lowercase();
+    let decision = enforce_rate_limit(
+        &state,
+        "signin",
+        &email_key,
+        SIGNIN_RATE_LIMIT_PER_WINDOW,
+        SIGNIN_RATE_LIMIT_WINDOW_SECS,
+    )
+    .await;
+    let headers = build_rate_limit_headers(&decision)?;
+    if !decision.allowed {
+        return Ok(rate_limit_exceeded_response("signin", headers));
+    }
+
     let user = state.verify_user(&input).await?;
 
     match user {
         Some(user) => {
             let token = state.ek.sign(user)?;
-            Ok((StatusCode::OK, Json(AuthOutput { token })).into_response())
+            Ok((StatusCode::OK, headers, Json(AuthOutput { token })).into_response())
         }
         None => {
             let body = Json(ErrorOutput::new("Invalid email or password"));
-            Ok((StatusCode::FORBIDDEN, body).into_response())
+            Ok((StatusCode::FORBIDDEN, headers, body).into_response())
         }
     }
 }

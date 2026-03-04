@@ -1,4 +1,8 @@
 use crate::{
+    handlers::{
+        build_rate_limit_headers, enforce_rate_limit, rate_limit_exceeded_response,
+        release_idempotency_best_effort, try_acquire_idempotency_or_fail_open,
+    },
     AppError, AppState, CreateDebateMessageInput, GetJudgeReportQuery, JoinDebateSessionInput,
     ListDebateMessages, ListDebatePinnedMessages, ListDebateSessions, ListDebateTopics,
     ListJudgeReviewOpsQuery, OpsCreateDebateSessionInput, OpsCreateDebateTopicInput,
@@ -8,11 +12,17 @@ use crate::{
 };
 use axum::{
     extract::{Path, Query, State},
-    http::StatusCode,
+    http::{HeaderMap, StatusCode},
     response::IntoResponse,
     Extension, Json,
 };
 use chat_core::User;
+
+const DEBATE_MESSAGE_RATE_LIMIT_PER_WINDOW: u64 = 120;
+const DEBATE_MESSAGE_RATE_LIMIT_WINDOW_SECS: u64 = 60;
+const JUDGE_REQUEST_RATE_LIMIT_PER_WINDOW: u64 = 10;
+const JUDGE_REQUEST_RATE_LIMIT_WINDOW_SECS: u64 = 300;
+const JUDGE_REQUEST_IDEMPOTENCY_TTL_SECS: u64 = 30;
 
 /// List debate topics in the current workspace.
 #[utoipa::path(
@@ -429,8 +439,25 @@ pub(crate) async fn create_debate_message_handler(
     Path(id): Path<u64>,
     Json(input): Json<CreateDebateMessageInput>,
 ) -> Result<impl IntoResponse, AppError> {
+    let limiter_key = format!("ws:{}:user:{}:session:{}", user.ws_id, user.id, id);
+    let decision = enforce_rate_limit(
+        &state,
+        "debate_message_create",
+        &limiter_key,
+        DEBATE_MESSAGE_RATE_LIMIT_PER_WINDOW,
+        DEBATE_MESSAGE_RATE_LIMIT_WINDOW_SECS,
+    )
+    .await;
+    let headers = build_rate_limit_headers(&decision)?;
+    if !decision.allowed {
+        return Ok(rate_limit_exceeded_response(
+            "debate_message_create",
+            headers,
+        ));
+    }
+
     let msg = state.create_debate_message(id, &user, input).await?;
-    Ok((StatusCode::CREATED, Json(msg)))
+    Ok((StatusCode::CREATED, headers, Json(msg)).into_response())
 }
 
 /// List messages in a debate session.
@@ -539,10 +566,60 @@ pub(crate) async fn request_judge_job_handler(
     Extension(user): Extension<User>,
     State(state): State<AppState>,
     Path(id): Path<u64>,
+    headers: HeaderMap,
     Json(input): Json<RequestJudgeJobInput>,
 ) -> Result<impl IntoResponse, AppError> {
-    let ret = state.request_judge_job(id, &user, input).await?;
-    Ok((StatusCode::ACCEPTED, Json(ret)))
+    let limiter_key = format!("ws:{}:user:{}:session:{}", user.ws_id, user.id, id);
+    let decision = enforce_rate_limit(
+        &state,
+        "judge_job_request",
+        &limiter_key,
+        JUDGE_REQUEST_RATE_LIMIT_PER_WINDOW,
+        JUDGE_REQUEST_RATE_LIMIT_WINDOW_SECS,
+    )
+    .await;
+    let rate_headers = build_rate_limit_headers(&decision)?;
+    if !decision.allowed {
+        return Ok(rate_limit_exceeded_response(
+            "judge_job_request",
+            rate_headers,
+        ));
+    }
+
+    let request_idempotency_key = headers
+        .get("idempotency-key")
+        .and_then(|v| v.to_str().ok())
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(|| limiter_key.clone());
+    let acquired = try_acquire_idempotency_or_fail_open(
+        &state,
+        "judge_job_request",
+        &request_idempotency_key,
+        JUDGE_REQUEST_IDEMPOTENCY_TTL_SECS,
+    )
+    .await;
+    if !acquired {
+        return Ok((
+            StatusCode::CONFLICT,
+            rate_headers,
+            Json(crate::ErrorOutput::new(
+                "idempotency_conflict:judge_job_request",
+            )),
+        )
+            .into_response());
+    }
+
+    let ret = match state.request_judge_job(id, &user, input).await {
+        Ok(v) => v,
+        Err(err) => {
+            release_idempotency_best_effort(&state, "judge_job_request", &request_idempotency_key)
+                .await;
+            return Err(err);
+        }
+    };
+    Ok((StatusCode::ACCEPTED, rate_headers, Json(ret)).into_response())
 }
 
 /// Get latest AI judge report for a debate session.
@@ -710,6 +787,7 @@ mod tests {
             Extension(user),
             State(state),
             Path(session_id as u64),
+            HeaderMap::new(),
             Json(RequestJudgeJobInput {
                 style_mode: Some("mixed".to_string()),
                 allow_rejudge: false,
@@ -740,6 +818,7 @@ mod tests {
             Extension(user),
             State(state),
             Path(session_id as u64),
+            HeaderMap::new(),
             Json(RequestJudgeJobInput {
                 style_mode: Some("rational".to_string()),
                 allow_rejudge: false,
