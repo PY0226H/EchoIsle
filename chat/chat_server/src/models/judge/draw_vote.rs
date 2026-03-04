@@ -1,6 +1,13 @@
 use super::*;
 
 impl AppState {
+    fn is_unique_violation(err: &sqlx::Error) -> bool {
+        matches!(
+            err,
+            sqlx::Error::Database(db_err) if db_err.code().as_deref() == Some("23505")
+        )
+    }
+
     async fn load_draw_vote_stats(
         tx: &mut Transaction<'_, Postgres>,
         vote_id: i64,
@@ -120,7 +127,7 @@ impl AppState {
         let rematch_session_id = if let Some((session_id,)) = existing {
             session_id
         } else {
-            let rematch_id: (i64,) = sqlx::query_as(
+            let insert_result: Result<(i64,), sqlx::Error> = sqlx::query_as(
                 r#"
                 INSERT INTO debate_sessions(
                     ws_id, topic_id, status, scheduled_start_at, actual_start_at, end_at,
@@ -143,8 +150,31 @@ impl AppState {
             .bind(source.id)
             .bind(next_round)
             .fetch_one(&mut **tx)
-            .await?;
-            rematch_id.0
+            .await;
+            match insert_result {
+                Ok((session_id,)) => session_id,
+                Err(err) if Self::is_unique_violation(&err) => {
+                    let existing_after_conflict: Option<(i64,)> = sqlx::query_as(
+                        r#"
+                        SELECT id
+                        FROM debate_sessions
+                        WHERE parent_session_id = $1 AND rematch_round = $2
+                        ORDER BY created_at DESC
+                        LIMIT 1
+                        "#,
+                    )
+                    .bind(source.id)
+                    .bind(next_round)
+                    .fetch_optional(&mut **tx)
+                    .await?;
+                    if let Some((session_id,)) = existing_after_conflict {
+                        session_id
+                    } else {
+                        return Err(err.into());
+                    }
+                }
+                Err(err) => return Err(err.into()),
+            }
         };
 
         if vote.rematch_session_id == Some(rematch_session_id) {

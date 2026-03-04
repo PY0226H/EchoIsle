@@ -466,3 +466,94 @@ async fn get_draw_vote_status_should_not_duplicate_rematch_on_concurrent_expire_
     assert_eq!(rematch_count.0, 1);
     Ok(())
 }
+
+#[tokio::test]
+async fn get_draw_vote_status_should_keep_single_rematch_under_high_concurrency() -> Result<()> {
+    let (_tdb, state) = AppState::new_for_test().await?;
+    let session_id = seed_topic_and_session(&state, 1, "closed").await?;
+    join_user_to_session(&state, session_id, 1).await?;
+    join_user_to_session(&state, session_id, 2).await?;
+    let job_id = seed_running_judge_job(&state, session_id).await?;
+
+    state
+        .submit_judge_report(
+            job_id as u64,
+            SubmitJudgeReportInput {
+                winner: "draw".to_string(),
+                pro_score: 72,
+                con_score: 72,
+                logic_pro: 72,
+                logic_con: 72,
+                evidence_pro: 72,
+                evidence_con: 72,
+                rebuttal_pro: 72,
+                rebuttal_con: 72,
+                clarity_pro: 72,
+                clarity_con: 72,
+                pro_summary: "pro".to_string(),
+                con_summary: "con".to_string(),
+                rationale: "rationale".to_string(),
+                style_mode: Some("rational".to_string()),
+                needs_draw_vote: true,
+                rejudge_triggered: true,
+                payload: serde_json::json!({}),
+                winner_first: Some("pro".to_string()),
+                winner_second: Some("con".to_string()),
+                stage_summaries: vec![],
+            },
+        )
+        .await?;
+
+    sqlx::query(
+        r#"
+            UPDATE judge_draw_votes
+            SET voting_ends_at = NOW() - INTERVAL '1 second',
+                updated_at = NOW()
+            WHERE session_id = $1
+            "#,
+    )
+    .bind(session_id)
+    .execute(&state.pool)
+    .await?;
+
+    let user1 = state.find_user_by_id(1).await?.expect("user1 should exist");
+    let user2 = state.find_user_by_id(2).await?.expect("user2 should exist");
+    let mut tasks = tokio::task::JoinSet::new();
+    for i in 0..24 {
+        let state = state.clone();
+        let user = if i % 2 == 0 {
+            user1.clone()
+        } else {
+            user2.clone()
+        };
+        tasks.spawn(async move { state.get_draw_vote_status(session_id as u64, &user).await });
+    }
+
+    let mut rematch_ids: Vec<u64> = Vec::new();
+    while let Some(joined) = tasks.join_next().await {
+        let output = joined.expect("draw vote status task should not panic")?;
+        let vote = output.vote.expect("vote should exist");
+        assert_eq!(vote.status, "expired");
+        assert_eq!(vote.decision_source, "vote_timeout");
+        rematch_ids.push(
+            vote.rematch_session_id
+                .expect("expired open_rematch should have rematch session"),
+        );
+    }
+    assert_eq!(rematch_ids.len(), 24);
+    let first = rematch_ids[0];
+    assert!(rematch_ids.iter().all(|id| *id == first));
+
+    let rematch_count: (i64,) = sqlx::query_as(
+        r#"
+            SELECT COUNT(*)::bigint
+            FROM debate_sessions
+            WHERE parent_session_id = $1 AND rematch_round = 1
+            "#,
+    )
+    .bind(session_id)
+    .fetch_one(&state.pool)
+    .await?;
+    assert_eq!(rematch_count.0, 1);
+    Ok(())
+}
