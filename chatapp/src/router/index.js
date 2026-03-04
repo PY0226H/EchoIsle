@@ -10,6 +10,12 @@ import Wallet from '../views/Wallet.vue';
 import Me from '../views/Me.vue';
 import Notifications from '../views/Notifications.vue';
 import DebateOpsAdmin from '../views/DebateOpsAdmin.vue';
+import store from '../store';
+import {
+  hasAnyOpsPermission,
+  hasRequiredOpsPermissions,
+  normalizeOpsRbacMe,
+} from '../ops-permission-utils';
 
 const routes = [
   { path: '/', redirect: '/home' },
@@ -17,7 +23,12 @@ const routes = [
   { path: '/chat', name: 'Chat', component: Chat, meta: { requiresAuth: true } },
   { path: '/debate', name: 'DebateLobby', component: DebateLobby, meta: { requiresAuth: true } },
   { path: '/debate/sessions/:id', name: 'DebateRoom', component: DebateRoom, meta: { requiresAuth: true } },
-  { path: '/debate/ops', name: 'DebateOpsAdmin', component: DebateOpsAdmin, meta: { requiresAuth: true } },
+  {
+    path: '/debate/ops',
+    name: 'DebateOpsAdmin',
+    component: DebateOpsAdmin,
+    meta: { requiresAuth: true, requiresOpsAccess: true },
+  },
   { path: '/judge-report', name: 'JudgeReport', component: JudgeReport, meta: { requiresAuth: true } },
   { path: '/wallet', name: 'Wallet', component: Wallet, meta: { requiresAuth: true } },
   { path: '/me', name: 'Me', component: Me, meta: { requiresAuth: true } },
@@ -32,14 +43,61 @@ const router = createRouter({
   routes,
 });
 
-// Navigation guard for authenticated routes
-router.beforeEach((to, from, next) => {
+async function loadOpsSnapshotForGuard() {
+  try {
+    const response = await store.dispatch('getOpsRbacMe');
+    return normalizeOpsRbacMe(response);
+  } catch (error) {
+    const cached = store.getters.getOpsRbacMe;
+    if (cached) {
+      return normalizeOpsRbacMe(cached);
+    }
+    throw error;
+  }
+}
+
+// Navigation guard for authenticated routes and ops permissions
+router.beforeEach(async (to, from, next) => {
   const isAuthenticated = !!localStorage.getItem('user');
   if (to.matched.some((record) => record.meta.requiresAuth) && !isAuthenticated) {
-    next({ name: 'Login' });
-  } else {
-    next();
+    return next({ name: 'Login' });
   }
+
+  const requiresOpsAccess = to.matched.some((record) => record.meta.requiresOpsAccess);
+  if (!requiresOpsAccess) {
+    return next();
+  }
+
+  const requiredOpsPermissions = to.matched.flatMap(
+    (record) => record.meta.requiredOpsPermissions || [],
+  );
+
+  try {
+    const snapshot = await loadOpsSnapshotForGuard();
+    const allowed = requiredOpsPermissions.length > 0
+      ? hasRequiredOpsPermissions(snapshot, requiredOpsPermissions)
+      : hasAnyOpsPermission(snapshot);
+    if (!allowed) {
+      return next({
+        name: 'DebateLobby',
+        query: {
+          ...to.query,
+          noOpsAccess: '1',
+        },
+      });
+    }
+  } catch (error) {
+    console.error('Failed to verify ops route permission:', error);
+    return next({
+      name: 'DebateLobby',
+      query: {
+        ...to.query,
+        noOpsAccess: '1',
+      },
+    });
+  }
+
+  return next();
 });
 
 export default router;

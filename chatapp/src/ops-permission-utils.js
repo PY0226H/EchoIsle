@@ -5,6 +5,26 @@ const OPS_PERMISSION_HINTS = {
   role_manage: '仅 workspace owner 可以管理 Ops 角色',
 };
 
+function normalizePermissionKey(permission) {
+  const value = String(permission || '').trim();
+  if (!value) {
+    return '';
+  }
+  if (value === 'debate_manage' || value === 'debateManage') {
+    return 'debateManage';
+  }
+  if (value === 'judge_review' || value === 'judgeReview') {
+    return 'judgeReview';
+  }
+  if (value === 'judge_rejudge' || value === 'judgeRejudge') {
+    return 'judgeRejudge';
+  }
+  if (value === 'role_manage' || value === 'roleManage') {
+    return 'roleManage';
+  }
+  return '';
+}
+
 export function emptyOpsRbacMe() {
   return {
     userId: 0,
@@ -66,6 +86,30 @@ export function parseOpsPermissionDenied(rawText) {
 
 export function getOpsPermissionHint(permission) {
   return OPS_PERMISSION_HINTS[permission] || '当前账号没有执行该操作的权限';
+}
+
+export function hasOpsPermission(snapshot, permission) {
+  const key = normalizePermissionKey(permission);
+  if (!key) {
+    return false;
+  }
+  return !!snapshot?.permissions?.[key];
+}
+
+export function hasAnyOpsPermission(snapshot) {
+  return [
+    'debateManage',
+    'judgeReview',
+    'judgeRejudge',
+    'roleManage',
+  ].some((key) => !!snapshot?.permissions?.[key]);
+}
+
+export function hasRequiredOpsPermissions(snapshot, permissions = []) {
+  if (!Array.isArray(permissions) || permissions.length === 0) {
+    return hasAnyOpsPermission(snapshot);
+  }
+  return permissions.every((item) => hasOpsPermission(snapshot, item));
 }
 
 export function resolveOpsErrorText(error, fallback = '操作失败') {

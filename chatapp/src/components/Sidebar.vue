@@ -42,6 +42,7 @@
           Debate
         </li>
         <li
+          v-if="canAccessDebateOps"
           @click="goRoute('/debate/ops')"
           :class="['px-2 py-1 rounded cursor-pointer mt-1', { 'bg-blue-600': isRouteActive('/debate/ops') }]"
         >
@@ -94,6 +95,7 @@
 
 <script>
 import { pickDefaultPeerUserId } from '../channel-utils';
+import { hasAnyOpsPermission, normalizeOpsRbacMe } from '../ops-permission-utils';
 
 export default {
   data() {
@@ -118,8 +120,22 @@ export default {
     singleChannels() {
       return this.$store.getters.getSingChannels;
     },
+    canAccessDebateOps() {
+      const snapshot = normalizeOpsRbacMe(this.$store.getters.getOpsRbacMe);
+      return hasAnyOpsPermission(snapshot);
+    },
   },
   methods: {
+    async ensureOpsRbacSnapshot() {
+      if (!this.$store.state.token) {
+        return;
+      }
+      try {
+        await this.$store.dispatch('getOpsRbacMe');
+      } catch (error) {
+        console.error('Failed to preload ops RBAC snapshot in sidebar:', error);
+      }
+    },
     toggleDropdown() {
       this.dropdownVisible = !this.dropdownVisible;
     },
@@ -157,6 +173,10 @@ export default {
       }
     },
     goRoute(path) {
+      if (path === '/debate/ops' && !this.canAccessDebateOps) {
+        alert('当前账号没有 Ops 权限');
+        return;
+      }
       if (this.$route.path !== path) {
         this.$router.push(path);
       }
@@ -194,6 +214,7 @@ export default {
   },
   mounted() {
     document.addEventListener('click', this.handleOutsideClick);
+    this.ensureOpsRbacSnapshot();
   },
   beforeDestroy() {
     document.removeEventListener('click', this.handleOutsideClick);

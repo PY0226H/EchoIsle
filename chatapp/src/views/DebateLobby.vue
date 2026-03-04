@@ -20,6 +20,9 @@
         <div v-if="errorText" class="bg-red-50 text-red-700 border border-red-200 rounded p-3 text-sm">
           {{ errorText }}
         </div>
+        <div v-if="guardNoticeText" class="bg-amber-50 text-amber-800 border border-amber-200 rounded p-3 text-sm">
+          {{ guardNoticeText }}
+        </div>
 
         <div class="bg-white border rounded-lg p-4 grid grid-cols-1 md:grid-cols-6 gap-3">
           <div>
@@ -372,6 +375,7 @@ export default {
       keyword: '',
       loading: false,
       errorText: '',
+      guardNoticeText: '',
     };
   },
   computed: {
@@ -416,6 +420,10 @@ export default {
       this.laneFilter = normalizeLobbyLane(routeQuery.lane);
       const rawJoinable = String(routeQuery.joinable || '').trim().toLowerCase();
       this.joinableOnly = rawJoinable === '1' || rawJoinable === 'true' || rawJoinable === 'yes';
+      const rawNoOpsAccess = String(routeQuery.noOpsAccess || '').trim().toLowerCase();
+      if (rawNoOpsAccess === '1' || rawNoOpsAccess === 'true' || rawNoOpsAccess === 'yes') {
+        this.guardNoticeText = '当前账号没有 Debate Ops 权限，已为你跳转到辩论大厅。';
+      }
     },
     buildRouteQuery() {
       const query = {};

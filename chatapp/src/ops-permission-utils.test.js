@@ -2,6 +2,9 @@ import assert from 'node:assert/strict';
 import {
   emptyOpsRbacMe,
   getOpsPermissionHint,
+  hasAnyOpsPermission,
+  hasOpsPermission,
+  hasRequiredOpsPermissions,
   normalizeOpsRbacMe,
   parseOpsPermissionDenied,
   resolveOpsErrorText,
@@ -63,6 +66,30 @@ assert.equal(
 assert.equal(
   getOpsPermissionHint('unknown_permission'),
   '当前账号没有执行该操作的权限',
+);
+
+const reviewerSnapshot = normalizeOpsRbacMe({
+  isOwner: false,
+  role: 'ops_reviewer',
+  permissions: {
+    debateManage: false,
+    judgeReview: true,
+    judgeRejudge: true,
+    roleManage: false,
+  },
+});
+assert.equal(hasOpsPermission(reviewerSnapshot, 'judgeReview'), true);
+assert.equal(hasOpsPermission(reviewerSnapshot, 'judge_review'), true);
+assert.equal(hasOpsPermission(reviewerSnapshot, 'debate_manage'), false);
+assert.equal(hasAnyOpsPermission(reviewerSnapshot), true);
+assert.equal(hasAnyOpsPermission(emptyOpsRbacMe()), false);
+assert.equal(
+  hasRequiredOpsPermissions(reviewerSnapshot, ['judge_review', 'judge_rejudge']),
+  true,
+);
+assert.equal(
+  hasRequiredOpsPermissions(reviewerSnapshot, ['judge_review', 'role_manage']),
+  false,
 );
 
 assert.equal(
