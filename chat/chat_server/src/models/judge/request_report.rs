@@ -132,6 +132,10 @@ impl AppState {
         .await?;
         if let Some(job) = existing_running {
             tx.commit().await?;
+            self.trigger_judge_dispatch(JudgeDispatchTrigger {
+                job_id: job.id,
+                source: "event:existing_running_job",
+            });
             return Ok(RequestJudgeJobOutput {
                 session_id,
                 job_id: job.id as u64,
@@ -212,6 +216,10 @@ impl AppState {
                 err
             );
         }
+        self.trigger_judge_dispatch(JudgeDispatchTrigger {
+            job_id: job.id,
+            source: "event:judge_job_created",
+        });
 
         Ok(RequestJudgeJobOutput {
             session_id,

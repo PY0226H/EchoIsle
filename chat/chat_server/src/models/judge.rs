@@ -1,4 +1,4 @@
-use crate::{AiJudgeJobCreatedEvent, AppError, AppState};
+use crate::{AiJudgeJobCreatedEvent, AppError, AppState, JudgeDispatchTrigger};
 use chat_core::User;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};

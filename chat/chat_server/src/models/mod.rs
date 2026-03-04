@@ -31,6 +31,7 @@ pub use judge::{
 };
 pub(crate) use judge_dispatch::AiJudgeDispatchMetrics;
 pub use judge_dispatch::GetJudgeDispatchMetricsOutput;
+pub(crate) use judge_dispatch::JudgeDispatchTrigger;
 pub use kafka_dlq::{
     KafkaDlqActionOutput, KafkaDlqEventItem, ListKafkaDlqEventsOutput, ListKafkaDlqEventsQuery,
 };

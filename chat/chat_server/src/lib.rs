@@ -20,7 +20,11 @@ use middlewares::{verify_ai_internal_key, verify_chat, verify_file_ticket};
 use openapi::OpenApiRouter;
 use sqlx::PgPool;
 use std::{fmt, ops::Deref, sync::Arc, time::Duration};
-use tokio::{fs, time::sleep};
+use tokio::{
+    fs,
+    sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender},
+    time::{sleep, MissedTickBehavior},
+};
 use tower_http::cors::{self, CorsLayer};
 use tracing::{debug, warn};
 
@@ -29,6 +33,7 @@ pub(crate) use event_bus::{
     AiJudgeJobCreatedEvent, DebateMessagePinnedEvent, DebateParticipantJoinedEvent,
     DebateSessionStatusChangedEvent, EventBus,
 };
+use models::JudgeDispatchTrigger;
 pub use models::*;
 pub(crate) use redis_store::RateLimitDecision;
 pub use redis_store::RedisHealthOutput;
@@ -56,6 +61,7 @@ pub struct AppStateInner {
     pub(crate) redis: redis_store::RedisStore,
     pub(crate) event_bus: EventBus,
     pub(crate) dispatch_metrics: AiJudgeDispatchMetrics,
+    pub(crate) dispatch_trigger_tx: Option<UnboundedSender<JudgeDispatchTrigger>>,
 }
 
 pub async fn get_router(state: AppState) -> Result<Router, AppError> {
@@ -243,6 +249,8 @@ impl AppState {
         event_bus
             .maybe_spawn_consumer_worker(pool.clone())
             .context("start kafka consumer worker failed")?;
+        let (dispatch_trigger_tx, dispatch_trigger_rx) =
+            unbounded_channel::<JudgeDispatchTrigger>();
         let state = Self {
             inner: Arc::new(AppStateInner {
                 config,
@@ -252,10 +260,11 @@ impl AppState {
                 redis,
                 event_bus,
                 dispatch_metrics: AiJudgeDispatchMetrics::default(),
+                dispatch_trigger_tx: Some(dispatch_trigger_tx),
             }),
         };
         spawn_debate_session_worker(state.clone());
-        spawn_ai_judge_dispatch_worker(state.clone());
+        spawn_ai_judge_dispatch_worker(state.clone(), dispatch_trigger_rx);
         Ok(state)
     }
 
@@ -282,12 +291,26 @@ impl AppState {
                 redis,
                 event_bus,
                 dispatch_metrics: AiJudgeDispatchMetrics::default(),
+                dispatch_trigger_tx: None,
             }),
         })
     }
 
     pub async fn get_redis_health(&self) -> RedisHealthOutput {
         self.redis.health_snapshot().await
+    }
+
+    pub(crate) fn trigger_judge_dispatch(&self, trigger: JudgeDispatchTrigger) {
+        if let Some(tx) = &self.dispatch_trigger_tx {
+            if let Err(err) = tx.send(trigger.clone()) {
+                warn!(
+                    job_id = trigger.job_id,
+                    source = trigger.source,
+                    "send judge dispatch trigger failed: {}",
+                    err
+                );
+            }
+        }
     }
 }
 
@@ -310,37 +333,71 @@ fn spawn_debate_session_worker(state: AppState) {
     });
 }
 
-fn spawn_ai_judge_dispatch_worker(state: AppState) {
+async fn run_ai_judge_dispatch_tick(
+    state: &AppState,
+    trigger_source: &str,
+    trigger_job_id: Option<i64>,
+) {
+    if state.config.ai_judge.dispatch_enabled {
+        match state.dispatch_pending_judge_jobs_once().await {
+            Ok(report) => {
+                debug!(
+                    trigger_source,
+                    trigger_job_id,
+                    claimed = report.claimed,
+                    dispatched = report.dispatched,
+                    failed = report.failed,
+                    marked_failed = report.marked_failed,
+                    timed_out_failed = report.timed_out_failed,
+                    terminal_failed = report.terminal_failed,
+                    retryable_failed = report.retryable_failed,
+                    failed_contract = report.failed_contract,
+                    failed_http_4xx = report.failed_http_4xx,
+                    failed_http_429 = report.failed_http_429,
+                    failed_http_5xx = report.failed_http_5xx,
+                    failed_network = report.failed_network,
+                    failed_internal = report.failed_internal,
+                    "ai judge dispatch worker tick success"
+                );
+            }
+            Err(err) => {
+                state.observe_dispatch_worker_error();
+                warn!(
+                    trigger_source,
+                    trigger_job_id, "ai judge dispatch worker tick failed: {}", err
+                );
+            }
+        }
+    }
+}
+
+fn spawn_ai_judge_dispatch_worker(
+    state: AppState,
+    mut dispatch_trigger_rx: UnboundedReceiver<JudgeDispatchTrigger>,
+) {
     tokio::spawn(async move {
+        let mut ticker = tokio::time::interval(Duration::from_secs(
+            state.config.ai_judge.dispatch_interval_secs.max(1),
+        ));
+        ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
+        let _ = ticker.tick().await;
         loop {
-            let interval = state.config.ai_judge.dispatch_interval_secs.max(1);
-            if state.config.ai_judge.dispatch_enabled {
-                match state.dispatch_pending_judge_jobs_once().await {
-                    Ok(report) => {
-                        debug!(
-                            claimed = report.claimed,
-                            dispatched = report.dispatched,
-                            failed = report.failed,
-                            marked_failed = report.marked_failed,
-                            timed_out_failed = report.timed_out_failed,
-                            terminal_failed = report.terminal_failed,
-                            retryable_failed = report.retryable_failed,
-                            failed_contract = report.failed_contract,
-                            failed_http_4xx = report.failed_http_4xx,
-                            failed_http_429 = report.failed_http_429,
-                            failed_http_5xx = report.failed_http_5xx,
-                            failed_network = report.failed_network,
-                            failed_internal = report.failed_internal,
-                            "ai judge dispatch worker tick success"
-                        );
-                    }
-                    Err(err) => {
-                        state.observe_dispatch_worker_error();
-                        warn!("ai judge dispatch worker tick failed: {}", err);
+            tokio::select! {
+                _ = ticker.tick() => {
+                    run_ai_judge_dispatch_tick(&state, "polling", None).await;
+                }
+                maybe_trigger = dispatch_trigger_rx.recv() => {
+                    match maybe_trigger {
+                        Some(trigger) => {
+                            run_ai_judge_dispatch_tick(&state, trigger.source, Some(trigger.job_id)).await;
+                        }
+                        None => {
+                            warn!("judge dispatch trigger channel closed, fallback to polling only");
+                            sleep(Duration::from_secs(1)).await;
+                        }
                     }
                 }
             }
-            sleep(Duration::from_secs(interval)).await;
         }
     });
 }
@@ -360,6 +417,25 @@ mod health_tests {
     #[tokio::test]
     async fn health_handler_should_return_ok() {
         assert_eq!(health_handler().await, "ok");
+    }
+
+    #[tokio::test]
+    async fn trigger_judge_dispatch_should_send_event_when_channel_exists() {
+        let config = AppConfig::load().expect("load app config");
+        let mut state = AppState::new_for_unit_test(config).expect("build unit test state");
+        let (tx, mut rx) = unbounded_channel();
+        Arc::get_mut(&mut state.inner)
+            .expect("state should be unique")
+            .dispatch_trigger_tx = Some(tx);
+
+        state.trigger_judge_dispatch(JudgeDispatchTrigger {
+            job_id: 42,
+            source: "test",
+        });
+
+        let trigger = rx.recv().await.expect("should receive trigger");
+        assert_eq!(trigger.job_id, 42);
+        assert_eq!(trigger.source, "test");
     }
 }
 
@@ -389,6 +465,7 @@ mod test_util {
                     },
                     event_bus: EventBus::Disabled,
                     dispatch_metrics: AiJudgeDispatchMetrics::default(),
+                    dispatch_trigger_tx: None,
                 }),
             };
             Ok((tdb, state))

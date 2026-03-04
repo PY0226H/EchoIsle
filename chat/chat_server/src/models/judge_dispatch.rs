@@ -10,6 +10,12 @@ mod dispatch_worker;
 const DISPATCH_MESSAGE_WINDOW_LIMIT: i64 = 100;
 const DISPATCH_ERROR_MAX_LEN: usize = 1000;
 
+#[derive(Debug, Clone)]
+pub(crate) struct JudgeDispatchTrigger {
+    pub job_id: i64,
+    pub source: &'static str,
+}
+
 #[derive(Debug, Default, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct JudgeDispatchTickReport {
