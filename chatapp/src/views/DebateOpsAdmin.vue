@@ -706,10 +706,26 @@
             </div>
           </div>
 
+          <div
+            v-if="observabilitySuppressedAnomalyCount > 0"
+            class="rounded border border-indigo-200 bg-indigo-50 text-indigo-700 p-2 text-xs flex items-center justify-between gap-2"
+          >
+            <div>当前有 {{ observabilitySuppressedAnomalyCount }} 条异常处于抑制窗口内。</div>
+            <button
+              @click="clearAllObservabilitySuppression"
+              class="px-2 py-1 rounded border border-indigo-300 bg-white hover:bg-indigo-100"
+            >
+              清除全部抑制
+            </button>
+          </div>
+          <div v-if="observabilityAnomalyNoticeText" class="text-xs text-emerald-700">
+            {{ observabilityAnomalyNoticeText }}
+          </div>
+
           <div v-if="observabilityAnomalies.length > 0" class="space-y-2">
             <div
               v-for="anomaly in observabilityAnomalies"
-              :key="anomaly.code"
+              :key="anomaly.stateKey || anomaly.code"
               class="border rounded p-2 text-xs flex items-start justify-between gap-2"
               :class="observabilityAlertClass(anomaly.level)"
             >
@@ -721,19 +737,43 @@
                 >
                   sessions: {{ anomaly.sessionIds.join(', ') }}
                 </div>
+                <div v-if="anomaly.acknowledgedAtMs > 0" class="text-[11px] opacity-80">
+                  已处理: {{ formatDateTime(anomaly.acknowledgedAtMs) }}
+                </div>
               </div>
-              <button
-                @click="applyObservabilityAnomaly(anomaly)"
-                :disabled="
-                  !canApplyAnomalyAction(anomaly)
-                  || observabilityLoading
-                  || observabilityMetricsLoading
-                  || reviewLoading
-                "
-                class="px-2 py-1 rounded border border-current bg-white/70 hover:bg-white disabled:opacity-50 whitespace-nowrap"
-              >
-                {{ anomalyActionLabel(anomaly) }}
-              </button>
+              <div class="flex flex-col items-end gap-1">
+                <button
+                  @click="applyObservabilityAnomaly(anomaly)"
+                  :disabled="
+                    !canApplyAnomalyAction(anomaly)
+                    || observabilityLoading
+                    || observabilityMetricsLoading
+                    || reviewLoading
+                  "
+                  class="px-2 py-1 rounded border border-current bg-white/70 hover:bg-white disabled:opacity-50 whitespace-nowrap"
+                >
+                  {{ anomalyActionLabel(anomaly) }}
+                </button>
+                <button
+                  @click="markObservabilityAnomalyHandled(anomaly)"
+                  class="px-2 py-1 rounded border border-current bg-white/70 hover:bg-white whitespace-nowrap"
+                >
+                  标记已处理
+                </button>
+                <button
+                  @click="suppressObservabilityAnomaly(anomaly, 1)"
+                  class="px-2 py-1 rounded border border-current bg-white/70 hover:bg-white whitespace-nowrap"
+                >
+                  抑制 1h
+                </button>
+                <button
+                  v-if="anomalyHasState(anomaly)"
+                  @click="clearObservabilityAnomalyState(anomaly)"
+                  class="px-2 py-1 rounded border border-current bg-white/70 hover:bg-white whitespace-nowrap"
+                >
+                  清除标记
+                </button>
+              </div>
             </div>
           </div>
           <div v-else class="rounded border border-emerald-200 bg-emerald-50 text-emerald-700 p-2 text-xs">
@@ -809,10 +849,13 @@ import {
 } from '../debate-ops-utils';
 import { normalizeJudgeRefreshSummaryQuery } from '../judge-refresh-summary-utils';
 import {
+  buildObservabilityAnomalyStateKey,
   DEFAULT_OBSERVABILITY_THRESHOLDS,
   buildJudgeObservabilityAnomalies,
   normalizeObservabilitySessionId,
+  normalizeObservabilityAnomalyStateMap,
   normalizeObservabilityThresholds,
+  projectObservabilityAnomalies,
 } from '../judge-observability-utils';
 import {
   emptyOpsRbacMe,
@@ -865,6 +908,7 @@ function parseOptionalBoolean(value) {
 }
 
 const OBSERVABILITY_THRESHOLDS_STORAGE_KEY = 'ops_observability_thresholds_v1';
+const OBSERVABILITY_ANOMALY_STATE_STORAGE_KEY = 'ops_observability_anomaly_state_v1';
 
 export default {
   components: {
@@ -892,6 +936,7 @@ export default {
       observabilityErrorText: '',
       observabilityMetricsErrorText: '',
       observabilityThresholdNoticeText: '',
+      observabilityAnomalyNoticeText: '',
       topics: [],
       sessions: [],
       reviewRows: [],
@@ -934,6 +979,7 @@ export default {
       },
       observabilityThresholds: normalizeObservabilityThresholds(DEFAULT_OBSERVABILITY_THRESHOLDS),
       observabilityThresholdSettingsOpen: false,
+      observabilityAnomalyState: {},
       topicForm: {
         title: '',
         description: '',
@@ -967,11 +1013,23 @@ export default {
     canRoleManage() {
       return !!this.opsRbacMe?.permissions?.roleManage;
     },
-    observabilityAnomalies() {
+    observabilityAnomaliesRaw() {
       return buildJudgeObservabilityAnomalies({
         rows: this.observabilityRows,
         metrics: this.observabilityMetrics,
       }, this.observabilityThresholds);
+    },
+    observabilityAnomalyProjection() {
+      return projectObservabilityAnomalies(
+        this.observabilityAnomaliesRaw,
+        this.observabilityAnomalyState,
+      );
+    },
+    observabilityAnomalies() {
+      return this.observabilityAnomalyProjection.visible;
+    },
+    observabilitySuppressedAnomalyCount() {
+      return Number(this.observabilityAnomalyProjection.suppressedCount || 0);
     },
     observabilityCacheMissRate() {
       const missRate = 100 - Number(this.observabilityMetrics?.cacheHitRate || 0);
@@ -1051,6 +1109,100 @@ export default {
       );
       localStorage.removeItem(OBSERVABILITY_THRESHOLDS_STORAGE_KEY);
       this.observabilityThresholdNoticeText = '已恢复默认阈值';
+    },
+    loadObservabilityAnomalyState() {
+      const raw = localStorage.getItem(OBSERVABILITY_ANOMALY_STATE_STORAGE_KEY);
+      if (!raw) {
+        this.observabilityAnomalyState = {};
+        return;
+      }
+      try {
+        const parsed = JSON.parse(raw);
+        this.observabilityAnomalyState = normalizeObservabilityAnomalyStateMap(parsed);
+      } catch (_error) {
+        this.observabilityAnomalyState = {};
+      }
+    },
+    persistObservabilityAnomalyState() {
+      const normalized = normalizeObservabilityAnomalyStateMap(this.observabilityAnomalyState);
+      this.observabilityAnomalyState = normalized;
+      if (Object.keys(normalized).length === 0) {
+        localStorage.removeItem(OBSERVABILITY_ANOMALY_STATE_STORAGE_KEY);
+        return;
+      }
+      localStorage.setItem(
+        OBSERVABILITY_ANOMALY_STATE_STORAGE_KEY,
+        JSON.stringify(normalized),
+      );
+    },
+    anomalyHasState(anomaly) {
+      const key = buildObservabilityAnomalyStateKey(anomaly);
+      if (!key) {
+        return false;
+      }
+      const item = this.observabilityAnomalyState[key];
+      return !!item && (Number(item.acknowledgedAtMs || 0) > 0 || Number(item.suppressUntilMs || 0) > 0);
+    },
+    markObservabilityAnomalyHandled(anomaly) {
+      const key = buildObservabilityAnomalyStateKey(anomaly);
+      if (!key) {
+        return;
+      }
+      const current = this.observabilityAnomalyState[key] || {};
+      this.observabilityAnomalyState = {
+        ...this.observabilityAnomalyState,
+        [key]: {
+          acknowledgedAtMs: Date.now(),
+          suppressUntilMs: Number(current.suppressUntilMs || 0),
+        },
+      };
+      this.persistObservabilityAnomalyState();
+      this.observabilityAnomalyNoticeText = '异常已标记为已处理';
+    },
+    suppressObservabilityAnomaly(anomaly, hoursRaw = 1) {
+      const key = buildObservabilityAnomalyStateKey(anomaly);
+      if (!key) {
+        return;
+      }
+      const hours = Math.max(1, Math.trunc(Number(hoursRaw || 1)));
+      const current = this.observabilityAnomalyState[key] || {};
+      this.observabilityAnomalyState = {
+        ...this.observabilityAnomalyState,
+        [key]: {
+          acknowledgedAtMs: Number(current.acknowledgedAtMs || 0),
+          suppressUntilMs: Date.now() + hours * 60 * 60 * 1000,
+        },
+      };
+      this.persistObservabilityAnomalyState();
+      this.observabilityAnomalyNoticeText = `异常已抑制 ${hours} 小时`;
+    },
+    clearObservabilityAnomalyState(anomaly) {
+      const key = buildObservabilityAnomalyStateKey(anomaly);
+      if (!key) {
+        return;
+      }
+      const nextState = { ...this.observabilityAnomalyState };
+      delete nextState[key];
+      this.observabilityAnomalyState = nextState;
+      this.persistObservabilityAnomalyState();
+      this.observabilityAnomalyNoticeText = '异常标记已清除';
+    },
+    clearAllObservabilitySuppression() {
+      const now = Date.now();
+      const normalized = normalizeObservabilityAnomalyStateMap(this.observabilityAnomalyState, now);
+      const nextState = {};
+      Object.entries(normalized).forEach(([key, value]) => {
+        const acknowledgedAtMs = Number(value?.acknowledgedAtMs || 0);
+        if (acknowledgedAtMs > 0) {
+          nextState[key] = {
+            acknowledgedAtMs,
+            suppressUntilMs: 0,
+          };
+        }
+      });
+      this.observabilityAnomalyState = nextState;
+      this.persistObservabilityAnomalyState();
+      this.observabilityAnomalyNoticeText = '已清除全部抑制窗口';
     },
     anomalyActionLabel(anomaly) {
       if (!anomaly) {
@@ -1659,6 +1811,7 @@ export default {
   },
   async mounted() {
     this.loadObservabilityThresholds();
+    this.loadObservabilityAnomalyState();
     await this.refreshData();
   },
 };

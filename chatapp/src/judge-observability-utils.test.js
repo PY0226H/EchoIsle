@@ -1,10 +1,13 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import {
+  buildObservabilityAnomalyStateKey,
   DEFAULT_OBSERVABILITY_THRESHOLDS,
   buildJudgeObservabilityAnomalies,
   normalizeObservabilitySessionId,
+  normalizeObservabilityAnomalyStateMap,
   normalizeObservabilityThresholds,
+  projectObservabilityAnomalies,
 } from './judge-observability-utils.js';
 
 test('normalizeObservabilitySessionId should normalize valid id', () => {
@@ -91,4 +94,60 @@ test('normalizeObservabilityThresholds should fallback and clamp', () => {
     lowCacheHitRateThreshold: 99.99,
     minRequestForCacheHitCheck: 1,
   });
+});
+
+test('buildObservabilityAnomalyStateKey should include sorted session ids', () => {
+  const key = buildObservabilityAnomalyStateKey({
+    code: 'low_success_rate',
+    sessionIds: ['3', '1', 'x', 3],
+  });
+  assert.equal(key, 'low_success_rate:1,3');
+  assert.equal(
+    buildObservabilityAnomalyStateKey({ code: 'summary_empty', sessionIds: [] }),
+    'summary_empty',
+  );
+});
+
+test('normalizeObservabilityAnomalyStateMap should drop expired suppression', () => {
+  const now = 1_000_000;
+  const ret = normalizeObservabilityAnomalyStateMap({
+    keep_ack: {
+      acknowledgedAtMs: now - 10,
+      suppressUntilMs: now - 1,
+    },
+    keep_suppress: {
+      suppressUntilMs: now + 1000,
+    },
+    drop_empty: {
+      suppressUntilMs: now - 1,
+    },
+  }, now);
+  assert.deepEqual(ret, {
+    keep_ack: {
+      acknowledgedAtMs: now - 10,
+      suppressUntilMs: 0,
+    },
+    keep_suppress: {
+      acknowledgedAtMs: 0,
+      suppressUntilMs: now + 1000,
+    },
+  });
+});
+
+test('projectObservabilityAnomalies should filter suppressed anomalies', () => {
+  const now = 2_000_000;
+  const anomalies = [
+    { code: 'db_errors', text: 'x', action: 'refresh_metrics', sessionIds: [] },
+    { code: 'low_success_rate', text: 'y', action: 'review_sessions', sessionIds: [12] },
+  ];
+  const state = {
+    db_errors: { suppressUntilMs: now + 10_000 },
+    'low_success_rate:12': { acknowledgedAtMs: now - 5_000 },
+  };
+  const ret = projectObservabilityAnomalies(anomalies, state, now);
+  assert.equal(ret.suppressedCount, 1);
+  assert.equal(ret.all.length, 2);
+  assert.equal(ret.visible.length, 1);
+  assert.equal(ret.visible[0].code, 'low_success_rate');
+  assert.equal(ret.visible[0].acknowledgedAtMs, now - 5_000);
 });

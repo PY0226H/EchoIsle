@@ -211,3 +211,83 @@ export function normalizeObservabilitySessionId(value) {
   }
   return id;
 }
+
+function normalizeTimestampMs(value) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) {
+    return 0;
+  }
+  const ts = Math.trunc(n);
+  return ts > 0 ? ts : 0;
+}
+
+export function buildObservabilityAnomalyStateKey(anomaly = {}) {
+  const code = String(anomaly?.code || '').trim();
+  const safeCode = code || 'unknown';
+  const sessionIds = [];
+  if (Array.isArray(anomaly?.sessionIds)) {
+    anomaly.sessionIds.forEach((value) => {
+      const sessionId = normalizeObservabilitySessionId(value);
+      if (sessionId <= 0 || sessionIds.includes(sessionId)) {
+        return;
+      }
+      sessionIds.push(sessionId);
+    });
+    sessionIds.sort((a, b) => a - b);
+  }
+  if (sessionIds.length === 0) {
+    return safeCode;
+  }
+  return `${safeCode}:${sessionIds.join(',')}`;
+}
+
+export function normalizeObservabilityAnomalyStateMap(input = {}, nowMs = Date.now()) {
+  const source = input && typeof input === 'object' ? input : {};
+  const now = normalizeTimestampMs(nowMs) || Date.now();
+  const normalized = {};
+  Object.entries(source).forEach(([key, raw]) => {
+    const stateKey = String(key || '').trim();
+    if (!stateKey) {
+      return;
+    }
+    const item = raw && typeof raw === 'object' ? raw : {};
+    const acknowledgedAtMs = normalizeTimestampMs(item.acknowledgedAtMs);
+    const suppressUntilRaw = normalizeTimestampMs(item.suppressUntilMs);
+    const suppressUntilMs = suppressUntilRaw > now ? suppressUntilRaw : 0;
+    if (!acknowledgedAtMs && !suppressUntilMs) {
+      return;
+    }
+    normalized[stateKey] = {
+      acknowledgedAtMs,
+      suppressUntilMs,
+    };
+  });
+  return normalized;
+}
+
+export function projectObservabilityAnomalies(anomalies = [], state = {}, nowMs = Date.now()) {
+  const now = normalizeTimestampMs(nowMs) || Date.now();
+  const normalizedState = normalizeObservabilityAnomalyStateMap(state, now);
+  const source = Array.isArray(anomalies) ? anomalies : [];
+  const all = source.map((anomaly) => {
+    const key = buildObservabilityAnomalyStateKey(anomaly);
+    const item = normalizedState[key] || {};
+    const suppressUntilMs = normalizeTimestampMs(item.suppressUntilMs);
+    const acknowledgedAtMs = normalizeTimestampMs(item.acknowledgedAtMs);
+    const suppressed = suppressUntilMs > now;
+    return {
+      ...anomaly,
+      stateKey: key,
+      acknowledgedAtMs,
+      suppressUntilMs,
+      suppressed,
+    };
+  });
+  const visible = all.filter((item) => !item.suppressed);
+  return {
+    all,
+    visible,
+    suppressedCount: all.length - visible.length,
+    state: normalizedState,
+  };
+}
