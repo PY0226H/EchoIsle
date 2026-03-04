@@ -20,8 +20,9 @@ pub use debate::{
 };
 pub use judge::{
     DrawVoteDetail, GetDrawVoteOutput, GetJudgeReportOutput, GetJudgeReportQuery, JudgeJobSnapshot,
-    JudgeRagMeta, JudgeRagSourceItem, JudgeReportDetail, JudgeStageSummariesMeta,
-    JudgeStageSummaryDetail, JudgeStageSummaryInput, MarkJudgeJobFailedInput,
+    JudgeRagMeta, JudgeRagSourceItem, JudgeReportDetail, JudgeReviewOpsItem,
+    JudgeStageSummariesMeta, JudgeStageSummaryDetail, JudgeStageSummaryInput,
+    ListJudgeReviewOpsOutput, ListJudgeReviewOpsQuery, MarkJudgeJobFailedInput,
     MarkJudgeJobFailedOutput, RequestJudgeJobInput, RequestJudgeJobOutput, SubmitDrawVoteInput,
     SubmitDrawVoteOutput, SubmitJudgeReportInput, SubmitJudgeReportOutput,
 };

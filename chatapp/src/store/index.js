@@ -426,6 +426,36 @@ export default createStore({
       });
       return response.data || [];
     },
+    async listJudgeReviewsOps({ state }, payload = {}) {
+      const suffix = buildQueryString({
+        from: payload.from,
+        to: payload.to,
+        winner: payload.winner,
+        rejudgeTriggered: payload.rejudgeTriggered,
+        hasVerdictEvidence: payload.hasVerdictEvidence,
+        anomalyOnly: payload.anomalyOnly,
+        limit: payload.limit,
+      });
+      const response = await network(this, 'get', `/debate/ops/judge-reviews${suffix}`, null, {
+        Authorization: `Bearer ${state.token}`,
+      });
+      return response.data || { scannedCount: 0, returnedCount: 0, items: [] };
+    },
+    async requestJudgeRejudgeOps({ state }, { sessionId } = {}) {
+      if (!sessionId) {
+        throw new Error('sessionId is required');
+      }
+      const response = await network(
+        this,
+        'post',
+        `/debate/ops/sessions/${Number(sessionId)}/judge/rejudge`,
+        {},
+        {
+          Authorization: `Bearer ${state.token}`,
+        },
+      );
+      return response.data;
+    },
     async createDebateTopicOps(
       { state },
       {

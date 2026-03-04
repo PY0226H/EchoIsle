@@ -34,6 +34,8 @@ const REMATCH_MIN_DURATION_SECS: i64 = 900;
 const REMATCH_MAX_DURATION_SECS: i64 = 14_400;
 const MAX_STAGE_SUMMARY_COUNT: u32 = 200;
 const MAX_STAGE_SUMMARY_OFFSET: u32 = 10_000;
+const DEFAULT_OPS_JUDGE_REVIEW_LIMIT: u32 = 50;
+const MAX_OPS_JUDGE_REVIEW_LIMIT: u32 = 200;
 
 #[derive(Debug, Clone, ToSchema, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -145,6 +147,50 @@ pub struct GetJudgeReportOutput {
 pub struct GetJudgeReportQuery {
     pub max_stage_count: Option<u32>,
     pub stage_offset: Option<u32>,
+}
+
+#[derive(Debug, Clone, IntoParams, ToSchema, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ListJudgeReviewOpsQuery {
+    pub from: Option<DateTime<Utc>>,
+    pub to: Option<DateTime<Utc>>,
+    pub winner: Option<String>,
+    pub rejudge_triggered: Option<bool>,
+    pub has_verdict_evidence: Option<bool>,
+    #[serde(default)]
+    pub anomaly_only: bool,
+    pub limit: Option<u32>,
+}
+
+#[derive(Debug, Clone, ToSchema, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct JudgeReviewOpsItem {
+    pub report_id: u64,
+    pub session_id: u64,
+    pub job_id: u64,
+    pub winner: String,
+    pub winner_first: Option<String>,
+    pub winner_second: Option<String>,
+    pub pro_score: i32,
+    pub con_score: i32,
+    pub score_gap: i32,
+    pub style_mode: String,
+    pub rubric_version: String,
+    pub needs_draw_vote: bool,
+    pub rejudge_triggered: bool,
+    pub has_verdict_evidence: bool,
+    pub verdict_evidence_count: u32,
+    #[serde(default)]
+    pub abnormal_flags: Vec<String>,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, ToSchema, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ListJudgeReviewOpsOutput {
+    pub scanned_count: u32,
+    pub returned_count: u32,
+    pub items: Vec<JudgeReviewOpsItem>,
 }
 
 #[derive(Debug, Clone, ToSchema, Serialize, Deserialize)]
@@ -348,6 +394,24 @@ struct SessionMessageEvidenceRow {
     id: i64,
     side: String,
     content: String,
+    created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, FromRow)]
+struct JudgeReviewOpsRow {
+    report_id: i64,
+    session_id: i64,
+    job_id: i64,
+    winner: String,
+    winner_first: Option<String>,
+    winner_second: Option<String>,
+    pro_score: i32,
+    con_score: i32,
+    style_mode: String,
+    rubric_version: String,
+    needs_draw_vote: bool,
+    rejudge_triggered: bool,
+    verdict_evidence_count: i32,
     created_at: DateTime<Utc>,
 }
 

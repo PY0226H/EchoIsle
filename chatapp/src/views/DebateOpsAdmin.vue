@@ -286,6 +286,118 @@
             </table>
           </div>
         </div>
+
+        <div class="bg-white border rounded-lg p-4 space-y-3">
+          <div class="flex items-start justify-between gap-3">
+            <div>
+              <div class="text-sm font-semibold text-gray-900">判决证据审阅与复核</div>
+              <div class="text-xs text-gray-500 mt-1">
+                scanned: {{ reviewMeta.scannedCount }} · returned: {{ reviewMeta.returnedCount }}
+              </div>
+            </div>
+            <button
+              @click="refreshJudgeReviews"
+              :disabled="reviewLoading"
+              class="px-3 py-1 rounded border text-xs bg-white hover:bg-gray-100 disabled:opacity-50"
+            >
+              {{ reviewLoading ? '刷新中...' : '刷新审阅列表' }}
+            </button>
+          </div>
+
+          <div v-if="reviewErrorText" class="bg-red-50 text-red-700 border border-red-200 rounded p-2 text-xs">
+            {{ reviewErrorText }}
+          </div>
+
+          <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-7 gap-2">
+            <label class="text-xs text-gray-600">
+              开始时间
+              <input v-model="reviewFilter.fromLocal" type="datetime-local" class="w-full border rounded px-2 py-1 mt-1" />
+            </label>
+            <label class="text-xs text-gray-600">
+              结束时间
+              <input v-model="reviewFilter.toLocal" type="datetime-local" class="w-full border rounded px-2 py-1 mt-1" />
+            </label>
+            <label class="text-xs text-gray-600">
+              Winner
+              <select v-model="reviewFilter.winner" class="w-full border rounded px-2 py-1 mt-1">
+                <option value="">all</option>
+                <option value="pro">pro</option>
+                <option value="con">con</option>
+                <option value="draw">draw</option>
+              </select>
+            </label>
+            <label class="text-xs text-gray-600">
+              Rejudge
+              <select v-model="reviewFilter.rejudgeTriggered" class="w-full border rounded px-2 py-1 mt-1">
+                <option value="">all</option>
+                <option value="true">yes</option>
+                <option value="false">no</option>
+              </select>
+            </label>
+            <label class="text-xs text-gray-600">
+              Evidence
+              <select v-model="reviewFilter.hasVerdictEvidence" class="w-full border rounded px-2 py-1 mt-1">
+                <option value="">all</option>
+                <option value="true">has refs</option>
+                <option value="false">no refs</option>
+              </select>
+            </label>
+            <label class="text-xs text-gray-600">
+              Limit
+              <input v-model.number="reviewFilter.limit" type="number" min="1" max="200" class="w-full border rounded px-2 py-1 mt-1" />
+            </label>
+            <label class="inline-flex items-center gap-2 text-xs text-gray-700 mt-5">
+              <input v-model="reviewFilter.anomalyOnly" type="checkbox" class="rounded border-gray-300" />
+              仅异常
+            </label>
+          </div>
+
+          <div class="overflow-x-auto">
+            <table class="min-w-full text-xs">
+              <thead>
+                <tr class="text-left text-gray-500 border-b">
+                  <th class="py-2 pr-3">Created</th>
+                  <th class="py-2 pr-3">Session</th>
+                  <th class="py-2 pr-3">Winner</th>
+                  <th class="py-2 pr-3">Gap</th>
+                  <th class="py-2 pr-3">Evidence</th>
+                  <th class="py-2 pr-3">Flags</th>
+                  <th class="py-2 pr-3">Action</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr v-for="row in reviewRows" :key="row.reportId" class="border-b last:border-b-0">
+                  <td class="py-2 pr-3 text-gray-700">{{ formatDateTime(row.createdAt) }}</td>
+                  <td class="py-2 pr-3 text-gray-900">#{{ row.sessionId }}</td>
+                  <td class="py-2 pr-3 text-gray-900">{{ row.winner }}</td>
+                  <td class="py-2 pr-3 text-gray-900">{{ row.scoreGap }}</td>
+                  <td class="py-2 pr-3 text-gray-900">{{ row.verdictEvidenceCount }}</td>
+                  <td class="py-2 pr-3 text-gray-700">{{ judgeReviewAbnormalText(row.abnormalFlags) }}</td>
+                  <td class="py-2 pr-3">
+                    <div class="flex flex-wrap gap-1">
+                      <button
+                        @click="openSessionJudgeReport(row.sessionId)"
+                        class="px-2 py-1 rounded border border-gray-300 bg-white hover:bg-gray-100"
+                      >
+                        查看
+                      </button>
+                      <button
+                        @click="triggerJudgeRejudge(row.sessionId)"
+                        :disabled="rejudgeReviewSessionId === row.sessionId"
+                        class="px-2 py-1 rounded border border-amber-300 bg-amber-50 text-amber-700 hover:bg-amber-100 disabled:opacity-50"
+                      >
+                        {{ rejudgeReviewSessionId === row.sessionId ? '处理中...' : '触发复核' }}
+                      </button>
+                    </div>
+                  </td>
+                </tr>
+                <tr v-if="reviewRows.length === 0">
+                  <td colspan="7" class="py-4 text-center text-gray-500">暂无审阅数据</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
       </div>
     </div>
   </div>
@@ -335,23 +447,51 @@ function emptySessionEditForm(date = new Date()) {
   };
 }
 
+function parseOptionalBoolean(value) {
+  if (value === true || value === 'true') {
+    return true;
+  }
+  if (value === false || value === 'false') {
+    return false;
+  }
+  return null;
+}
+
 export default {
   components: {
     Sidebar,
   },
   data() {
     const now = new Date();
+    const minus24Hours = new Date(now.getTime() - 24 * 60 * 60 * 1000);
     const plusOneHour = new Date(now.getTime() + 60 * 60 * 1000);
     return {
       loading: false,
+      reviewLoading: false,
       createTopicLoading: false,
       createSessionLoading: false,
       updateTopicLoading: false,
       updateSessionLoading: false,
       quickUpdateSessionId: 0,
+      rejudgeReviewSessionId: 0,
       errorText: '',
+      reviewErrorText: '',
       topics: [],
       sessions: [],
+      reviewRows: [],
+      reviewMeta: {
+        scannedCount: 0,
+        returnedCount: 0,
+      },
+      reviewFilter: {
+        fromLocal: toLocalInputValue(minus24Hours),
+        toLocal: toLocalInputValue(now),
+        winner: '',
+        rejudgeTriggered: '',
+        hasVerdictEvidence: '',
+        anomalyOnly: true,
+        limit: 50,
+      },
       topicForm: {
         title: '',
         description: '',
@@ -393,6 +533,57 @@ export default {
         return '';
       }
       return date.toISOString();
+    },
+    judgeReviewAbnormalText(flags) {
+      const values = Array.isArray(flags) ? flags : [];
+      if (values.length === 0) {
+        return '-';
+      }
+      return values.join(' / ');
+    },
+    buildJudgeReviewPayload() {
+      return {
+        from: this.toIso(this.reviewFilter.fromLocal),
+        to: this.toIso(this.reviewFilter.toLocal),
+        winner: this.reviewFilter.winner || null,
+        rejudgeTriggered: parseOptionalBoolean(this.reviewFilter.rejudgeTriggered),
+        hasVerdictEvidence: parseOptionalBoolean(this.reviewFilter.hasVerdictEvidence),
+        anomalyOnly: !!this.reviewFilter.anomalyOnly,
+        limit: Number(this.reviewFilter.limit || 50),
+      };
+    },
+    async refreshJudgeReviews() {
+      this.reviewLoading = true;
+      this.reviewErrorText = '';
+      try {
+        const payload = this.buildJudgeReviewPayload();
+        const response = await this.$store.dispatch('listJudgeReviewsOps', payload);
+        this.reviewRows = Array.isArray(response?.items) ? response.items : [];
+        this.reviewMeta = {
+          scannedCount: Number(response?.scannedCount || 0),
+          returnedCount: Number(response?.returnedCount || this.reviewRows.length),
+        };
+      } catch (error) {
+        this.reviewErrorText = error?.response?.data?.error || error?.message || '加载判决审阅列表失败';
+      } finally {
+        this.reviewLoading = false;
+      }
+    },
+    async triggerJudgeRejudge(sessionIdRaw) {
+      const sessionId = Number(sessionIdRaw);
+      if (!sessionId) {
+        return;
+      }
+      this.rejudgeReviewSessionId = sessionId;
+      this.reviewErrorText = '';
+      try {
+        await this.$store.dispatch('requestJudgeRejudgeOps', { sessionId });
+        await this.refreshJudgeReviews();
+      } catch (error) {
+        this.reviewErrorText = error?.response?.data?.error || error?.message || '触发复核失败';
+      } finally {
+        this.rejudgeReviewSessionId = 0;
+      }
     },
     buildSessionDraftForTiming(form) {
       return {
@@ -497,12 +688,19 @@ export default {
       this.loading = true;
       this.errorText = '';
       try {
-        const [topics, sessions] = await Promise.all([
+        const [topics, sessions, reviews] = await Promise.all([
           this.$store.dispatch('listDebateTopics', { activeOnly: false, limit: 200 }),
           this.$store.dispatch('listDebateSessions', { limit: 200 }),
+          this.$store.dispatch('listJudgeReviewsOps', this.buildJudgeReviewPayload()),
         ]);
         this.topics = topics || [];
         this.sessions = sessions || [];
+        this.reviewRows = Array.isArray(reviews?.items) ? reviews.items : [];
+        this.reviewMeta = {
+          scannedCount: Number(reviews?.scannedCount || 0),
+          returnedCount: Number(reviews?.returnedCount || this.reviewRows.length),
+        };
+        this.reviewErrorText = '';
         if (!this.topicEditForm.topicId && this.topics.length > 0) {
           this.topicEditForm.topicId = String(this.topics[0].id);
         }

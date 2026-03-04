@@ -1,8 +1,9 @@
 use crate::{
     AppError, AppState, CreateDebateMessageInput, GetJudgeReportQuery, JoinDebateSessionInput,
     ListDebateMessages, ListDebatePinnedMessages, ListDebateSessions, ListDebateTopics,
-    OpsCreateDebateSessionInput, OpsCreateDebateTopicInput, OpsUpdateDebateSessionInput,
-    OpsUpdateDebateTopicInput, PinDebateMessageInput, RequestJudgeJobInput, SubmitDrawVoteInput,
+    ListJudgeReviewOpsQuery, OpsCreateDebateSessionInput, OpsCreateDebateTopicInput,
+    OpsUpdateDebateSessionInput, OpsUpdateDebateTopicInput, PinDebateMessageInput,
+    RequestJudgeJobInput, SubmitDrawVoteInput,
 };
 use axum::{
     extract::{Path, Query, State},
@@ -139,6 +140,55 @@ pub(crate) async fn update_debate_session_ops_handler(
         .update_debate_session_by_owner(&user, id, input)
         .await?;
     Ok((StatusCode::OK, Json(session)))
+}
+
+/// List judge reports for ops review with evidence/anomaly filters.
+#[utoipa::path(
+    get,
+    path = "/api/debate/ops/judge-reviews",
+    params(
+        ListJudgeReviewOpsQuery
+    ),
+    responses(
+        (status = 200, description = "Ops judge review list", body = crate::ListJudgeReviewOpsOutput),
+        (status = 409, description = "Permission conflict", body = ErrorOutput),
+    ),
+    security(
+        ("token" = [])
+    )
+)]
+pub(crate) async fn list_judge_reviews_ops_handler(
+    Extension(user): Extension<User>,
+    State(state): State<AppState>,
+    Query(input): Query<ListJudgeReviewOpsQuery>,
+) -> Result<impl IntoResponse, AppError> {
+    let ret = state.list_judge_reviews_by_owner(&user, input).await?;
+    Ok((StatusCode::OK, Json(ret)))
+}
+
+/// Trigger an ops rejudge job for a finished session.
+#[utoipa::path(
+    post,
+    path = "/api/debate/ops/sessions/{id}/judge/rejudge",
+    params(
+        ("id" = u64, Path, description = "Debate session id")
+    ),
+    responses(
+        (status = 202, description = "Rejudge job accepted", body = crate::RequestJudgeJobOutput),
+        (status = 404, description = "Debate session not found", body = ErrorOutput),
+        (status = 409, description = "Permission or state conflict", body = ErrorOutput),
+    ),
+    security(
+        ("token" = [])
+    )
+)]
+pub(crate) async fn request_judge_rejudge_ops_handler(
+    Extension(user): Extension<User>,
+    State(state): State<AppState>,
+    Path(id): Path<u64>,
+) -> Result<impl IntoResponse, AppError> {
+    let ret = state.request_judge_rejudge_by_owner(id, &user).await?;
+    Ok((StatusCode::ACCEPTED, Json(ret)))
 }
 
 /// List debate sessions in the current workspace.
@@ -634,6 +684,83 @@ mod tests {
         assert_eq!(ret["report"]["stageSummariesMeta"]["hasMore"], true);
         assert_eq!(ret["report"]["stageSummariesMeta"]["nextOffset"], 1);
         assert_eq!(ret["report"]["stageSummariesMeta"]["maxStageCount"], 1);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn list_judge_reviews_ops_handler_should_require_workspace_owner() -> Result<()> {
+        let (_tdb, state) = AppState::new_for_test().await?;
+        let non_owner = state.find_user_by_id(2).await?.expect("user should exist");
+
+        let result = list_judge_reviews_ops_handler(
+            Extension(non_owner),
+            State(state),
+            Query(ListJudgeReviewOpsQuery {
+                from: None,
+                to: None,
+                winner: None,
+                rejudge_triggered: None,
+                has_verdict_evidence: None,
+                anomaly_only: false,
+                limit: Some(20),
+            }),
+        )
+        .await;
+        match result {
+            Ok(_) => panic!("non owner should be rejected"),
+            Err(err) => assert!(matches!(err, AppError::DebateConflict(_))),
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn request_judge_rejudge_ops_handler_should_accept_when_report_exists() -> Result<()> {
+        let (_tdb, state) = AppState::new_for_test().await?;
+        state.update_workspace_owner(1, 1).await?;
+        let owner = state.find_user_by_id(1).await?.expect("owner should exist");
+        let session_id = seed_topic_and_session(&state, 1, "closed").await?;
+        let job_id = seed_running_judge_job(&state, session_id).await?;
+        state
+            .submit_judge_report(
+                job_id as u64,
+                crate::SubmitJudgeReportInput {
+                    winner: "pro".to_string(),
+                    pro_score: 82,
+                    con_score: 76,
+                    logic_pro: 82,
+                    logic_con: 75,
+                    evidence_pro: 84,
+                    evidence_con: 77,
+                    rebuttal_pro: 81,
+                    rebuttal_con: 74,
+                    clarity_pro: 83,
+                    clarity_con: 78,
+                    pro_summary: "pro".to_string(),
+                    con_summary: "con".to_string(),
+                    rationale: "rationale".to_string(),
+                    style_mode: Some("rational".to_string()),
+                    needs_draw_vote: false,
+                    rejudge_triggered: false,
+                    payload: serde_json::json!({"trace":"ops-rejudge"}),
+                    winner_first: Some("pro".to_string()),
+                    winner_second: Some("pro".to_string()),
+                    stage_summaries: vec![],
+                },
+            )
+            .await?;
+
+        let response = request_judge_rejudge_ops_handler(
+            Extension(owner),
+            State(state),
+            Path(session_id as u64),
+        )
+        .await?
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+        let body = response.into_body().collect().await?.to_bytes();
+        let ret: serde_json::Value = serde_json::from_slice(&body)?;
+        assert_eq!(ret["rejudgeTriggered"], true);
         Ok(())
     }
 }

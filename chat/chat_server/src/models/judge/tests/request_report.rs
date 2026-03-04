@@ -621,3 +621,180 @@ async fn get_latest_judge_report_should_resolve_verdict_evidence_refs() -> Resul
     );
     Ok(())
 }
+
+#[tokio::test]
+async fn list_judge_reviews_by_owner_should_filter_anomaly_and_evidence() -> Result<()> {
+    let (_tdb, state) = AppState::new_for_test().await?;
+    state.update_workspace_owner(1, 1).await?;
+    let owner = state.find_user_by_id(1).await?.expect("owner should exist");
+
+    let normal_session = seed_topic_and_session(&state, 1, "closed").await?;
+    let normal_job = seed_running_judge_job(&state, normal_session).await?;
+    let normal_msg =
+        seed_session_message(&state, normal_session, 1, "pro", "normal evidence line").await?;
+    state
+        .submit_judge_report(
+            normal_job as u64,
+            SubmitJudgeReportInput {
+                winner: "pro".to_string(),
+                pro_score: 90,
+                con_score: 70,
+                logic_pro: 89,
+                logic_con: 71,
+                evidence_pro: 91,
+                evidence_con: 72,
+                rebuttal_pro: 88,
+                rebuttal_con: 73,
+                clarity_pro: 90,
+                clarity_con: 74,
+                pro_summary: "pro".to_string(),
+                con_summary: "con".to_string(),
+                rationale: "rationale".to_string(),
+                style_mode: Some("rational".to_string()),
+                needs_draw_vote: false,
+                rejudge_triggered: false,
+                payload: serde_json::json!({
+                    "verdictEvidenceRefs":[
+                        {"messageId": normal_msg, "side":"pro", "role":"winner_support", "reason":"evidence"}
+                    ]
+                }),
+                winner_first: Some("pro".to_string()),
+                winner_second: Some("pro".to_string()),
+                stage_summaries: vec![],
+            },
+        )
+        .await?;
+
+    let abnormal_session = seed_topic_and_session(&state, 1, "closed").await?;
+    let abnormal_job = seed_running_judge_job(&state, abnormal_session).await?;
+    state
+        .submit_judge_report(
+            abnormal_job as u64,
+            SubmitJudgeReportInput {
+                winner: "pro".to_string(),
+                pro_score: 81,
+                con_score: 79,
+                logic_pro: 80,
+                logic_con: 78,
+                evidence_pro: 80,
+                evidence_con: 79,
+                rebuttal_pro: 81,
+                rebuttal_con: 78,
+                clarity_pro: 80,
+                clarity_con: 79,
+                pro_summary: "pro".to_string(),
+                con_summary: "con".to_string(),
+                rationale: "rationale".to_string(),
+                style_mode: Some("rational".to_string()),
+                needs_draw_vote: false,
+                rejudge_triggered: false,
+                payload: serde_json::json!({"trace":"abnormal-no-evidence"}),
+                winner_first: Some("pro".to_string()),
+                winner_second: Some("con".to_string()),
+                stage_summaries: vec![],
+            },
+        )
+        .await?;
+
+    let ret = state
+        .list_judge_reviews_by_owner(
+            &owner,
+            ListJudgeReviewOpsQuery {
+                from: None,
+                to: None,
+                winner: Some("pro".to_string()),
+                rejudge_triggered: Some(false),
+                has_verdict_evidence: Some(false),
+                anomaly_only: true,
+                limit: Some(20),
+            },
+        )
+        .await?;
+
+    assert!(ret.scanned_count >= 1);
+    assert_eq!(ret.returned_count, 1);
+    assert_eq!(ret.items.len(), 1);
+    let item = &ret.items[0];
+    assert_eq!(item.session_id, abnormal_session as u64);
+    assert!(!item.has_verdict_evidence);
+    assert!(item
+        .abnormal_flags
+        .iter()
+        .any(|v| v == "missing_verdict_evidence_refs"));
+    assert!(item
+        .abnormal_flags
+        .iter()
+        .any(|v| v == "winner_inconsistent_between_two_passes"));
+    Ok(())
+}
+
+#[tokio::test]
+async fn request_judge_rejudge_by_owner_should_enforce_owner_and_report_requirements() -> Result<()>
+{
+    let (_tdb, state) = AppState::new_for_test().await?;
+    state.update_workspace_owner(1, 1).await?;
+    let owner = state.find_user_by_id(1).await?.expect("owner should exist");
+    let non_owner = state
+        .find_user_by_id(2)
+        .await?
+        .expect("non owner should exist");
+
+    let session_id = seed_topic_and_session(&state, 1, "closed").await?;
+
+    let non_owner_err = state
+        .request_judge_rejudge_by_owner(session_id as u64, &non_owner)
+        .await
+        .expect_err("non owner should be rejected");
+    assert!(matches!(non_owner_err, AppError::DebateConflict(_)));
+
+    let no_report_err = state
+        .request_judge_rejudge_by_owner(session_id as u64, &owner)
+        .await
+        .expect_err("should require existing report first");
+    assert!(matches!(no_report_err, AppError::DebateConflict(_)));
+
+    let job_id = seed_running_judge_job(&state, session_id).await?;
+    state
+        .submit_judge_report(
+            job_id as u64,
+            SubmitJudgeReportInput {
+                winner: "con".to_string(),
+                pro_score: 70,
+                con_score: 89,
+                logic_pro: 71,
+                logic_con: 88,
+                evidence_pro: 69,
+                evidence_con: 90,
+                rebuttal_pro: 72,
+                rebuttal_con: 87,
+                clarity_pro: 70,
+                clarity_con: 89,
+                pro_summary: "pro".to_string(),
+                con_summary: "con".to_string(),
+                rationale: "rationale".to_string(),
+                style_mode: Some("rational".to_string()),
+                needs_draw_vote: false,
+                rejudge_triggered: false,
+                payload: serde_json::json!({"trace":"initial-report"}),
+                winner_first: Some("con".to_string()),
+                winner_second: Some("con".to_string()),
+                stage_summaries: vec![],
+            },
+        )
+        .await?;
+
+    let first = state
+        .request_judge_rejudge_by_owner(session_id as u64, &owner)
+        .await?;
+    assert!(first.newly_created);
+    assert!(first.rejudge_triggered);
+    assert_eq!(first.status, "running");
+
+    let second = state
+        .request_judge_rejudge_by_owner(session_id as u64, &owner)
+        .await?;
+    assert!(!second.newly_created);
+    assert_eq!(second.job_id, first.job_id);
+    assert_eq!(second.style_mode_source, "existing_running_job");
+    Ok(())
+}

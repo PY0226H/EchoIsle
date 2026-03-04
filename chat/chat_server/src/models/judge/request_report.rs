@@ -1,12 +1,71 @@
 use super::*;
 use std::collections::HashMap;
 
+fn normalize_ops_review_limit(limit: Option<u32>) -> i64 {
+    let requested = limit.unwrap_or(DEFAULT_OPS_JUDGE_REVIEW_LIMIT);
+    requested.clamp(1, MAX_OPS_JUDGE_REVIEW_LIMIT) as i64
+}
+
+fn normalize_optional_winner_filter(winner: Option<String>) -> Result<Option<String>, AppError> {
+    match winner {
+        Some(value) => {
+            let trimmed = value.trim();
+            if trimmed.is_empty() {
+                Ok(None)
+            } else {
+                Ok(Some(normalize_winner(trimmed, "winner")?))
+            }
+        }
+        None => Ok(None),
+    }
+}
+
+fn detect_ops_review_abnormal_flags(item: &JudgeReviewOpsItem) -> Vec<String> {
+    let mut flags = Vec::new();
+    if item.verdict_evidence_count == 0 {
+        flags.push("missing_verdict_evidence_refs".to_string());
+    }
+    if item.winner != "draw" && item.score_gap <= 3 {
+        flags.push("narrow_score_gap".to_string());
+    }
+    if item.winner == "draw" && !item.needs_draw_vote {
+        flags.push("draw_without_vote_flow".to_string());
+    }
+    if let (Some(first), Some(second)) =
+        (item.winner_first.as_deref(), item.winner_second.as_deref())
+    {
+        if first != second {
+            flags.push("winner_inconsistent_between_two_passes".to_string());
+        }
+    }
+    flags
+}
+
 impl AppState {
-    pub async fn request_judge_job(
+    async fn ensure_workspace_owner_for_judge_ops(&self, user: &User) -> Result<(), AppError> {
+        let owner_row: Option<(i64,)> =
+            sqlx::query_as("SELECT owner_id FROM workspaces WHERE id = $1")
+                .bind(user.ws_id)
+                .fetch_optional(&self.pool)
+                .await?;
+        let Some((owner_id,)) = owner_row else {
+            return Err(AppError::NotFound(format!("workspace id {}", user.ws_id)));
+        };
+        if owner_id != user.id {
+            return Err(AppError::DebateConflict(
+                "only workspace owner can manage debate operations".to_string(),
+            ));
+        }
+        Ok(())
+    }
+
+    async fn request_judge_job_internal(
         &self,
         session_id: u64,
         user: &User,
         input: RequestJudgeJobInput,
+        require_participant: bool,
+        require_existing_report: bool,
     ) -> Result<RequestJudgeJobOutput, AppError> {
         let configured_style_mode = self.config.ai_judge.style_mode.clone();
         let (style_mode, style_mode_source) =
@@ -55,22 +114,24 @@ impl AppState {
             )));
         }
 
-        let joined: Option<(i32,)> = sqlx::query_as(
-            r#"
-            SELECT 1
-            FROM session_participants
-            WHERE session_id = $1 AND user_id = $2
-            "#,
-        )
-        .bind(session_id as i64)
-        .bind(user.id)
-        .fetch_optional(&mut *tx)
-        .await?;
-        if joined.is_none() {
-            return Err(AppError::DebateConflict(format!(
-                "user {} has not joined session {}",
-                user.id, session_id
-            )));
+        if require_participant {
+            let joined: Option<(i32,)> = sqlx::query_as(
+                r#"
+                SELECT 1
+                FROM session_participants
+                WHERE session_id = $1 AND user_id = $2
+                "#,
+            )
+            .bind(session_id as i64)
+            .bind(user.id)
+            .fetch_optional(&mut *tx)
+            .await?;
+            if joined.is_none() {
+                return Err(AppError::DebateConflict(format!(
+                    "user {} has not joined session {}",
+                    user.id, session_id
+                )));
+            }
         }
 
         let existing_running: Option<JudgeJobRow> = sqlx::query_as(
@@ -112,6 +173,13 @@ impl AppState {
         .fetch_optional(&mut *tx)
         .await?
         .is_some();
+
+        if require_existing_report && !report_exists {
+            return Err(AppError::DebateConflict(format!(
+                "session {} has no judge report, cannot trigger rejudge",
+                session_id
+            )));
+        }
         if report_exists && !input.allow_rejudge {
             return Err(AppError::DebateConflict(format!(
                 "session {} already has judge report, set allowRejudge=true to create rejudge job",
@@ -170,6 +238,152 @@ impl AppState {
             rejudge_triggered: job.rejudge_triggered,
             requested_at: job.requested_at,
             newly_created: true,
+        })
+    }
+
+    pub async fn request_judge_job(
+        &self,
+        session_id: u64,
+        user: &User,
+        input: RequestJudgeJobInput,
+    ) -> Result<RequestJudgeJobOutput, AppError> {
+        self.request_judge_job_internal(session_id, user, input, true, false)
+            .await
+    }
+
+    pub async fn request_judge_rejudge_by_owner(
+        &self,
+        session_id: u64,
+        user: &User,
+    ) -> Result<RequestJudgeJobOutput, AppError> {
+        self.ensure_workspace_owner_for_judge_ops(user).await?;
+        self.request_judge_job_internal(
+            session_id,
+            user,
+            RequestJudgeJobInput {
+                style_mode: None,
+                allow_rejudge: true,
+            },
+            false,
+            true,
+        )
+        .await
+    }
+
+    pub async fn list_judge_reviews_by_owner(
+        &self,
+        user: &User,
+        query: ListJudgeReviewOpsQuery,
+    ) -> Result<ListJudgeReviewOpsOutput, AppError> {
+        self.ensure_workspace_owner_for_judge_ops(user).await?;
+        if let (Some(from), Some(to)) = (query.from, query.to) {
+            if from > to {
+                return Err(AppError::DebateError("from must be <= to".to_string()));
+            }
+        }
+
+        let winner_filter = normalize_optional_winner_filter(query.winner)?;
+        let row_limit = normalize_ops_review_limit(query.limit);
+        let scan_limit = if query.anomaly_only {
+            (row_limit * 4).min((MAX_OPS_JUDGE_REVIEW_LIMIT as i64) * 4)
+        } else {
+            row_limit
+        };
+
+        let rows: Vec<JudgeReviewOpsRow> = sqlx::query_as(
+            r#"
+            SELECT
+                r.id AS report_id,
+                r.session_id,
+                r.job_id,
+                r.winner,
+                j.winner_first,
+                j.winner_second,
+                r.pro_score,
+                r.con_score,
+                r.style_mode,
+                r.rubric_version,
+                r.needs_draw_vote,
+                r.rejudge_triggered,
+                CASE
+                    WHEN jsonb_typeof(r.payload->'verdictEvidenceRefs') = 'array'
+                    THEN jsonb_array_length(r.payload->'verdictEvidenceRefs')
+                    ELSE 0
+                END AS verdict_evidence_count,
+                r.created_at
+            FROM judge_reports r
+            JOIN judge_jobs j ON j.id = r.job_id
+            WHERE r.ws_id = $1
+              AND ($2::timestamptz IS NULL OR r.created_at >= $2)
+              AND ($3::timestamptz IS NULL OR r.created_at <= $3)
+              AND ($4::varchar IS NULL OR r.winner = $4)
+              AND ($5::boolean IS NULL OR r.rejudge_triggered = $5)
+              AND (
+                $6::boolean IS NULL
+                OR (
+                    CASE
+                        WHEN jsonb_typeof(r.payload->'verdictEvidenceRefs') = 'array'
+                        THEN jsonb_array_length(r.payload->'verdictEvidenceRefs') > 0
+                        ELSE FALSE
+                    END
+                ) = $6
+              )
+            ORDER BY r.created_at DESC
+            LIMIT $7
+            "#,
+        )
+        .bind(user.ws_id)
+        .bind(query.from)
+        .bind(query.to)
+        .bind(winner_filter)
+        .bind(query.rejudge_triggered)
+        .bind(query.has_verdict_evidence)
+        .bind(scan_limit)
+        .fetch_all(&self.pool)
+        .await?;
+
+        let scanned_count = u32::try_from(rows.len()).unwrap_or(u32::MAX);
+        let mut items = Vec::new();
+        for row in rows {
+            let verdict_evidence_count = if row.verdict_evidence_count <= 0 {
+                0
+            } else {
+                u32::try_from(row.verdict_evidence_count).unwrap_or(u32::MAX)
+            };
+            let score_gap = row.pro_score.abs_diff(row.con_score) as i32;
+            let mut item = JudgeReviewOpsItem {
+                report_id: row.report_id as u64,
+                session_id: row.session_id as u64,
+                job_id: row.job_id as u64,
+                winner: row.winner,
+                winner_first: row.winner_first,
+                winner_second: row.winner_second,
+                pro_score: row.pro_score,
+                con_score: row.con_score,
+                score_gap,
+                style_mode: row.style_mode,
+                rubric_version: row.rubric_version,
+                needs_draw_vote: row.needs_draw_vote,
+                rejudge_triggered: row.rejudge_triggered,
+                has_verdict_evidence: verdict_evidence_count > 0,
+                verdict_evidence_count,
+                abnormal_flags: Vec::new(),
+                created_at: row.created_at,
+            };
+            item.abnormal_flags = detect_ops_review_abnormal_flags(&item);
+            if query.anomaly_only && item.abnormal_flags.is_empty() {
+                continue;
+            }
+            items.push(item);
+            if i64::try_from(items.len()).unwrap_or(i64::MAX) >= row_limit {
+                break;
+            }
+        }
+
+        Ok(ListJudgeReviewOpsOutput {
+            scanned_count,
+            returned_count: u32::try_from(items.len()).unwrap_or(u32::MAX),
+            items,
         })
     }
 
