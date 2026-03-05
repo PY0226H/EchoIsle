@@ -112,6 +112,18 @@ pub struct AiJudgeConfig {
     pub dispatch_max_attempts: i32,
     #[serde(default = "default_ai_judge_dispatch_callback_wait_secs")]
     pub dispatch_callback_wait_secs: i64,
+    #[serde(default)]
+    pub alert_outbox_bridge_enabled: bool,
+    #[serde(default = "default_ai_judge_alert_outbox_poll_interval_secs")]
+    pub alert_outbox_poll_interval_secs: u64,
+    #[serde(default = "default_ai_judge_alert_outbox_batch_size")]
+    pub alert_outbox_batch_size: u64,
+    #[serde(default = "default_ai_judge_alert_outbox_path")]
+    pub alert_outbox_path: String,
+    #[serde(default = "default_ai_judge_alert_outbox_delivery_path")]
+    pub alert_outbox_delivery_path: String,
+    #[serde(default = "default_ai_judge_alert_outbox_timeout_ms")]
+    pub alert_outbox_timeout_ms: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -145,6 +157,12 @@ impl Default for AiJudgeConfig {
             dispatch_timeout_ms: default_ai_judge_dispatch_timeout_ms(),
             dispatch_max_attempts: default_ai_judge_dispatch_max_attempts(),
             dispatch_callback_wait_secs: default_ai_judge_dispatch_callback_wait_secs(),
+            alert_outbox_bridge_enabled: false,
+            alert_outbox_poll_interval_secs: default_ai_judge_alert_outbox_poll_interval_secs(),
+            alert_outbox_batch_size: default_ai_judge_alert_outbox_batch_size(),
+            alert_outbox_path: default_ai_judge_alert_outbox_path(),
+            alert_outbox_delivery_path: default_ai_judge_alert_outbox_delivery_path(),
+            alert_outbox_timeout_ms: default_ai_judge_alert_outbox_timeout_ms(),
         }
     }
 }
@@ -304,6 +322,26 @@ fn default_ai_judge_dispatch_max_attempts() -> i32 {
 
 fn default_ai_judge_dispatch_callback_wait_secs() -> i64 {
     60
+}
+
+fn default_ai_judge_alert_outbox_poll_interval_secs() -> u64 {
+    5
+}
+
+fn default_ai_judge_alert_outbox_batch_size() -> u64 {
+    50
+}
+
+fn default_ai_judge_alert_outbox_path() -> String {
+    "/internal/judge/alerts/outbox".to_string()
+}
+
+fn default_ai_judge_alert_outbox_delivery_path() -> String {
+    "/internal/judge/alerts/outbox/{event_id}/delivery".to_string()
+}
+
+fn default_ai_judge_alert_outbox_timeout_ms() -> u64 {
+    5_000
 }
 
 fn default_payment_verify_mode() -> String {
@@ -473,5 +511,19 @@ mod tests {
         cfg.startup_policy = "fail_closed".to_string();
         assert!(cfg.startup_fail_closed());
         assert_eq!(cfg.startup_policy_label(), "fail_closed");
+    }
+
+    #[test]
+    fn ai_judge_alert_outbox_defaults_should_be_stable() {
+        let cfg = AiJudgeConfig::default();
+        assert!(!cfg.alert_outbox_bridge_enabled);
+        assert_eq!(cfg.alert_outbox_poll_interval_secs, 5);
+        assert_eq!(cfg.alert_outbox_batch_size, 50);
+        assert_eq!(cfg.alert_outbox_path, "/internal/judge/alerts/outbox");
+        assert_eq!(
+            cfg.alert_outbox_delivery_path,
+            "/internal/judge/alerts/outbox/{event_id}/delivery"
+        );
+        assert_eq!(cfg.alert_outbox_timeout_ms, 5_000);
     }
 }

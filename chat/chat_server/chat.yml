@@ -47,6 +47,12 @@ ai_judge:
   dispatch_timeout_ms: 8000
   dispatch_max_attempts: 3
   dispatch_callback_wait_secs: 60
+  alert_outbox_bridge_enabled: false
+  alert_outbox_poll_interval_secs: 5
+  alert_outbox_batch_size: 50
+  alert_outbox_path: /internal/judge/alerts/outbox
+  alert_outbox_delivery_path: /internal/judge/alerts/outbox/{event_id}/delivery
+  alert_outbox_timeout_ms: 5000
 payment:
   verify_mode: mock
   apple_verify_url_prod: https://buy.itunes.apple.com/verifyReceipt

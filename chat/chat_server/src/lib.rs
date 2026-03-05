@@ -270,6 +270,7 @@ impl AppState {
         spawn_debate_session_worker(state.clone());
         spawn_ai_judge_dispatch_worker(state.clone(), dispatch_trigger_rx);
         spawn_ops_observability_alert_worker(state.clone());
+        spawn_ai_judge_alert_outbox_bridge_worker(state.clone());
         Ok(state)
     }
 
@@ -424,6 +425,33 @@ fn spawn_ops_observability_alert_worker(state: AppState) {
                 Err(err) => warn!("ops observability alert worker tick failed: {}", err),
             }
             sleep(Duration::from_secs(OPS_OBSERVABILITY_WORKER_INTERVAL_SECS)).await;
+        }
+    });
+}
+
+fn spawn_ai_judge_alert_outbox_bridge_worker(state: AppState) {
+    if !state.config.ai_judge.alert_outbox_bridge_enabled {
+        return;
+    }
+    tokio::spawn(async move {
+        loop {
+            match state.bridge_ai_judge_alert_outbox_once().await {
+                Ok(report) => {
+                    debug!(
+                        fetched = report.fetched,
+                        delivered = report.delivered,
+                        delivery_failed = report.delivery_failed,
+                        callback_failed = report.callback_failed,
+                        skipped_duplicate = report.skipped_duplicate,
+                        "ai judge alert outbox bridge worker tick success"
+                    );
+                }
+                Err(err) => warn!("ai judge alert outbox bridge worker tick failed: {}", err),
+            }
+            sleep(Duration::from_secs(
+                state.config.ai_judge.alert_outbox_poll_interval_secs.max(1),
+            ))
+            .await;
         }
     });
 }

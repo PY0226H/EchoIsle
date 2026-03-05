@@ -2,10 +2,12 @@ use crate::{AppError, AppState};
 use anyhow::Context;
 use chat_core::User;
 use chrono::{DateTime, Utc};
+use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sqlx::FromRow;
 use std::collections::{HashMap, HashSet};
+use tracing::warn;
 use utoipa::{IntoParams, ToSchema};
 
 use super::OpsPermission;
@@ -24,6 +26,10 @@ const OPS_ALERT_RULE_HIGH_RETRY: &str = "high_retry";
 const OPS_ALERT_RULE_HIGH_DB_LATENCY: &str = "high_db_latency";
 const OPS_ALERT_RULE_DLQ_PENDING: &str = "dlq_pending";
 const OPS_ALERT_EVAL_WINDOW_MINUTES: i64 = 10;
+const AI_JUDGE_OUTBOX_ALERT_KEY_PREFIX: &str = "ai_judge_outbox";
+const AI_JUDGE_OUTBOX_RULE_TYPE_PREFIX: &str = "ai_judge";
+const AI_JUDGE_OUTBOX_DEFAULT_EVENT_TYPE: &str = "ai_judge.audit_alert.status_changed.v1";
+const AI_JUDGE_OUTBOX_ERROR_MAX_LEN: usize = 500;
 
 fn clamp_float(value: f64, min: f64, max: f64, fallback: f64) -> f64 {
     if !value.is_finite() {
@@ -152,6 +158,16 @@ pub struct OpsAlertEvalReport {
     pub alerts_suppressed: u64,
 }
 
+#[derive(Debug, Clone, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct AiJudgeAlertOutboxBridgeReport {
+    pub fetched: u64,
+    pub delivered: u64,
+    pub delivery_failed: u64,
+    pub callback_failed: u64,
+    pub skipped_duplicate: u64,
+}
+
 #[derive(Debug, Clone, FromRow)]
 struct OpsAlertNotificationRow {
     id: i64,
@@ -169,6 +185,62 @@ struct OpsAlertNotificationRow {
     delivered_at: Option<DateTime<Utc>>,
     created_at: DateTime<Utc>,
     updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AiJudgeOutboxListResponse {
+    #[serde(default)]
+    items: Vec<AiJudgeOutboxItem>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AiJudgeOutboxItem {
+    event_id: String,
+    ws_id: Option<u64>,
+    job_id: Option<u64>,
+    trace_id: Option<String>,
+    alert_id: Option<String>,
+    status: Option<String>,
+    #[serde(default)]
+    payload: Value,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct AiJudgeOutboxPayload {
+    #[serde(default)]
+    event_type: String,
+    ws_id: Option<u64>,
+    job_id: Option<u64>,
+    trace_id: Option<String>,
+    alert_id: Option<String>,
+    alert_type: Option<String>,
+    severity: Option<String>,
+    status: Option<String>,
+    title: Option<String>,
+    message: Option<String>,
+    #[serde(default)]
+    details: Value,
+}
+
+#[derive(Debug, Clone)]
+struct AiJudgeOutboxNormalizedEvent {
+    event_id: String,
+    ws_id: i64,
+    alert_type: String,
+    severity: String,
+    alert_status: String,
+    title: String,
+    message: String,
+    metrics: Value,
+}
+
+#[derive(Debug, Clone)]
+enum AiJudgeAlertDeliveryOutcome {
+    Sent,
+    Failed(String),
 }
 
 #[derive(Debug, Clone, FromRow)]
@@ -404,6 +476,126 @@ fn parse_recipient_ids(value: &Value) -> Vec<u64> {
                 .or_else(|| v.as_i64().and_then(|n| u64::try_from(n).ok()))
         })
         .collect()
+}
+
+fn build_http_url(base: &str, path: &str) -> String {
+    let base = base.trim_end_matches('/');
+    let path = path.trim_start_matches('/');
+    format!("{base}/{path}")
+}
+
+fn sanitize_bridge_error_message(message: &str) -> String {
+    let trimmed = message.trim();
+    if trimmed.is_empty() {
+        return "bridge delivery failed".to_string();
+    }
+    if trimmed.len() <= AI_JUDGE_OUTBOX_ERROR_MAX_LEN {
+        return trimmed.to_string();
+    }
+    trimmed
+        .chars()
+        .take(AI_JUDGE_OUTBOX_ERROR_MAX_LEN)
+        .collect()
+}
+
+fn map_ai_alert_status(status: &str) -> Option<&'static str> {
+    match status.trim().to_ascii_lowercase().as_str() {
+        ALERT_STATUS_RAISED => Some(ALERT_STATUS_RAISED),
+        "acked" | "acknowledged" | ALERT_STATUS_SUPPRESSED => Some(ALERT_STATUS_SUPPRESSED),
+        "resolved" | ALERT_STATUS_CLEARED => Some(ALERT_STATUS_CLEARED),
+        _ => None,
+    }
+}
+
+fn normalize_severity(raw: Option<&str>) -> String {
+    let normalized = raw.unwrap_or_default().trim().to_ascii_lowercase();
+    if normalized.is_empty() {
+        ALERT_SEVERITY_WARNING.to_string()
+    } else {
+        normalized
+    }
+}
+
+fn normalize_text(raw: Option<&str>, fallback: &str) -> String {
+    let value = raw.unwrap_or_default().trim();
+    if value.is_empty() {
+        fallback.to_string()
+    } else {
+        value.to_string()
+    }
+}
+
+fn build_ai_judge_outbox_alert_key(event_id: &str) -> String {
+    format!("{AI_JUDGE_OUTBOX_ALERT_KEY_PREFIX}:{event_id}")
+}
+
+fn normalize_ai_judge_outbox_event(
+    item: AiJudgeOutboxItem,
+) -> Result<AiJudgeOutboxNormalizedEvent, String> {
+    let event_id = item.event_id.trim().to_string();
+    if event_id.is_empty() {
+        return Err("empty outbox event_id".to_string());
+    }
+
+    let payload: AiJudgeOutboxPayload =
+        serde_json::from_value(item.payload.clone()).unwrap_or_default();
+    let ws_id_raw = item.ws_id.or(payload.ws_id);
+    let ws_id_u64 = ws_id_raw.ok_or_else(|| "missing wsId".to_string())?;
+    let ws_id = i64::try_from(ws_id_u64).map_err(|_| "wsId overflow".to_string())?;
+    let status_raw = item
+        .status
+        .as_deref()
+        .or(payload.status.as_deref())
+        .unwrap_or_default();
+    let mapped_status = map_ai_alert_status(status_raw)
+        .ok_or_else(|| format!("unsupported outbox status: {status_raw}"))?
+        .to_string();
+
+    let alert_type = normalize_text(payload.alert_type.as_deref(), "runtime_alert");
+    let alert_id = normalize_text(
+        payload.alert_id.as_deref().or(item.alert_id.as_deref()),
+        &event_id,
+    );
+    let severity = normalize_severity(payload.severity.as_deref());
+    let title = normalize_text(payload.title.as_deref(), "AI 裁判运行告警");
+    let message = normalize_text(
+        payload.message.as_deref(),
+        "AI 裁判链路出现告警，请在运维面板查看详情",
+    );
+    let event_type = normalize_text(
+        if payload.event_type.trim().is_empty() {
+            None
+        } else {
+            Some(payload.event_type.as_str())
+        },
+        AI_JUDGE_OUTBOX_DEFAULT_EVENT_TYPE,
+    );
+    let trace_id = item.trace_id.or(payload.trace_id);
+    let job_id = item
+        .job_id
+        .or(payload.job_id)
+        .and_then(|v| i64::try_from(v).ok());
+    let metrics = serde_json::json!({
+        "eventId": event_id,
+        "eventType": event_type,
+        "alertId": alert_id,
+        "alertType": alert_type,
+        "traceId": trace_id,
+        "jobId": job_id,
+        "statusRaw": status_raw,
+        "details": payload.details,
+    });
+
+    Ok(AiJudgeOutboxNormalizedEvent {
+        event_id,
+        ws_id,
+        alert_type,
+        severity,
+        alert_status: mapped_status,
+        title,
+        message,
+        metrics,
+    })
 }
 
 fn map_alert_notification_row(row: OpsAlertNotificationRow) -> OpsAlertNotificationItem {
@@ -851,6 +1043,199 @@ impl AppState {
         Ok(ret)
     }
 
+    async fn fetch_ai_judge_alert_outbox(
+        &self,
+        delivery_status: &str,
+        limit: u64,
+    ) -> Result<Vec<AiJudgeOutboxItem>, AppError> {
+        let url = build_http_url(
+            &self.config.ai_judge.service_base_url,
+            &self.config.ai_judge.alert_outbox_path,
+        );
+        let client = Client::builder()
+            .timeout(std::time::Duration::from_millis(
+                self.config.ai_judge.alert_outbox_timeout_ms.max(1),
+            ))
+            .build()
+            .context("build ai judge outbox bridge client failed")?;
+        let resp = client
+            .get(url)
+            .header("x-ai-internal-key", &self.config.ai_judge.internal_key)
+            .query(&[
+                ("delivery_status", delivery_status.to_string()),
+                ("limit", limit.clamp(1, 200).to_string()),
+            ])
+            .send()
+            .await
+            .context("fetch ai judge alert outbox failed")?;
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            return Err(AppError::DebateError(format!(
+                "fetch ai judge alert outbox failed: status={status}, body={body}"
+            )));
+        }
+        let parsed = resp
+            .json::<AiJudgeOutboxListResponse>()
+            .await
+            .context("parse ai judge outbox response failed")?;
+        Ok(parsed.items)
+    }
+
+    async fn mark_ai_judge_alert_outbox_delivery(
+        &self,
+        event_id: &str,
+        delivery_status: &str,
+        error_message: Option<&str>,
+    ) -> Result<(), AppError> {
+        let path = self
+            .config
+            .ai_judge
+            .alert_outbox_delivery_path
+            .replace("{event_id}", event_id);
+        let url = build_http_url(&self.config.ai_judge.service_base_url, &path);
+        let client = Client::builder()
+            .timeout(std::time::Duration::from_millis(
+                self.config.ai_judge.alert_outbox_timeout_ms.max(1),
+            ))
+            .build()
+            .context("build ai judge outbox callback client failed")?;
+        let mut req = client
+            .post(url)
+            .header("x-ai-internal-key", &self.config.ai_judge.internal_key)
+            .query(&[("delivery_status", delivery_status.to_string())]);
+        if let Some(error_message) = error_message {
+            req = req.query(&[(
+                "error_message",
+                sanitize_bridge_error_message(error_message),
+            )]);
+        }
+        let resp = req
+            .send()
+            .await
+            .context("callback ai judge outbox delivery failed")?;
+        if resp.status().is_success() {
+            return Ok(());
+        }
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        Err(AppError::DebateError(format!(
+            "callback ai judge outbox delivery failed: status={status}, body={body}"
+        )))
+    }
+
+    async fn find_existing_bridge_notification_delivery_status(
+        &self,
+        ws_id: i64,
+        alert_key: &str,
+    ) -> Result<Option<String>, AppError> {
+        let row: Option<String> = sqlx::query_scalar(
+            r#"
+            SELECT delivery_status
+            FROM ops_alert_notifications
+            WHERE ws_id = $1
+              AND alert_key = $2
+            ORDER BY id DESC
+            LIMIT 1
+            "#,
+        )
+        .bind(ws_id)
+        .bind(alert_key)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row)
+    }
+
+    async fn emit_ai_judge_bridge_notification(
+        &self,
+        event: &AiJudgeOutboxNormalizedEvent,
+        alert_key: &str,
+        recipients: &[u64],
+    ) -> Result<AiJudgeAlertDeliveryOutcome, AppError> {
+        let mut tx = self.pool.begin().await?;
+        let recipients_json = serde_json::to_value(recipients).context("serialize recipients")?;
+        let notification_id: i64 = sqlx::query_scalar(
+            r#"
+            INSERT INTO ops_alert_notifications(
+                ws_id, alert_key, rule_type, severity, alert_status,
+                title, message, metrics_json, recipients_json,
+                delivery_status, created_at, updated_at
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NOW(), NOW())
+            RETURNING id
+            "#,
+        )
+        .bind(event.ws_id)
+        .bind(alert_key)
+        .bind(format!(
+            "{AI_JUDGE_OUTBOX_RULE_TYPE_PREFIX}:{}",
+            event.alert_type
+        ))
+        .bind(&event.severity)
+        .bind(&event.alert_status)
+        .bind(&event.title)
+        .bind(&event.message)
+        .bind(&event.metrics)
+        .bind(recipients_json)
+        .bind(ALERT_DELIVERY_PENDING)
+        .fetch_one(&mut *tx)
+        .await?;
+
+        let payload = serde_json::json!({
+            "ws_id": event.ws_id,
+            "alert_key": alert_key,
+            "rule_type": format!("{AI_JUDGE_OUTBOX_RULE_TYPE_PREFIX}:{}", event.alert_type),
+            "severity": event.severity,
+            "status": event.alert_status,
+            "title": event.title,
+            "message": event.message,
+            "metrics": event.metrics,
+            "user_ids": recipients,
+        });
+        let notify_result = sqlx::query("SELECT pg_notify('ops_observability_alert', $1)")
+            .bind(payload.to_string())
+            .execute(&mut *tx)
+            .await;
+        let outcome = match notify_result {
+            Ok(_) => {
+                sqlx::query(
+                    r#"
+                    UPDATE ops_alert_notifications
+                    SET delivery_status = $2,
+                        delivered_at = NOW(),
+                        updated_at = NOW()
+                    WHERE id = $1
+                    "#,
+                )
+                .bind(notification_id)
+                .bind(ALERT_DELIVERY_SENT)
+                .execute(&mut *tx)
+                .await?;
+                AiJudgeAlertDeliveryOutcome::Sent
+            }
+            Err(err) => {
+                let reason = sanitize_bridge_error_message(&err.to_string());
+                sqlx::query(
+                    r#"
+                    UPDATE ops_alert_notifications
+                    SET delivery_status = $2,
+                        error_message = $3,
+                        updated_at = NOW()
+                    WHERE id = $1
+                    "#,
+                )
+                .bind(notification_id)
+                .bind(ALERT_DELIVERY_FAILED)
+                .bind(&reason)
+                .execute(&mut *tx)
+                .await?;
+                AiJudgeAlertDeliveryOutcome::Failed(reason)
+            }
+        };
+        tx.commit().await?;
+        Ok(outcome)
+    }
+
     async fn emit_observability_alert(
         &self,
         ws_id: i64,
@@ -1014,6 +1399,135 @@ impl AppState {
                 .await?;
             }
         }
+        Ok(report)
+    }
+
+    pub(crate) async fn bridge_ai_judge_alert_outbox_once(
+        &self,
+    ) -> Result<AiJudgeAlertOutboxBridgeReport, AppError> {
+        let mut report = AiJudgeAlertOutboxBridgeReport::default();
+        let items = self
+            .fetch_ai_judge_alert_outbox(
+                ALERT_DELIVERY_PENDING,
+                self.config.ai_judge.alert_outbox_batch_size.clamp(1, 200),
+            )
+            .await?;
+        report.fetched = items.len() as u64;
+
+        for item in items {
+            let event_id = item.event_id.trim().to_string();
+            if event_id.is_empty() {
+                report.delivery_failed += 1;
+                continue;
+            }
+            let normalized = match normalize_ai_judge_outbox_event(item) {
+                Ok(v) => v,
+                Err(err) => {
+                    report.delivery_failed += 1;
+                    if let Err(callback_err) = self
+                        .mark_ai_judge_alert_outbox_delivery(
+                            &event_id,
+                            ALERT_DELIVERY_FAILED,
+                            Some(&err),
+                        )
+                        .await
+                    {
+                        report.callback_failed += 1;
+                        warn!(
+                            event_id = event_id,
+                            "callback failed when normalizing outbox event: {}", callback_err
+                        );
+                    }
+                    continue;
+                }
+            };
+            let alert_key = build_ai_judge_outbox_alert_key(&normalized.event_id);
+            if let Some(existing_delivery_status) = self
+                .find_existing_bridge_notification_delivery_status(normalized.ws_id, &alert_key)
+                .await?
+            {
+                report.skipped_duplicate += 1;
+                if existing_delivery_status == ALERT_DELIVERY_SENT {
+                    report.delivered += 1;
+                    if let Err(err) = self
+                        .mark_ai_judge_alert_outbox_delivery(
+                            &normalized.event_id,
+                            ALERT_DELIVERY_SENT,
+                            None,
+                        )
+                        .await
+                    {
+                        report.callback_failed += 1;
+                        warn!(
+                            event_id = normalized.event_id,
+                            "callback failed for duplicate sent event: {}", err
+                        );
+                    }
+                } else {
+                    report.delivery_failed += 1;
+                    let err = format!(
+                        "duplicate event with non-sent delivery status: {existing_delivery_status}"
+                    );
+                    if let Err(callback_err) = self
+                        .mark_ai_judge_alert_outbox_delivery(
+                            &normalized.event_id,
+                            ALERT_DELIVERY_FAILED,
+                            Some(&err),
+                        )
+                        .await
+                    {
+                        report.callback_failed += 1;
+                        warn!(
+                            event_id = normalized.event_id,
+                            "callback failed for duplicate failed event: {}", callback_err
+                        );
+                    }
+                }
+                continue;
+            }
+
+            let recipients = self.list_alert_recipients(normalized.ws_id).await?;
+            match self
+                .emit_ai_judge_bridge_notification(&normalized, &alert_key, &recipients)
+                .await?
+            {
+                AiJudgeAlertDeliveryOutcome::Sent => {
+                    report.delivered += 1;
+                    if let Err(err) = self
+                        .mark_ai_judge_alert_outbox_delivery(
+                            &normalized.event_id,
+                            ALERT_DELIVERY_SENT,
+                            None,
+                        )
+                        .await
+                    {
+                        report.callback_failed += 1;
+                        warn!(
+                            event_id = normalized.event_id,
+                            "callback failed for delivered outbox event: {}", err
+                        );
+                    }
+                }
+                AiJudgeAlertDeliveryOutcome::Failed(reason) => {
+                    report.delivery_failed += 1;
+                    if let Err(err) = self
+                        .mark_ai_judge_alert_outbox_delivery(
+                            &normalized.event_id,
+                            ALERT_DELIVERY_FAILED,
+                            Some(&reason),
+                        )
+                        .await
+                    {
+                        report.callback_failed += 1;
+                        warn!(
+                            event_id = normalized.event_id,
+                            "callback failed for failed outbox event: {}", err
+                        );
+                    }
+                }
+            }
+        }
+
         Ok(report)
     }
 }
@@ -1266,5 +1780,67 @@ mod tests {
             .expect("should emit plan");
         assert_eq!(plan.status, ALERT_STATUS_RAISED);
         assert!(plan.mark_active);
+    }
+
+    #[test]
+    fn map_ai_alert_status_should_support_runtime_aliases() {
+        assert_eq!(map_ai_alert_status("raised"), Some(ALERT_STATUS_RAISED));
+        assert_eq!(map_ai_alert_status("acked"), Some(ALERT_STATUS_SUPPRESSED));
+        assert_eq!(
+            map_ai_alert_status("acknowledged"),
+            Some(ALERT_STATUS_SUPPRESSED)
+        );
+        assert_eq!(map_ai_alert_status("resolved"), Some(ALERT_STATUS_CLEARED));
+        assert_eq!(map_ai_alert_status("invalid"), None);
+    }
+
+    #[test]
+    fn normalize_ai_judge_outbox_event_should_map_status_and_fields() {
+        let item = AiJudgeOutboxItem {
+            event_id: "evt-1".to_string(),
+            ws_id: Some(1),
+            job_id: Some(99),
+            trace_id: Some("trace-1".to_string()),
+            alert_id: Some("alert-1".to_string()),
+            status: Some("acked".to_string()),
+            payload: serde_json::json!({
+                "eventType": "ai_judge.audit_alert.status_changed.v1",
+                "alertType": "model_overload",
+                "severity": "critical",
+                "title": "模型拥塞",
+                "message": "请求出现拥塞",
+                "details": { "queueDepth": 12 }
+            }),
+        };
+        let ret = normalize_ai_judge_outbox_event(item).expect("event should be normalized");
+        assert_eq!(ret.event_id, "evt-1");
+        assert_eq!(ret.ws_id, 1);
+        assert_eq!(ret.alert_status, ALERT_STATUS_SUPPRESSED);
+        assert_eq!(ret.alert_type, "model_overload");
+        assert_eq!(ret.severity, "critical");
+        assert_eq!(ret.title, "模型拥塞");
+        assert_eq!(ret.message, "请求出现拥塞");
+        assert_eq!(
+            ret.metrics
+                .get("statusRaw")
+                .and_then(Value::as_str)
+                .unwrap_or_default(),
+            "acked"
+        );
+    }
+
+    #[test]
+    fn normalize_ai_judge_outbox_event_should_require_ws_id() {
+        let item = AiJudgeOutboxItem {
+            event_id: "evt-2".to_string(),
+            ws_id: None,
+            job_id: None,
+            trace_id: None,
+            alert_id: None,
+            status: Some("raised".to_string()),
+            payload: Value::Null,
+        };
+        let err = normalize_ai_judge_outbox_event(item).expect_err("missing ws id should fail");
+        assert!(err.contains("missing wsId"));
     }
 }
