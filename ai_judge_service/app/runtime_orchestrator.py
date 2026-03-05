@@ -6,6 +6,12 @@ from typing import TYPE_CHECKING, Awaitable, Callable
 from .models import JudgeDispatchRequest, SubmitJudgeReportInput
 from .openai_judge import build_report_with_openai
 from .rag_retriever import RetrievedContext, retrieve_contexts
+from .runtime_errors import (
+    ERROR_CONSISTENCY_CONFLICT,
+    ERROR_MODEL_OVERLOAD,
+    ERROR_RAG_UNAVAILABLE,
+    normalize_runtime_error_code,
+)
 from .runtime_provider import build_report_with_provider
 from .runtime_rag import (
     apply_rag_payload_fields,
@@ -95,17 +101,54 @@ def _topic_memory_quality_scores(records: list["TopicMemoryRecord"]) -> list[flo
 def _resolve_degradation_level(
     *,
     settings: Settings,
-    rag_backend_fallback_reason: str | None,
+    rag_result: "RuntimeRagResult",
     report: SubmitJudgeReportInput,
 ) -> int:
     level = 0
-    if rag_backend_fallback_reason:
+    rag_diag = rag_result.retrieval_diagnostics if isinstance(rag_result.retrieval_diagnostics, dict) else {}
+    rerank_effective = bool(rag_diag.get("rerankEnabledEffective", settings.rag_rerank_enabled))
+    if settings.rag_rerank_enabled and not rerank_effective:
+        level = max(level, 1)
+    if rag_result.backend_fallback_reason:
         level = max(level, 1)
     if settings.rag_enabled and not report.payload.get("ragUsedByModel", False):
         level = max(level, 2)
     if report.payload.get("fallbackFrom") == "openai":
         level = max(level, 3)
     return min(level, settings.degrade_max_level)
+
+
+def _collect_runtime_error_codes(
+    *,
+    settings: Settings,
+    rag_result: "RuntimeRagResult",
+    report: SubmitJudgeReportInput,
+) -> list[str]:
+    codes: list[str] = []
+    if rag_result.backend_fallback_reason:
+        codes.append(ERROR_RAG_UNAVAILABLE)
+    if settings.rag_enabled and not report.payload.get("ragUsedByModel", False):
+        codes.append(ERROR_RAG_UNAVAILABLE)
+
+    agent_pipeline = report.payload.get("agentPipeline")
+    if isinstance(agent_pipeline, dict):
+        reflection_action = str(agent_pipeline.get("reflectionAction") or "").strip().lower()
+        if reflection_action in {"draw_protection", "low_margin_protection"}:
+            codes.append(ERROR_CONSISTENCY_CONFLICT)
+
+    if report.payload.get("fallbackFrom") == "openai":
+        raw_code = str(report.payload.get("fallbackErrorCode") or ERROR_MODEL_OVERLOAD)
+        codes.append(normalize_runtime_error_code(raw_code))
+
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for code in codes:
+        normalized = normalize_runtime_error_code(code)
+        if normalized in seen:
+            continue
+        seen.add(normalized)
+        deduped.append(normalized)
+    return deduped
 
 
 async def build_report_by_runtime(
@@ -164,9 +207,14 @@ async def build_report_by_runtime(
     )
 
     total_elapsed_ms = (perf_counter() - overall_start) * 1000.0
+    error_codes = _collect_runtime_error_codes(
+        settings=settings,
+        rag_result=rag_result,
+        report=report,
+    )
     degradation_level = _resolve_degradation_level(
         settings=settings,
-        rag_backend_fallback_reason=rag_result.backend_fallback_reason,
+        rag_result=rag_result,
         report=report,
     )
     report.payload["judgeTrace"] = {
@@ -185,6 +233,7 @@ async def build_report_by_runtime(
             "providerFallbackFrom": report.payload.get("fallbackFrom"),
             "providerFallbackReason": report.payload.get("fallbackReason"),
         },
+        "errorCodes": error_codes,
     }
     report.payload["retrievalDiagnostics"] = {
         "profile": retrieval_profile,
@@ -205,6 +254,7 @@ async def build_report_by_runtime(
         "sourceCount": len(report.payload.get("ragSources", [])),
         "ragRetriever": rag_result.retrieval_diagnostics,
     }
+    report.payload["errorCodes"] = error_codes
     report.payload["topicMemory"] = {
         "enabled": settings.topic_memory_enabled,
         "topicDomain": getattr(request, "topic_domain", "default"),

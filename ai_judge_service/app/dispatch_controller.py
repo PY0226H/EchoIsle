@@ -7,6 +7,7 @@ from typing import Any, Awaitable, Callable, Protocol
 from fastapi import HTTPException
 
 from .models import JudgeDispatchRequest
+from .runtime_errors import ERROR_MODEL_OVERLOAD, extract_runtime_error_code
 from .scoring import resolve_effective_style_mode
 
 
@@ -58,7 +59,8 @@ async def process_dispatch_request(
             style_mode_source,
         )
     except Exception as err:
-        error_message = f"judge runtime failed: {err}"
+        error_code = extract_runtime_error_code(err)
+        error_message = f"judge runtime failed ({error_code}): {err}"
         try:
             await callback_failed(request.job.job_id, error_message)
         except Exception as callback_err:  # pragma: no cover
@@ -66,7 +68,12 @@ async def process_dispatch_request(
                 status_code=502,
                 detail=f"runtime failed and callback_failed failed: {callback_err}",
             ) from callback_err
-        return {"accepted": True, "jobId": request.job.job_id, "status": "marked_failed"}
+        return {
+            "accepted": True,
+            "jobId": request.job.job_id,
+            "status": "marked_failed",
+            "errorCode": error_code or ERROR_MODEL_OVERLOAD,
+        }
 
     try:
         await callback_report(request.job.job_id, report.model_dump(mode="json"))

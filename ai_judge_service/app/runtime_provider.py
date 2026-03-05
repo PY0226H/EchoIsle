@@ -5,6 +5,11 @@ from typing import Awaitable, Callable
 from .models import JudgeDispatchRequest, SubmitJudgeReportInput
 from .openai_judge import OpenAiJudgeConfig, build_report_with_openai
 from .rag_retriever import RetrievedContext
+from .runtime_errors import (
+    ERROR_MODEL_OVERLOAD,
+    JudgeRuntimeError,
+    classify_openai_failure,
+)
 from .runtime_policy import PROVIDER_OPENAI, should_use_openai
 from .scoring import build_report
 from .settings import Settings
@@ -24,8 +29,12 @@ async def build_report_with_provider(
     build_mock_report_fn: BuildMockReportFn = build_report,
 ) -> tuple[SubmitJudgeReportInput, bool]:
     if settings.provider == PROVIDER_OPENAI and not settings.openai_api_key.strip():
+        error_code = ERROR_MODEL_OVERLOAD
         if not settings.openai_fallback_to_mock:
-            raise RuntimeError("openai runtime missing OPENAI_API_KEY")
+            raise JudgeRuntimeError(
+                code=error_code,
+                message="openai runtime missing OPENAI_API_KEY",
+            )
         report = build_mock_report_fn(
             request,
             system_style_mode=settings.judge_style_mode,
@@ -33,6 +42,7 @@ async def build_report_with_provider(
         report.payload["provider"] = "ai-judge-service-mock-missing-openai-key"
         report.payload["fallbackFrom"] = "openai"
         report.payload["fallbackReason"] = "missing OPENAI_API_KEY"
+        report.payload["fallbackErrorCode"] = error_code
         return report, False
 
     if should_use_openai(settings.provider, settings.openai_api_key):
@@ -60,8 +70,12 @@ async def build_report_with_provider(
             )
             return report, True
         except Exception as err:
+            error_code = classify_openai_failure(str(err))
             if not settings.openai_fallback_to_mock:
-                raise RuntimeError(f"openai runtime failed: {err}") from err
+                raise JudgeRuntimeError(
+                    code=error_code,
+                    message=f"openai runtime failed: {err}",
+                ) from err
             report = build_mock_report_fn(
                 request,
                 system_style_mode=settings.judge_style_mode,
@@ -69,6 +83,7 @@ async def build_report_with_provider(
             report.payload["provider"] = "ai-judge-service-mock-fallback"
             report.payload["fallbackFrom"] = "openai"
             report.payload["fallbackReason"] = str(err)[:500]
+            report.payload["fallbackErrorCode"] = error_code
             return report, False
 
     report = build_mock_report_fn(

@@ -4,6 +4,7 @@ from types import SimpleNamespace
 from fastapi import HTTPException
 
 from app.dispatch_controller import DispatchRuntimeConfig, process_dispatch_request
+from app.runtime_errors import JudgeRuntimeError
 
 
 class _FakeReport:
@@ -73,9 +74,11 @@ class DispatchControllerTests(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertEqual(result["status"], "marked_failed")
+        self.assertEqual(result["errorCode"], "model_overload")
         self.assertEqual(len(failed_calls), 1)
         self.assertEqual(failed_calls[0][0], 42)
         self.assertIn("judge runtime failed", failed_calls[0][1])
+        self.assertIn("model_overload", failed_calls[0][1])
 
     async def test_process_dispatch_request_should_raise_when_runtime_error_and_callback_failed_error(self) -> None:
         request = _build_request()
@@ -100,6 +103,29 @@ class DispatchControllerTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(ctx.exception.status_code, 502)
         self.assertIn("runtime failed and callback_failed failed", str(ctx.exception.detail))
+
+    async def test_process_dispatch_request_should_forward_runtime_error_code(self) -> None:
+        request = _build_request()
+        failed_calls: list[tuple[int, str]] = []
+
+        async def build_report_by_runtime(*_args: object, **_kwargs: object) -> _FakeReport:
+            raise JudgeRuntimeError(code="judge_timeout", message="openai request timeout")
+
+        async def callback_failed(job_id: int, error_message: str) -> None:
+            failed_calls.append((job_id, error_message))
+
+        async def callback_report(*_args: object, **_kwargs: object) -> None:
+            raise AssertionError("should not call callback_report after runtime error")
+
+        result = await process_dispatch_request(
+            request=request,
+            runtime_cfg=DispatchRuntimeConfig(process_delay_ms=0, judge_style_mode="rational"),
+            build_report_by_runtime=build_report_by_runtime,
+            callback_report=callback_report,
+            callback_failed=callback_failed,
+        )
+        self.assertEqual(result["errorCode"], "judge_timeout")
+        self.assertIn("judge_timeout", failed_calls[0][1])
 
     async def test_process_dispatch_request_should_raise_when_callback_report_error(self) -> None:
         request = _build_request()

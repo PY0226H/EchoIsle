@@ -3,6 +3,11 @@ from datetime import datetime, timezone
 from types import SimpleNamespace
 
 from app.rag_retriever import RAG_BACKEND_MILVUS, RetrievedContext
+from app.runtime_errors import (
+    ERROR_CONSISTENCY_CONFLICT,
+    ERROR_MODEL_OVERLOAD,
+    ERROR_RAG_UNAVAILABLE,
+)
 from app.runtime_orchestrator import build_report_by_runtime
 from app.runtime_policy import PROVIDER_MOCK, PROVIDER_OPENAI
 from app.settings import Settings
@@ -171,6 +176,40 @@ class RuntimeOrchestratorTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(captured["retrieve_kwargs"]["milvus_config"])
         self.assertEqual(report.payload["topicMemory"]["reuseCount"], 0)
         self.assertIsNone(report.payload["retrievalDiagnostics"]["topicMemoryAvgQualityScore"])
+        self.assertEqual(report.payload["errorCodes"], [])
+
+    async def test_build_report_by_runtime_should_mark_degradation_level_l1_when_rerank_disabled_by_profile(
+        self,
+    ) -> None:
+        settings = _build_settings(provider=PROVIDER_OPENAI, openai_api_key="sk-test")
+        request = _build_request()
+        request.retrieval_profile = "hybrid_recall_v1"
+
+        def fake_retrieve_contexts(_req: object, **_kwargs: object) -> list[RetrievedContext]:
+            return [
+                RetrievedContext(
+                    chunk_id="c1",
+                    title="t",
+                    source_url="https://example.com",
+                    content="c",
+                    score=0.8,
+                )
+            ]
+
+        async def fake_build_openai(**_kwargs: object) -> _FakeReport:
+            return _FakeReport(payload={"provider": "openai"})
+
+        report = await build_report_by_runtime(
+            request=request,
+            effective_style_mode="rational",
+            style_mode_source="system_config",
+            settings=settings,
+            retrieve_contexts_fn=fake_retrieve_contexts,
+            build_report_with_openai_fn=fake_build_openai,
+            build_mock_report_fn=lambda *_args, **_kwargs: _FakeReport(payload={"provider": "mock"}),
+        )
+        self.assertEqual(report.payload["judgeTrace"]["degradationLevel"], 1)
+        self.assertEqual(report.payload["errorCodes"], [])
 
     async def test_build_report_by_runtime_should_reuse_topic_memory_as_context(self) -> None:
         settings = _build_settings(provider=PROVIDER_OPENAI, openai_api_key="sk-test")
@@ -236,6 +275,43 @@ class RuntimeOrchestratorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(report.payload["retrievalDiagnostics"]["topicMemoryAvgQualityScore"], 0.92)
         rag_diag = report.payload["retrievalDiagnostics"]["ragRetriever"]
         self.assertEqual(rag_diag["profileResolved"], "hybrid_v1")
+        self.assertEqual(report.payload["errorCodes"], [])
+
+    async def test_build_report_by_runtime_should_mark_consistency_conflict_when_reflection_draw_protection(
+        self,
+    ) -> None:
+        settings = _build_settings(provider=PROVIDER_OPENAI, openai_api_key="sk-test")
+        request = _build_request()
+
+        def fake_retrieve_contexts(_req: object, **_kwargs: object) -> list[RetrievedContext]:
+            return [
+                RetrievedContext(
+                    chunk_id="c1",
+                    title="t",
+                    source_url="https://example.com",
+                    content="c",
+                    score=0.8,
+                )
+            ]
+
+        async def fake_build_openai(**_kwargs: object) -> _FakeReport:
+            return _FakeReport(
+                payload={
+                    "provider": "openai",
+                    "agentPipeline": {"reflectionAction": "draw_protection"},
+                }
+            )
+
+        report = await build_report_by_runtime(
+            request=request,
+            effective_style_mode="rational",
+            style_mode_source="system_config",
+            settings=settings,
+            retrieve_contexts_fn=fake_retrieve_contexts,
+            build_report_with_openai_fn=fake_build_openai,
+            build_mock_report_fn=lambda *_args, **_kwargs: _FakeReport(payload={"provider": "mock"}),
+        )
+        self.assertIn(ERROR_CONSISTENCY_CONFLICT, report.payload["errorCodes"])
 
     async def test_build_report_by_runtime_should_fallback_when_openai_failed_and_enabled(self) -> None:
         settings = _build_settings(provider=PROVIDER_OPENAI, openai_api_key="sk-test", openai_fallback_to_mock=True)
@@ -265,6 +341,8 @@ class RuntimeOrchestratorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(report.payload["fallbackFrom"], "openai")
         self.assertIn("openai boom", report.payload["fallbackReason"])
         self.assertFalse(report.payload["ragUsedByModel"])
+        self.assertIn(ERROR_MODEL_OVERLOAD, report.payload["errorCodes"])
+        self.assertIn(ERROR_RAG_UNAVAILABLE, report.payload["errorCodes"])
 
     async def test_build_report_by_runtime_should_raise_when_openai_failed_and_fallback_disabled(self) -> None:
         settings = _build_settings(provider=PROVIDER_OPENAI, openai_api_key="sk-test", openai_fallback_to_mock=False)
@@ -321,6 +399,8 @@ class RuntimeOrchestratorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(report.payload["fallbackFrom"], "openai")
         self.assertEqual(report.payload["fallbackReason"], "missing OPENAI_API_KEY")
         self.assertFalse(report.payload["ragUsedByModel"])
+        self.assertIn(ERROR_MODEL_OVERLOAD, report.payload["errorCodes"])
+        self.assertIn(ERROR_RAG_UNAVAILABLE, report.payload["errorCodes"])
 
     async def test_build_report_by_runtime_should_raise_when_missing_openai_key_and_fallback_disabled(self) -> None:
         settings = _build_settings(
@@ -435,6 +515,7 @@ class RuntimeOrchestratorTests(unittest.IsolatedAsyncioTestCase):
             report.payload["ragBackendFallbackReason"],
             "missing_openai_api_key_for_milvus_embedding",
         )
+        self.assertEqual(report.payload["errorCodes"], [ERROR_RAG_UNAVAILABLE])
 
 
 if __name__ == "__main__":

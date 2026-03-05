@@ -3,6 +3,7 @@ from datetime import datetime, timezone
 from types import SimpleNamespace
 
 from app.rag_retriever import RetrievedContext
+from app.runtime_errors import ERROR_JUDGE_TIMEOUT, ERROR_MODEL_OVERLOAD
 from app.runtime_policy import PROVIDER_MOCK, PROVIDER_OPENAI
 from app.runtime_provider import build_report_with_provider
 from app.settings import Settings
@@ -170,6 +171,7 @@ class RuntimeProviderTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(report.payload["provider"], "ai-judge-service-mock-fallback")
         self.assertEqual(report.payload["fallbackFrom"], "openai")
         self.assertIn("openai down", report.payload["fallbackReason"])
+        self.assertEqual(report.payload["fallbackErrorCode"], ERROR_MODEL_OVERLOAD)
 
     async def test_build_report_with_provider_should_raise_when_openai_failed_and_fallback_disabled(self) -> None:
         settings = _build_settings(provider=PROVIDER_OPENAI, openai_api_key="sk-test", openai_fallback_to_mock=False)
@@ -192,6 +194,29 @@ class RuntimeProviderTests(unittest.IsolatedAsyncioTestCase):
                 build_mock_report_fn=fake_mock,
             )
         self.assertIn("openai runtime failed", str(ctx.exception))
+
+    async def test_build_report_with_provider_should_map_timeout_to_judge_timeout(self) -> None:
+        settings = _build_settings(provider=PROVIDER_OPENAI, openai_api_key="sk-test", openai_fallback_to_mock=True)
+        request = _build_request()
+
+        async def fake_openai(**_kwargs: object) -> _FakeReport:
+            raise RuntimeError("openai status=504 gateway timeout")
+
+        def fake_mock(_request: object, **kwargs: object) -> _FakeReport:
+            self.assertEqual(kwargs["system_style_mode"], settings.judge_style_mode)
+            return _FakeReport(payload={"provider": "mock"})
+
+        report, used_by_model = await build_report_with_provider(
+            request=request,
+            effective_style_mode="rational",
+            style_mode_source="system_config",
+            settings=settings,
+            retrieved_contexts=[],
+            build_report_with_openai_fn=fake_openai,
+            build_mock_report_fn=fake_mock,
+        )
+        self.assertFalse(used_by_model)
+        self.assertEqual(report.payload["fallbackErrorCode"], ERROR_JUDGE_TIMEOUT)
 
     async def test_build_report_with_provider_should_mark_missing_key(self) -> None:
         settings = _build_settings(provider=PROVIDER_OPENAI, openai_api_key="")
@@ -217,6 +242,7 @@ class RuntimeProviderTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(report.payload["provider"], "ai-judge-service-mock-missing-openai-key")
         self.assertEqual(report.payload["fallbackFrom"], "openai")
         self.assertEqual(report.payload["fallbackReason"], "missing OPENAI_API_KEY")
+        self.assertEqual(report.payload["fallbackErrorCode"], ERROR_MODEL_OVERLOAD)
 
     async def test_build_report_with_provider_should_raise_when_missing_key_and_fallback_disabled(self) -> None:
         settings = _build_settings(

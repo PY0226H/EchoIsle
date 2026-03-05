@@ -129,6 +129,16 @@ cd ai_judge_service
 - `hybrid_precision_v1`
 - `lexical_fast_v1`
 
+运行时错误码（M5 phase1）：
+- `judge_timeout`
+- `rag_unavailable`
+- `model_overload`
+- `consistency_conflict`
+
+`report.payload` 中会回写：
+- `errorCodes`: 当前任务触发的错误码列表（可为空）。
+- `judgeTrace.errorCodes`: 与上面一致，用于链路追踪对齐。
+
 ## 知识文件格式（最小）
 
 `AI_JUDGE_RAG_KNOWLEDGE_FILE` 指向一个 JSON 数组，每个元素示例：
