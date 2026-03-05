@@ -189,6 +189,21 @@ cd ai_judge_service
 .venv/bin/python -m unittest discover -s tests -p "test_*.py" -v
 ```
 
+M7 预验收（phase1）端到端场景回归：
+
+```bash
+cd ai_judge_service
+.venv/bin/python -m unittest tests/test_m7_acceptance.py -v
+```
+
+M7 预验收门禁（phase2，回归 + 负载阈值 + 报告）：
+
+```bash
+cd ai_judge_service
+.venv/bin/python scripts/m7_acceptance_gate.py \
+  --report-out ../docs/dev_plan/AI裁判M7验收报告-$(date +%F).md
+```
+
 ## RAG 评测基线（M4 phase2）
 
 执行离线 profile 对照评测：
