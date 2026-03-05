@@ -104,6 +104,9 @@ cd ai_judge_service
 - `AI_JUDGE_REDIS_POOL_SIZE`: Redis 连接池大小，默认 `20`
 - `AI_JUDGE_REDIS_KEY_PREFIX`: Redis 键前缀，默认 `ai_judge:v2`
 - `AI_JUDGE_TOPIC_MEMORY_LIMIT`: 辩题级长期记忆复用条数上限，默认 `5`
+- `AI_JUDGE_TOPIC_MEMORY_MIN_EVIDENCE_REFS`: topic memory 入库最小证据条数，默认 `1`
+- `AI_JUDGE_TOPIC_MEMORY_MIN_RATIONALE_CHARS`: topic memory 入库最小理由长度，默认 `20`
+- `AI_JUDGE_TOPIC_MEMORY_MIN_QUALITY_SCORE`: topic memory 入库最小质量分（`0..1`），默认 `0.55`
 
 生产环境识别规则：按 `AICOMM_ENV -> APP_ENV -> PYTHON_ENV -> RUST_ENV -> ENV` 顺序读取，值为 `prod|production` 时视为生产。
 生产环境门禁：

@@ -44,6 +44,9 @@ class SettingsTests(unittest.TestCase):
         self.assertEqual(settings.redis_pool_size, 20)
         self.assertEqual(settings.redis_key_prefix, "ai_judge:v2")
         self.assertEqual(settings.topic_memory_limit, 5)
+        self.assertEqual(settings.topic_memory_min_evidence_refs, 1)
+        self.assertEqual(settings.topic_memory_min_rationale_chars, 20)
+        self.assertEqual(settings.topic_memory_min_quality_score, 0.55)
 
     def test_load_settings_should_apply_env_overrides(self) -> None:
         with patch.dict(
@@ -102,6 +105,9 @@ class SettingsTests(unittest.TestCase):
                 "AI_JUDGE_REDIS_POOL_SIZE": "32",
                 "AI_JUDGE_REDIS_KEY_PREFIX": "ai_judge:v2:test",
                 "AI_JUDGE_TOPIC_MEMORY_LIMIT": "7",
+                "AI_JUDGE_TOPIC_MEMORY_MIN_EVIDENCE_REFS": "2",
+                "AI_JUDGE_TOPIC_MEMORY_MIN_RATIONALE_CHARS": "60",
+                "AI_JUDGE_TOPIC_MEMORY_MIN_QUALITY_SCORE": "0.7",
             },
             clear=True,
         ):
@@ -152,6 +158,9 @@ class SettingsTests(unittest.TestCase):
         self.assertEqual(settings.redis_pool_size, 32)
         self.assertEqual(settings.redis_key_prefix, "ai_judge:v2:test")
         self.assertEqual(settings.topic_memory_limit, 7)
+        self.assertEqual(settings.topic_memory_min_evidence_refs, 2)
+        self.assertEqual(settings.topic_memory_min_rationale_chars, 60)
+        self.assertEqual(settings.topic_memory_min_quality_score, 0.7)
 
     def test_build_callback_and_dispatch_configs_should_map_fields(self) -> None:
         with patch.dict(os.environ, {}, clear=True):
@@ -285,6 +294,17 @@ class SettingsTests(unittest.TestCase):
             clear=True,
         ):
             with self.assertRaisesRegex(ValueError, "AI_JUDGE_TOPIC_MEMORY_LIMIT must be between 1 and 20"):
+                load_settings()
+
+    def test_load_settings_should_reject_invalid_topic_memory_quality_threshold(self) -> None:
+        with patch.dict(
+            os.environ,
+            {
+                "AI_JUDGE_TOPIC_MEMORY_MIN_QUALITY_SCORE": "1.2",
+            },
+            clear=True,
+        ):
+            with self.assertRaisesRegex(ValueError, "AI_JUDGE_TOPIC_MEMORY_MIN_QUALITY_SCORE must be between 0 and 1"):
                 load_settings()
 
 

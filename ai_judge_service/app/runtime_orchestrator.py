@@ -78,6 +78,20 @@ def _build_topic_memory_contexts(
     return contexts
 
 
+def _topic_memory_quality_scores(records: list["TopicMemoryRecord"]) -> list[float]:
+    out: list[float] = []
+    for record in records:
+        raw = record.audit.get("qualityScore")
+        try:
+            score = float(raw)
+        except Exception:
+            continue
+        if score < 0:
+            continue
+        out.append(score)
+    return out
+
+
 def _resolve_degradation_level(
     *,
     settings: Settings,
@@ -127,6 +141,7 @@ async def build_report_by_runtime(
             topic_memories,
             max_chars_per_snippet=settings.rag_max_chars_per_snippet,
         ) + retrieved_contexts
+    topic_memory_quality_scores = _topic_memory_quality_scores(topic_memories)
     provider_start = perf_counter()
     report, used_by_model = await build_report_with_provider(
         request=request,
@@ -177,6 +192,11 @@ async def build_report_by_runtime(
         "rerankEnabled": settings.rag_rerank_enabled,
         "topicMemoryEnabled": settings.topic_memory_enabled,
         "topicMemoryReuseCount": len(topic_memories),
+        "topicMemoryAvgQualityScore": (
+            round(sum(topic_memory_quality_scores) / len(topic_memory_quality_scores), 4)
+            if topic_memory_quality_scores
+            else None
+        ),
         "requestedBackend": rag_result.requested_backend,
         "effectiveBackend": rag_result.effective_backend,
         "snippetCount": len(retrieved_contexts),
@@ -188,6 +208,7 @@ async def build_report_by_runtime(
         "rubricVersion": request.rubric_version,
         "reuseCount": len(topic_memories),
         "jobIds": [row.job_id for row in topic_memories],
+        "qualityScores": topic_memory_quality_scores,
     }
     report.payload["evidenceRefs"] = _normalize_evidence_refs(report)
     report.payload["consistency"] = {

@@ -27,7 +27,7 @@ class _FakeReport:
             "provider": "openai",
             "evidenceRefs": [{"messageId": 1, "reason": "test"}],
         }
-        self.rationale = "test rationale"
+        self.rationale = "test rationale with enough chars"
 
     def model_dump(self, *, mode: str = "python") -> dict:
         return {
@@ -94,6 +94,9 @@ def _build_settings(**overrides: object) -> Settings:
         "redis_pool_size": 20,
         "redis_key_prefix": "ai_judge:v2",
         "topic_memory_limit": 5,
+        "topic_memory_min_evidence_refs": 1,
+        "topic_memory_min_rationale_chars": 20,
+        "topic_memory_min_quality_score": 0.55,
     }
     base.update(overrides)
     return Settings(**base)
@@ -258,6 +261,7 @@ class AppFactoryTests(unittest.IsolatedAsyncioTestCase):
         trace = await trace_route.endpoint(job_id=1, x_ai_internal_key="k3")
         self.assertEqual(trace["jobId"], 1)
         self.assertEqual(trace["status"], "completed")
+        self.assertTrue(trace["reportSummary"]["topicMemoryAudit"]["accepted"])
         topic_memory_rows = runtime.trace_store.list_topic_memory(
             topic_domain="default",
             rubric_version="v1",
@@ -280,9 +284,17 @@ class AppFactoryTests(unittest.IsolatedAsyncioTestCase):
         async def fake_runtime_builder(**_kwargs: object) -> _FakeReport:
             return _FakeReport()
 
+        async def fake_callback_report(*, cfg: object, job_id: int, payload: dict) -> None:
+            return None
+
+        async def fake_callback_failed(*, cfg: object, job_id: int, error_message: str) -> None:
+            return None
+
         runtime = create_runtime(
             settings=settings,
             build_report_by_runtime_fn=fake_runtime_builder,
+            callback_report_impl=fake_callback_report,
+            callback_failed_impl=fake_callback_failed,
         )
         app = create_app(runtime)
         dispatch_route = next(route for route in app.routes if getattr(route, "path", "") == "/internal/judge/dispatch")
@@ -323,6 +335,46 @@ class AppFactoryTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(second["accepted"])
         self.assertTrue(second["idempotentReplay"])
         self.assertEqual(call_counter["n"], 1)
+
+    async def test_dispatch_should_skip_low_quality_topic_memory_but_keep_audit(self) -> None:
+        settings = _build_settings(
+            ai_internal_key="k6",
+            topic_memory_min_rationale_chars=100,
+        )
+        request = _build_request()
+
+        async def fake_runtime_builder(**_kwargs: object) -> _FakeReport:
+            return _FakeReport()
+
+        async def fake_callback_report(*, cfg: object, job_id: int, payload: dict) -> None:
+            return None
+
+        async def fake_callback_failed(*, cfg: object, job_id: int, error_message: str) -> None:
+            return None
+
+        runtime = create_runtime(
+            settings=settings,
+            build_report_by_runtime_fn=fake_runtime_builder,
+            callback_report_impl=fake_callback_report,
+            callback_failed_impl=fake_callback_failed,
+        )
+        app = create_app(runtime)
+        dispatch_route = next(route for route in app.routes if getattr(route, "path", "") == "/internal/judge/dispatch")
+        trace_route = next(
+            route for route in app.routes if getattr(route, "path", "") == "/internal/judge/jobs/{job_id}/trace"
+        )
+
+        result = await dispatch_route.endpoint(request=request, x_ai_internal_key="k6")
+        self.assertTrue(result["accepted"])
+        trace = await trace_route.endpoint(job_id=1, x_ai_internal_key="k6")
+        self.assertFalse(trace["reportSummary"]["topicMemoryAudit"]["accepted"])
+        self.assertIn("insufficient_rationale_chars", trace["reportSummary"]["topicMemoryAudit"]["rejectReasons"])
+        topic_memory_rows = runtime.trace_store.list_topic_memory(
+            topic_domain="default",
+            rubric_version="v1",
+            limit=3,
+        )
+        self.assertEqual(topic_memory_rows, [])
 
     async def test_create_default_app_should_use_loader(self) -> None:
         settings = _build_settings(ai_internal_key="loader-key")

@@ -92,6 +92,23 @@ class TraceStoreTests(unittest.TestCase):
         self.assertEqual(rows[0].job_id, 3)
         self.assertEqual(rows[1].job_id, 2)
 
+    def test_topic_memory_should_keep_audit_payload(self) -> None:
+        store = TraceStore(ttl_secs=3600, topic_memory_limit=2)
+        store.save_topic_memory(
+            job_id=7,
+            trace_id="trace-7",
+            topic_domain="finance",
+            rubric_version="v1",
+            winner="pro",
+            rationale="rationale for quality",
+            evidence_refs=[{"messageId": 1, "reason": "test"}],
+            provider="openai",
+            audit={"qualityScore": 0.88, "accepted": True},
+        )
+        rows = store.list_topic_memory(topic_domain="finance", rubric_version="v1", limit=1)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0].audit["qualityScore"], 0.88)
+
 
 class _DummySettings:
     redis_enabled = True
@@ -101,6 +118,9 @@ class _DummySettings:
     redis_key_prefix = "ai_judge:v2"
     trace_ttl_secs = 86400
     topic_memory_limit = 5
+    topic_memory_min_evidence_refs = 1
+    topic_memory_min_rationale_chars = 20
+    topic_memory_min_quality_score = 0.55
 
 
 class TraceStoreBuilderTests(unittest.TestCase):

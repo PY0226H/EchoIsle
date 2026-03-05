@@ -72,6 +72,9 @@ def _build_settings(**overrides: object) -> Settings:
         "redis_pool_size": 20,
         "redis_key_prefix": "ai_judge:v2",
         "topic_memory_limit": 5,
+        "topic_memory_min_evidence_refs": 1,
+        "topic_memory_min_rationale_chars": 20,
+        "topic_memory_min_quality_score": 0.55,
     }
     base.update(overrides)
     return Settings(**base)

@@ -119,6 +119,55 @@ def _extract_report_evidence_refs(report_payload: dict[str, Any] | None) -> list
     return []
 
 
+def _calc_topic_memory_quality_audit(
+    *,
+    settings: Settings,
+    request: JudgeDispatchRequest,
+    response: dict[str, Any],
+    report_payload: dict[str, Any] | None,
+) -> dict[str, Any]:
+    evidence_refs = _extract_report_evidence_refs(report_payload)
+    evidence_count = len(evidence_refs)
+    rationale = str((report_payload or {}).get("rationale") or "").strip()
+    rationale_chars = len(rationale)
+    winner = str(response.get("winner") or "").strip().lower()
+
+    winner_score = 0.2 if winner in {"pro", "con", "draw"} else 0.0
+    evidence_score = min(0.4, evidence_count * 0.1)
+    if settings.topic_memory_min_rationale_chars <= 0:
+        rationale_score = 0.4
+    else:
+        rationale_score = min(
+            0.4,
+            (rationale_chars / float(settings.topic_memory_min_rationale_chars)) * 0.4,
+        )
+    quality_score = round(min(1.0, winner_score + evidence_score + rationale_score), 4)
+
+    reject_reasons: list[str] = []
+    if evidence_count < settings.topic_memory_min_evidence_refs:
+        reject_reasons.append("insufficient_evidence_refs")
+    if rationale_chars < settings.topic_memory_min_rationale_chars:
+        reject_reasons.append("insufficient_rationale_chars")
+    if quality_score < settings.topic_memory_min_quality_score:
+        reject_reasons.append("quality_score_below_threshold")
+
+    return {
+        "topicDomain": getattr(request, "topic_domain", "default"),
+        "rubricVersion": request.rubric_version,
+        "winner": winner or None,
+        "evidenceCount": evidence_count,
+        "rationaleChars": rationale_chars,
+        "qualityScore": quality_score,
+        "accepted": len(reject_reasons) == 0,
+        "rejectReasons": reject_reasons,
+        "thresholds": {
+            "minEvidenceRefs": settings.topic_memory_min_evidence_refs,
+            "minRationaleChars": settings.topic_memory_min_rationale_chars,
+            "minQualityScore": settings.topic_memory_min_quality_score,
+        },
+    }
+
+
 def create_app(runtime: AppRuntime) -> FastAPI:
     app = FastAPI(title="AI Judge Service", version="0.2.0")
 
@@ -220,13 +269,23 @@ def create_app(runtime: AppRuntime) -> FastAPI:
                 callback_error=callback_error or "marked_failed",
             )
         else:
+            topic_memory_audit: dict[str, Any] | None = None
+            report_summary = dict(report_payload or {})
+            if runtime.settings.topic_memory_enabled:
+                topic_memory_audit = _calc_topic_memory_quality_audit(
+                    settings=runtime.settings,
+                    request=request,
+                    response=response,
+                    report_payload=report_payload,
+                )
+                report_summary["topicMemoryAudit"] = topic_memory_audit
             runtime.trace_store.register_success(
                 job_id=request.job.job_id,
                 response=response,
                 callback_status=callback_status,
-                report_summary=report_payload or {},
+                report_summary=report_summary,
             )
-            if runtime.settings.topic_memory_enabled:
+            if runtime.settings.topic_memory_enabled and topic_memory_audit and topic_memory_audit["accepted"]:
                 runtime.trace_store.save_topic_memory(
                     job_id=request.job.job_id,
                     trace_id=request.trace_id or "",
@@ -236,6 +295,7 @@ def create_app(runtime: AppRuntime) -> FastAPI:
                     rationale=str((report_payload or {}).get("rationale") or ""),
                     evidence_refs=_extract_report_evidence_refs(report_payload),
                     provider=response.get("provider"),
+                    audit=topic_memory_audit,
                 )
         return response
 

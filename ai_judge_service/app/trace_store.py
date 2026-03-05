@@ -90,6 +90,7 @@ class TopicMemoryRecord:
     rationale: str
     evidence_refs: list[dict[str, Any]]
     provider: str | None
+    audit: dict[str, Any] = field(default_factory=dict)
 
 
 class TraceStoreProtocol(Protocol):
@@ -156,6 +157,7 @@ class TraceStoreProtocol(Protocol):
         rationale: str,
         evidence_refs: list[dict[str, Any]] | None,
         provider: str | None,
+        audit: dict[str, Any] | None = None,
     ) -> None:
         ...
 
@@ -343,6 +345,7 @@ class TraceStore(TraceStoreProtocol):
         rationale: str,
         evidence_refs: list[dict[str, Any]] | None,
         provider: str | None,
+        audit: dict[str, Any] | None = None,
     ) -> None:
         now = _utcnow()
         domain = topic_domain.strip().lower()
@@ -361,6 +364,7 @@ class TraceStore(TraceStoreProtocol):
             rationale=rationale.strip(),
             evidence_refs=[item for item in (evidence_refs or []) if isinstance(item, dict)],
             provider=provider,
+            audit=dict(audit or {}),
         )
         with self._lock:
             self._prune_locked(now)
@@ -649,6 +653,7 @@ class RedisTraceStore(TraceStoreProtocol):
         rationale: str,
         evidence_refs: list[dict[str, Any]] | None,
         provider: str | None,
+        audit: dict[str, Any] | None = None,
     ) -> None:
         domain = topic_domain.strip().lower()
         rubric = rubric_version.strip().lower()
@@ -666,6 +671,7 @@ class RedisTraceStore(TraceStoreProtocol):
             "rationale": rationale.strip(),
             "evidence_refs": [item for item in (evidence_refs or []) if isinstance(item, dict)],
             "provider": provider,
+            "audit": dict(audit or {}),
         }
         key = self._topic_key(domain, rubric)
         try:
@@ -701,6 +707,7 @@ class RedisTraceStore(TraceStoreProtocol):
             if not isinstance(payload, dict):
                 continue
             evidence_refs = payload.get("evidence_refs")
+            audit = payload.get("audit")
             out.append(
                 TopicMemoryRecord(
                     created_at=_parse_datetime(payload.get("created_at")),
@@ -716,6 +723,7 @@ class RedisTraceStore(TraceStoreProtocol):
                         else []
                     ),
                     provider=payload.get("provider"),
+                    audit=audit if isinstance(audit, dict) else {},
                 )
             )
         return out

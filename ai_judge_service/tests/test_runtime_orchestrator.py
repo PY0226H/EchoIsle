@@ -72,6 +72,9 @@ def _build_settings(**overrides: object) -> Settings:
         "redis_pool_size": 20,
         "redis_key_prefix": "ai_judge:v2",
         "topic_memory_limit": 5,
+        "topic_memory_min_evidence_refs": 1,
+        "topic_memory_min_rationale_chars": 20,
+        "topic_memory_min_quality_score": 0.55,
     }
     base.update(overrides)
     return Settings(**base)
@@ -163,6 +166,7 @@ class RuntimeOrchestratorTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("cost", report.payload)
         self.assertIsNone(captured["retrieve_kwargs"]["milvus_config"])
         self.assertEqual(report.payload["topicMemory"]["reuseCount"], 0)
+        self.assertIsNone(report.payload["retrievalDiagnostics"]["topicMemoryAvgQualityScore"])
 
     async def test_build_report_by_runtime_should_reuse_topic_memory_as_context(self) -> None:
         settings = _build_settings(provider=PROVIDER_OPENAI, openai_api_key="sk-test")
@@ -193,6 +197,7 @@ class RuntimeOrchestratorTests(unittest.IsolatedAsyncioTestCase):
                         rationale="历史高质量判决",
                         evidence_refs=[{"messageId": 12, "reason": "证据完整"}],
                         provider="openai",
+                        audit={"qualityScore": 0.92},
                     )
                 ]
 
@@ -222,7 +227,9 @@ class RuntimeOrchestratorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(openai_contexts[0].source_url, "memory://topic/finance")
         self.assertEqual(openai_contexts[1].chunk_id, "rag-1")
         self.assertEqual(report.payload["topicMemory"]["reuseCount"], 1)
+        self.assertEqual(report.payload["topicMemory"]["qualityScores"], [0.92])
         self.assertEqual(report.payload["retrievalDiagnostics"]["topicMemoryReuseCount"], 1)
+        self.assertEqual(report.payload["retrievalDiagnostics"]["topicMemoryAvgQualityScore"], 0.92)
 
     async def test_build_report_by_runtime_should_fallback_when_openai_failed_and_enabled(self) -> None:
         settings = _build_settings(provider=PROVIDER_OPENAI, openai_api_key="sk-test", openai_fallback_to_mock=True)

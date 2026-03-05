@@ -100,6 +100,9 @@ class Settings:
     redis_pool_size: int
     redis_key_prefix: str
     topic_memory_limit: int
+    topic_memory_min_evidence_refs: int
+    topic_memory_min_rationale_chars: int
+    topic_memory_min_quality_score: float
 
 
 def load_settings() -> Settings:
@@ -183,6 +186,15 @@ def load_settings() -> Settings:
         redis_pool_size=int(os.getenv("AI_JUDGE_REDIS_POOL_SIZE", "20")),
         redis_key_prefix=os.getenv("AI_JUDGE_REDIS_KEY_PREFIX", "ai_judge:v2").strip(),
         topic_memory_limit=int(os.getenv("AI_JUDGE_TOPIC_MEMORY_LIMIT", "5")),
+        topic_memory_min_evidence_refs=int(
+            os.getenv("AI_JUDGE_TOPIC_MEMORY_MIN_EVIDENCE_REFS", "1")
+        ),
+        topic_memory_min_rationale_chars=int(
+            os.getenv("AI_JUDGE_TOPIC_MEMORY_MIN_RATIONALE_CHARS", "20")
+        ),
+        topic_memory_min_quality_score=float(
+            os.getenv("AI_JUDGE_TOPIC_MEMORY_MIN_QUALITY_SCORE", "0.55")
+        ),
     )
     validate_for_runtime_env(settings, runtime_env=runtime_env_label())
     return settings
@@ -215,6 +227,12 @@ def validate_for_runtime_env(settings: Settings, runtime_env: str | None) -> Non
         raise ValueError("AI_JUDGE_REDIS_POOL_SIZE must be >= 1")
     if settings.topic_memory_limit < 1 or settings.topic_memory_limit > 20:
         raise ValueError("AI_JUDGE_TOPIC_MEMORY_LIMIT must be between 1 and 20")
+    if settings.topic_memory_min_evidence_refs < 0 or settings.topic_memory_min_evidence_refs > 20:
+        raise ValueError("AI_JUDGE_TOPIC_MEMORY_MIN_EVIDENCE_REFS must be between 0 and 20")
+    if settings.topic_memory_min_rationale_chars < 0 or settings.topic_memory_min_rationale_chars > 2000:
+        raise ValueError("AI_JUDGE_TOPIC_MEMORY_MIN_RATIONALE_CHARS must be between 0 and 2000")
+    if settings.topic_memory_min_quality_score < 0.0 or settings.topic_memory_min_quality_score > 1.0:
+        raise ValueError("AI_JUDGE_TOPIC_MEMORY_MIN_QUALITY_SCORE must be between 0 and 1")
     if settings.redis_enabled:
         if not settings.redis_url:
             raise ValueError("AI_JUDGE_REDIS_URL cannot be empty when AI_JUDGE_REDIS_ENABLED=true")
