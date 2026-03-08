@@ -1,7 +1,9 @@
-use crate::AppState;
+use crate::{AppError, AppState};
 use anyhow::Result;
+use axum::{http::StatusCode, response::Response};
 use chrono::Duration;
 use chrono::Utc;
+use http_body_util::BodyExt;
 
 pub(super) async fn seed_topic_and_session(
     state: &AppState,
@@ -129,4 +131,35 @@ pub(super) async fn insert_ops_alert_notification(
     .fetch_one(&state.pool)
     .await?;
     Ok(row.0)
+}
+
+pub(super) async fn json_body_with_status(
+    response: Response,
+    expected_status: StatusCode,
+) -> Result<serde_json::Value> {
+    assert_eq!(response.status(), expected_status);
+    let body = response.into_body().collect().await?.to_bytes();
+    let json = serde_json::from_slice(&body)?;
+    Ok(json)
+}
+
+pub(super) fn assert_is_debate_conflict<T>(result: std::result::Result<T, AppError>) {
+    match result {
+        Ok(_) => panic!("expected debate conflict"),
+        Err(AppError::DebateConflict(_)) => {}
+        Err(other) => panic!("unexpected error: {}", other),
+    }
+}
+
+pub(super) fn assert_debate_conflict_prefix<T>(
+    result: std::result::Result<T, AppError>,
+    expected_prefix: &str,
+) {
+    match result {
+        Ok(_) => panic!("expected debate conflict"),
+        Err(AppError::DebateConflict(msg)) => {
+            assert!(msg.starts_with(expected_prefix));
+        }
+        Err(other) => panic!("unexpected error: {}", other),
+    }
 }

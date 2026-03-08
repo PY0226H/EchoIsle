@@ -1,5 +1,7 @@
 use super::super::{get_latest_judge_report_handler, request_judge_job_handler};
-use super::test_support::{join_user_to_session, seed_running_judge_job, seed_topic_and_session};
+use super::test_support::{
+    join_user_to_session, json_body_with_status, seed_running_judge_job, seed_topic_and_session,
+};
 use crate::{AppState, GetJudgeReportQuery, RequestJudgeJobInput};
 use anyhow::Result;
 use axum::{
@@ -8,7 +10,6 @@ use axum::{
     response::IntoResponse,
     Extension, Json,
 };
-use http_body_util::BodyExt;
 use std::sync::Arc;
 
 #[tokio::test]
@@ -31,9 +32,7 @@ async fn request_judge_job_handler_should_return_style_mode_source() -> Result<(
     .await?
     .into_response();
 
-    assert_eq!(response.status(), StatusCode::ACCEPTED);
-    let body = response.into_body().collect().await?.to_bytes();
-    let ret: serde_json::Value = serde_json::from_slice(&body)?;
+    let ret = json_body_with_status(response, StatusCode::ACCEPTED).await?;
     assert_eq!(ret["styleMode"], "rational");
     assert_eq!(ret["styleModeSource"], "system_config");
     Ok(())
@@ -62,9 +61,7 @@ async fn request_judge_job_handler_should_ignore_request_style_mode() -> Result<
     .await?
     .into_response();
 
-    assert_eq!(response.status(), StatusCode::ACCEPTED);
-    let body = response.into_body().collect().await?.to_bytes();
-    let ret: serde_json::Value = serde_json::from_slice(&body)?;
+    let ret = json_body_with_status(response, StatusCode::ACCEPTED).await?;
     assert_eq!(ret["styleMode"], "entertaining");
     assert_eq!(ret["styleModeSource"], "system_config");
     Ok(())
@@ -144,9 +141,7 @@ async fn get_latest_judge_report_handler_should_apply_max_stage_count_and_return
     .await?
     .into_response();
 
-    assert_eq!(response.status(), StatusCode::OK);
-    let body = response.into_body().collect().await?.to_bytes();
-    let ret: serde_json::Value = serde_json::from_slice(&body)?;
+    let ret = json_body_with_status(response, StatusCode::OK).await?;
     assert_eq!(
         ret["report"]["stageSummaries"].as_array().map(Vec::len),
         Some(1)

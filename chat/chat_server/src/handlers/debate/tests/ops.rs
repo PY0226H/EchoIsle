@@ -7,13 +7,13 @@ use super::super::{
     upsert_ops_observability_thresholds_handler, upsert_ops_role_assignment_handler,
 };
 use super::test_support::{
-    insert_kafka_dlq_event, insert_ops_alert_notification, seed_running_judge_job,
+    assert_debate_conflict_prefix, assert_is_debate_conflict, insert_kafka_dlq_event,
+    insert_ops_alert_notification, json_body_with_status, seed_running_judge_job,
     seed_topic_and_session,
 };
 use crate::{
-    AppError, AppState, ListJudgeReviewOpsQuery, ListKafkaDlqEventsQuery,
-    ListOpsAlertNotificationsQuery, OpsObservabilityThresholds,
-    UpdateOpsObservabilityAnomalyStateInput, UpsertOpsRoleInput,
+    AppState, ListJudgeReviewOpsQuery, ListKafkaDlqEventsQuery, ListOpsAlertNotificationsQuery,
+    OpsObservabilityThresholds, UpdateOpsObservabilityAnomalyStateInput, UpsertOpsRoleInput,
 };
 use anyhow::Result;
 use axum::{
@@ -23,7 +23,6 @@ use axum::{
     Extension, Json,
 };
 use chrono::Utc;
-use http_body_util::BodyExt;
 use std::collections::HashMap;
 
 #[tokio::test]
@@ -45,10 +44,7 @@ async fn list_judge_reviews_ops_handler_should_require_workspace_owner() -> Resu
         }),
     )
     .await;
-    match result {
-        Ok(_) => panic!("non owner should be rejected"),
-        Err(err) => assert!(matches!(err, AppError::DebateConflict(_))),
-    }
+    assert_is_debate_conflict(result);
     Ok(())
 }
 
@@ -93,9 +89,7 @@ async fn request_judge_rejudge_ops_handler_should_accept_when_report_exists() ->
             .await?
             .into_response();
 
-    assert_eq!(response.status(), StatusCode::ACCEPTED);
-    let body = response.into_body().collect().await?.to_bytes();
-    let ret: serde_json::Value = serde_json::from_slice(&body)?;
+    let ret = json_body_with_status(response, StatusCode::ACCEPTED).await?;
     assert_eq!(ret["rejudgeTriggered"], true);
     Ok(())
 }
@@ -116,9 +110,7 @@ async fn ops_rbac_role_handlers_should_upsert_list_and_revoke() -> Result<()> {
     )
     .await?
     .into_response();
-    assert_eq!(upsert_resp.status(), StatusCode::OK);
-    let upsert_body = upsert_resp.into_body().collect().await?.to_bytes();
-    let upsert_json: serde_json::Value = serde_json::from_slice(&upsert_body)?;
+    let upsert_json = json_body_with_status(upsert_resp, StatusCode::OK).await?;
     assert_eq!(upsert_json["userId"], 2);
     assert_eq!(upsert_json["role"], "ops_reviewer");
 
@@ -126,18 +118,14 @@ async fn ops_rbac_role_handlers_should_upsert_list_and_revoke() -> Result<()> {
         list_ops_role_assignments_handler(Extension(owner.clone()), State(state.clone()))
             .await?
             .into_response();
-    assert_eq!(list_resp.status(), StatusCode::OK);
-    let list_body = list_resp.into_body().collect().await?.to_bytes();
-    let list_json: serde_json::Value = serde_json::from_slice(&list_body)?;
+    let list_json = json_body_with_status(list_resp, StatusCode::OK).await?;
     assert_eq!(list_json["items"].as_array().map(Vec::len), Some(1));
 
     let revoke_resp =
         revoke_ops_role_assignment_handler(Extension(owner), State(state), Path(2_u64))
             .await?
             .into_response();
-    assert_eq!(revoke_resp.status(), StatusCode::OK);
-    let revoke_body = revoke_resp.into_body().collect().await?.to_bytes();
-    let revoke_json: serde_json::Value = serde_json::from_slice(&revoke_body)?;
+    let revoke_json = json_body_with_status(revoke_resp, StatusCode::OK).await?;
     assert_eq!(revoke_json["removed"], true);
     Ok(())
 }
@@ -165,9 +153,7 @@ async fn get_ops_rbac_me_handler_should_return_owner_and_role_snapshot() -> Resu
     let owner_resp = get_ops_rbac_me_handler(Extension(owner), State(state.clone()))
         .await?
         .into_response();
-    assert_eq!(owner_resp.status(), StatusCode::OK);
-    let owner_body = owner_resp.into_body().collect().await?.to_bytes();
-    let owner_json: serde_json::Value = serde_json::from_slice(&owner_body)?;
+    let owner_json = json_body_with_status(owner_resp, StatusCode::OK).await?;
     assert_eq!(owner_json["isOwner"], true);
     assert_eq!(owner_json["permissions"]["debateManage"], true);
     assert_eq!(owner_json["permissions"]["judgeReview"], true);
@@ -177,9 +163,7 @@ async fn get_ops_rbac_me_handler_should_return_owner_and_role_snapshot() -> Resu
     let viewer_resp = get_ops_rbac_me_handler(Extension(viewer), State(state))
         .await?
         .into_response();
-    assert_eq!(viewer_resp.status(), StatusCode::OK);
-    let viewer_body = viewer_resp.into_body().collect().await?.to_bytes();
-    let viewer_json: serde_json::Value = serde_json::from_slice(&viewer_body)?;
+    let viewer_json = json_body_with_status(viewer_resp, StatusCode::OK).await?;
     assert_eq!(viewer_json["isOwner"], false);
     assert_eq!(viewer_json["role"], "ops_viewer");
     assert_eq!(viewer_json["permissions"]["debateManage"], false);
@@ -197,13 +181,7 @@ async fn list_ops_role_assignments_handler_should_return_standardized_denied_err
     let non_owner = state.find_user_by_id(2).await?.expect("user should exist");
 
     let result = list_ops_role_assignments_handler(Extension(non_owner), State(state)).await;
-    match result {
-        Ok(_) => panic!("non owner should be rejected"),
-        Err(AppError::DebateConflict(msg)) => {
-            assert!(msg.starts_with("ops_permission_denied:role_manage:"));
-        }
-        Err(other) => panic!("unexpected error: {}", other),
-    }
+    assert_debate_conflict_prefix(result, "ops_permission_denied:role_manage:");
     Ok(())
 }
 
@@ -216,9 +194,7 @@ async fn get_ops_observability_config_handler_should_return_default_snapshot() -
     let response = get_ops_observability_config_handler(Extension(owner), State(state))
         .await?
         .into_response();
-    assert_eq!(response.status(), StatusCode::OK);
-    let body = response.into_body().collect().await?.to_bytes();
-    let ret: serde_json::Value = serde_json::from_slice(&body)?;
+    let ret = json_body_with_status(response, StatusCode::OK).await?;
     assert_eq!(ret["thresholds"]["lowSuccessRateThreshold"], 80.0);
     assert_eq!(ret["anomalyState"].as_object().map(|v| v.len()), Some(0));
     Ok(())
@@ -230,38 +206,18 @@ async fn ops_observability_config_handlers_should_require_judge_review_permissio
     state.update_workspace_owner(1, 1).await?;
     let non_owner = state.find_user_by_id(3).await?.expect("user should exist");
 
-    let get_err = match get_ops_observability_config_handler(
-        Extension(non_owner.clone()),
-        State(state.clone()),
-    )
-    .await
-    {
-        Ok(_) => panic!("user without ops role should be rejected"),
-        Err(err) => err,
-    };
-    match get_err {
-        AppError::DebateConflict(msg) => {
-            assert!(msg.starts_with("ops_permission_denied:judge_review:"));
-        }
-        other => panic!("unexpected get error: {}", other),
-    }
+    let get_result =
+        get_ops_observability_config_handler(Extension(non_owner.clone()), State(state.clone()))
+            .await;
+    assert_debate_conflict_prefix(get_result, "ops_permission_denied:judge_review:");
 
-    let put_err = match upsert_ops_observability_thresholds_handler(
+    let put_result = upsert_ops_observability_thresholds_handler(
         Extension(non_owner),
         State(state),
         Json(OpsObservabilityThresholds::default()),
     )
-    .await
-    {
-        Ok(_) => panic!("user without ops role should be rejected"),
-        Err(err) => err,
-    };
-    match put_err {
-        AppError::DebateConflict(msg) => {
-            assert!(msg.starts_with("ops_permission_denied:judge_review:"));
-        }
-        other => panic!("unexpected put error: {}", other),
-    }
+    .await;
+    assert_debate_conflict_prefix(put_result, "ops_permission_denied:judge_review:");
     Ok(())
 }
 
@@ -315,9 +271,7 @@ async fn ops_observability_config_handlers_should_allow_ops_viewer_update() -> R
     )
     .await?
     .into_response();
-    assert_eq!(anomaly_resp.status(), StatusCode::OK);
-    let body = anomaly_resp.into_body().collect().await?.to_bytes();
-    let ret: serde_json::Value = serde_json::from_slice(&body)?;
+    let ret = json_body_with_status(anomaly_resp, StatusCode::OK).await?;
     assert_eq!(ret["thresholds"]["lowSuccessRateThreshold"], 76.0);
     assert!(ret["anomalyState"]["high_retry:8"].is_object());
     Ok(())
@@ -341,13 +295,7 @@ async fn list_kafka_dlq_events_handler_should_require_judge_review_permission() 
     )
     .await;
 
-    match result {
-        Ok(_) => panic!("user without ops role should be rejected"),
-        Err(AppError::DebateConflict(msg)) => {
-            assert!(msg.starts_with("ops_permission_denied:judge_review:"));
-        }
-        Err(other) => panic!("unexpected error: {}", other),
-    }
+    assert_debate_conflict_prefix(result, "ops_permission_denied:judge_review:");
     Ok(())
 }
 
@@ -427,9 +375,7 @@ async fn kafka_dlq_handlers_should_list_replay_and_discard() -> Result<()> {
     )
     .await?
     .into_response();
-    assert_eq!(list_resp.status(), StatusCode::OK);
-    let list_body = list_resp.into_body().collect().await?.to_bytes();
-    let list_json: serde_json::Value = serde_json::from_slice(&list_body)?;
+    let list_json = json_body_with_status(list_resp, StatusCode::OK).await?;
     assert!(list_json["items"]
         .as_array()
         .map(|v| !v.is_empty())
@@ -442,18 +388,14 @@ async fn kafka_dlq_handlers_should_list_replay_and_discard() -> Result<()> {
     )
     .await?
     .into_response();
-    assert_eq!(replay_resp.status(), StatusCode::OK);
-    let replay_body = replay_resp.into_body().collect().await?.to_bytes();
-    let replay_json: serde_json::Value = serde_json::from_slice(&replay_body)?;
+    let replay_json = json_body_with_status(replay_resp, StatusCode::OK).await?;
     assert_eq!(replay_json["status"], "replayed");
 
     let discard_resp =
         discard_kafka_dlq_event_handler(Extension(reviewer), State(state), Path(discard_id as u64))
             .await?
             .into_response();
-    assert_eq!(discard_resp.status(), StatusCode::OK);
-    let discard_body = discard_resp.into_body().collect().await?.to_bytes();
-    let discard_json: serde_json::Value = serde_json::from_slice(&discard_body)?;
+    let discard_json = json_body_with_status(discard_resp, StatusCode::OK).await?;
     assert_eq!(discard_json["status"], "discarded");
     Ok(())
 }
@@ -476,9 +418,7 @@ async fn list_ops_alert_notifications_handler_should_return_rows() -> Result<()>
     )
     .await?
     .into_response();
-    assert_eq!(response.status(), StatusCode::OK);
-    let body = response.into_body().collect().await?.to_bytes();
-    let ret: serde_json::Value = serde_json::from_slice(&body)?;
+    let ret = json_body_with_status(response, StatusCode::OK).await?;
     assert_eq!(ret["total"], 1);
     assert_eq!(ret["items"].as_array().map(|v| v.len()), Some(1));
     assert_eq!(ret["items"][0]["alertKey"], "high_retry");
