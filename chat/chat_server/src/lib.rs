@@ -1,4 +1,5 @@
 mod agent;
+mod application;
 mod config;
 mod error;
 mod event_bus;
@@ -7,7 +8,6 @@ mod middlewares;
 mod models;
 mod openapi;
 mod redis_store;
-mod runtime_workers;
 #[cfg(test)]
 mod test_fixtures;
 
@@ -28,6 +28,7 @@ use tokio::{
 use tower_http::cors::{self, CorsLayer};
 use tracing::warn;
 
+use application::runtime_workers::spawn_background_workers;
 pub use error::{AppError, ErrorOutput};
 pub(crate) use event_bus::{
     AiJudgeJobCreatedEvent, DebateMessagePinnedEvent, DebateParticipantJoinedEvent,
@@ -37,7 +38,6 @@ use models::JudgeDispatchTrigger;
 pub use models::*;
 pub(crate) use redis_store::RateLimitDecision;
 pub use redis_store::RedisHealthOutput;
-use runtime_workers::spawn_background_workers;
 
 use axum::{
     http::Method,
