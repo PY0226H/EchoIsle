@@ -4,15 +4,17 @@ use super::receipt_verify::{
 };
 use super::types::{
     GetIapOrderByTransaction, ListIapProducts, ListWalletLedger, VerifyIapOrderInput,
+    WalletLedgerItem,
 };
 use crate::config::PaymentConfig;
 use crate::{AppError, AppState};
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 use axum::{
     extract::{OriginalUri, State},
     routing::post,
     Json, Router,
 };
+use chat_core::User;
 use serde_json::{json, Value};
 use std::sync::{
     atomic::{AtomicUsize, Ordering},
@@ -89,6 +91,31 @@ fn verify_input(tx: &str, receipt_data: &str) -> VerifyIapOrderInput {
         original_transaction_id: None,
         receipt_data: receipt_data.to_string(),
     }
+}
+
+async fn load_user(state: &AppState, user_id: i64) -> Result<User> {
+    state
+        .find_user_by_id(user_id)
+        .await?
+        .ok_or_else(|| anyhow!("user id {user_id} should exist"))
+}
+
+async fn query_wallet_ledger(
+    state: &AppState,
+    ws_id: u64,
+    user_id: u64,
+) -> Result<Vec<WalletLedgerItem>> {
+    state
+        .list_wallet_ledger(
+            ws_id,
+            user_id,
+            ListWalletLedger {
+                last_id: None,
+                limit: Some(20),
+            },
+        )
+        .await
+        .map_err(Into::into)
 }
 
 #[test]
@@ -355,10 +382,7 @@ async fn list_iap_products_should_return_seed_data() -> Result<()> {
 #[tokio::test]
 async fn verify_iap_order_should_credit_wallet_and_create_ledger() -> Result<()> {
     let (_tdb, state) = AppState::new_for_test().await?;
-    let user = state
-        .find_user_by_id(1)
-        .await?
-        .expect("user id 1 should exist");
+    let user = load_user(&state, 1).await?;
 
     let out = state
         .verify_iap_order(&user, verify_input("tx-credit-1", "mock_ok_receipt"))
@@ -371,16 +395,7 @@ async fn verify_iap_order_should_credit_wallet_and_create_ledger() -> Result<()>
     let balance = state.get_wallet_balance(1, 1).await?;
     assert_eq!(balance.balance, 60);
 
-    let ledger = state
-        .list_wallet_ledger(
-            1,
-            1,
-            ListWalletLedger {
-                last_id: None,
-                limit: Some(20),
-            },
-        )
-        .await?;
+    let ledger = query_wallet_ledger(&state, 1, 1).await?;
     assert_eq!(ledger.len(), 1);
     assert_eq!(ledger[0].entry_type, "iap_credit");
     assert_eq!(ledger[0].amount_delta, 60);
@@ -390,10 +405,7 @@ async fn verify_iap_order_should_credit_wallet_and_create_ledger() -> Result<()>
 #[tokio::test]
 async fn verify_iap_order_should_be_idempotent_for_same_transaction_id() -> Result<()> {
     let (_tdb, state) = AppState::new_for_test().await?;
-    let user = state
-        .find_user_by_id(1)
-        .await?
-        .expect("user id 1 should exist");
+    let user = load_user(&state, 1).await?;
 
     let first = state
         .verify_iap_order(&user, verify_input("tx-idempotent-1", "mock_ok_receipt"))
@@ -407,16 +419,7 @@ async fn verify_iap_order_should_be_idempotent_for_same_transaction_id() -> Resu
     assert!(!second.credited);
     assert_eq!(second.wallet_balance, 60);
 
-    let ledger = state
-        .list_wallet_ledger(
-            1,
-            1,
-            ListWalletLedger {
-                last_id: None,
-                limit: Some(20),
-            },
-        )
-        .await?;
+    let ledger = query_wallet_ledger(&state, 1, 1).await?;
     assert_eq!(ledger.len(), 1);
     Ok(())
 }
@@ -424,10 +427,7 @@ async fn verify_iap_order_should_be_idempotent_for_same_transaction_id() -> Resu
 #[tokio::test]
 async fn verify_iap_order_should_create_rejected_order_without_credit() -> Result<()> {
     let (_tdb, state) = AppState::new_for_test().await?;
-    let user = state
-        .find_user_by_id(1)
-        .await?
-        .expect("user id 1 should exist");
+    let user = load_user(&state, 1).await?;
 
     let out = state
         .verify_iap_order(&user, verify_input("tx-reject-1", "mock_reject:test"))
@@ -437,16 +437,7 @@ async fn verify_iap_order_should_create_rejected_order_without_credit() -> Resul
     assert!(!out.credited);
     assert_eq!(out.wallet_balance, 0);
 
-    let ledger = state
-        .list_wallet_ledger(
-            1,
-            1,
-            ListWalletLedger {
-                last_id: None,
-                limit: Some(20),
-            },
-        )
-        .await?;
+    let ledger = query_wallet_ledger(&state, 1, 1).await?;
     assert!(ledger.is_empty());
     Ok(())
 }
@@ -454,14 +445,8 @@ async fn verify_iap_order_should_create_rejected_order_without_credit() -> Resul
 #[tokio::test]
 async fn verify_iap_order_should_reject_cross_user_transaction_replay() -> Result<()> {
     let (_tdb, state) = AppState::new_for_test().await?;
-    let user1 = state
-        .find_user_by_id(1)
-        .await?
-        .expect("user id 1 should exist");
-    let user2 = state
-        .find_user_by_id(2)
-        .await?
-        .expect("user id 2 should exist");
+    let user1 = load_user(&state, 1).await?;
+    let user2 = load_user(&state, 2).await?;
 
     state
         .verify_iap_order(&user1, verify_input("tx-replay-1", "mock_ok_receipt"))
@@ -498,10 +483,7 @@ async fn verify_iap_order_should_allow_retry_after_transient_apple_status() -> R
     let inner = Arc::get_mut(&mut state.inner).expect("state should be unique");
     inner.config.payment = payment_config;
 
-    let user = state
-        .find_user_by_id(1)
-        .await?
-        .expect("user id 1 should exist");
+    let user = load_user(&state, 1).await?;
     let input = verify_input("tx-apple-retry-1", "receipt_retryable_then_ok");
 
     let first_err = state
@@ -538,10 +520,7 @@ async fn verify_iap_order_should_allow_retry_after_transient_apple_status() -> R
 #[tokio::test]
 async fn get_iap_order_by_transaction_should_return_not_found_for_missing_tx() -> Result<()> {
     let (_tdb, state) = AppState::new_for_test().await?;
-    let user = state
-        .find_user_by_id(1)
-        .await?
-        .expect("user id 1 should exist");
+    let user = load_user(&state, 1).await?;
     let out = state
         .get_iap_order_by_transaction(
             &user,
@@ -558,10 +537,7 @@ async fn get_iap_order_by_transaction_should_return_not_found_for_missing_tx() -
 #[tokio::test]
 async fn get_iap_order_by_transaction_should_return_verified_snapshot() -> Result<()> {
     let (_tdb, state) = AppState::new_for_test().await?;
-    let user = state
-        .find_user_by_id(1)
-        .await?
-        .expect("user id 1 should exist");
+    let user = load_user(&state, 1).await?;
 
     state
         .verify_iap_order(
@@ -589,14 +565,8 @@ async fn get_iap_order_by_transaction_should_return_verified_snapshot() -> Resul
 #[tokio::test]
 async fn get_iap_order_by_transaction_should_return_conflict_for_other_user() -> Result<()> {
     let (_tdb, state) = AppState::new_for_test().await?;
-    let user1 = state
-        .find_user_by_id(1)
-        .await?
-        .expect("user id 1 should exist");
-    let user2 = state
-        .find_user_by_id(2)
-        .await?
-        .expect("user id 2 should exist");
+    let user1 = load_user(&state, 1).await?;
+    let user2 = load_user(&state, 2).await?;
 
     state
         .verify_iap_order(
