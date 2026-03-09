@@ -220,7 +220,7 @@ pub struct GetOpsSloSnapshotOutput {
     pub rules: Vec<OpsSloRuleSnapshotItem>,
 }
 
-#[derive(Debug, Clone, Default, Serialize)]
+#[derive(Debug, Clone, Default, ToSchema, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct OpsAlertEvalReport {
     pub workspaces_scanned: u64,
@@ -1832,6 +1832,52 @@ impl AppState {
                 )
                 .await?;
             }
+        }
+        Ok(report)
+    }
+
+    pub async fn evaluate_ops_observability_alerts_for_workspace_by_ops(
+        &self,
+        user: &User,
+    ) -> Result<OpsAlertEvalReport, AppError> {
+        self.ensure_ops_permission(user, OpsPermission::JudgeReview)
+            .await?;
+        let now_ms = now_millis();
+        let row: Option<OpsObservabilityConfigRow> = sqlx::query_as(
+            r#"
+            SELECT thresholds_json, anomaly_state_json, updated_by, updated_at
+            FROM ops_observability_configs
+            WHERE ws_id = $1
+            "#,
+        )
+        .bind(user.ws_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        let (thresholds, anomaly_state) = if let Some(row) = row {
+            (
+                parse_thresholds(row.thresholds_json),
+                parse_anomaly_state(row.anomaly_state_json, now_ms),
+            )
+        } else {
+            (OpsObservabilityThresholds::default(), HashMap::new())
+        };
+        let mut report = OpsAlertEvalReport {
+            workspaces_scanned: 1,
+            ..OpsAlertEvalReport::default()
+        };
+        let signal = self.load_recent_judge_signal(user.ws_id).await?;
+        let recipients = self.list_alert_recipients(user.ws_id).await?;
+        for spec in rule_specs() {
+            let evaluated = evaluate_alert_for_rule(spec, &thresholds, signal);
+            self.process_single_alert_transition(
+                user.ws_id,
+                evaluated,
+                &anomaly_state,
+                now_ms,
+                &recipients,
+                &mut report,
+            )
+            .await?;
         }
         Ok(report)
     }

@@ -5,8 +5,9 @@ use super::super::{
     list_judge_reviews_ops_handler, list_kafka_dlq_events_handler,
     list_ops_alert_notifications_handler, list_ops_role_assignments_handler,
     replay_kafka_dlq_event_handler, request_judge_rejudge_ops_handler,
-    revoke_ops_role_assignment_handler, upsert_ops_observability_anomaly_state_handler,
-    upsert_ops_observability_thresholds_handler, upsert_ops_role_assignment_handler,
+    revoke_ops_role_assignment_handler, run_ops_observability_evaluation_once_handler,
+    upsert_ops_observability_anomaly_state_handler, upsert_ops_observability_thresholds_handler,
+    upsert_ops_role_assignment_handler,
 };
 use super::test_support::{
     assert_debate_conflict_prefix, assert_is_debate_conflict, insert_kafka_dlq_event,
@@ -237,8 +238,8 @@ async fn ops_observability_config_handlers_should_require_judge_review_permissio
     assert_debate_conflict_prefix(slo_result, "ops_permission_denied:judge_review:");
 
     let action_result = apply_ops_observability_anomaly_action_handler(
-        Extension(non_owner),
-        State(state),
+        Extension(non_owner.clone()),
+        State(state.clone()),
         Json(ApplyOpsObservabilityAnomalyActionInput {
             alert_key: "high_retry".to_string(),
             action: "suppress".to_string(),
@@ -247,6 +248,10 @@ async fn ops_observability_config_handlers_should_require_judge_review_permissio
     )
     .await;
     assert_debate_conflict_prefix(action_result, "ops_permission_denied:judge_review:");
+
+    let eval_result =
+        run_ops_observability_evaluation_once_handler(Extension(non_owner), State(state)).await;
+    assert_debate_conflict_prefix(eval_result, "ops_permission_denied:judge_review:");
     Ok(())
 }
 
@@ -338,6 +343,23 @@ async fn apply_ops_observability_anomaly_action_handler_should_update_single_ale
     .into_response();
     let clear_json = json_body_with_status(clear_response, StatusCode::OK).await?;
     assert!(clear_json["anomalyState"]["high_retry"].is_null());
+    Ok(())
+}
+
+#[tokio::test]
+async fn run_ops_observability_evaluation_once_handler_should_return_report() -> Result<()> {
+    let (_tdb, state) = AppState::new_for_test().await?;
+    state.update_workspace_owner(1, 1).await?;
+    let owner = state.find_user_by_id(1).await?.expect("owner should exist");
+
+    let response = run_ops_observability_evaluation_once_handler(Extension(owner), State(state))
+        .await?
+        .into_response();
+    let ret = json_body_with_status(response, StatusCode::OK).await?;
+    assert_eq!(ret["workspacesScanned"], 1);
+    assert!(ret.get("alertsRaised").is_some());
+    assert!(ret.get("alertsCleared").is_some());
+    assert!(ret.get("alertsSuppressed").is_some());
     Ok(())
 }
 

@@ -24,9 +24,10 @@ pub(crate) use super::debate_ops::{
     list_judge_reviews_ops_handler, list_kafka_dlq_events_handler,
     list_ops_alert_notifications_handler, list_ops_role_assignments_handler,
     replay_kafka_dlq_event_handler, request_judge_rejudge_ops_handler,
-    revoke_ops_role_assignment_handler, update_debate_session_ops_handler,
-    update_debate_topic_ops_handler, upsert_ops_observability_anomaly_state_handler,
-    upsert_ops_observability_thresholds_handler, upsert_ops_role_assignment_handler,
+    revoke_ops_role_assignment_handler, run_ops_observability_evaluation_once_handler,
+    update_debate_session_ops_handler, update_debate_topic_ops_handler,
+    upsert_ops_observability_anomaly_state_handler, upsert_ops_observability_thresholds_handler,
+    upsert_ops_role_assignment_handler,
 };
 
 /// List debate topics in the current workspace.

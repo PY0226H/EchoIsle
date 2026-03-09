@@ -139,6 +139,10 @@ pub async fn get_router(state: AppState) -> Result<Router, AppError> {
             post(apply_ops_observability_anomaly_action_handler),
         )
         .route(
+            "/ops/observability/evaluate-once",
+            post(run_ops_observability_evaluation_once_handler),
+        )
+        .route(
             "/ops/observability/alerts",
             get(list_ops_alert_notifications_handler),
         )

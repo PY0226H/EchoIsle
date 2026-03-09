@@ -290,6 +290,28 @@ pub(crate) async fn apply_ops_observability_anomaly_action_handler(
     Ok((StatusCode::OK, Json(ret)))
 }
 
+/// Trigger one-shot observability evaluation for current workspace.
+#[utoipa::path(
+    post,
+    path = "/api/debate/ops/observability/evaluate-once",
+    responses(
+        (status = 200, description = "Ops alert evaluation report", body = crate::OpsAlertEvalReport),
+        (status = 409, description = "Permission conflict", body = crate::ErrorOutput),
+    ),
+    security(
+        ("token" = [])
+    )
+)]
+pub(crate) async fn run_ops_observability_evaluation_once_handler(
+    Extension(user): Extension<User>,
+    State(state): State<AppState>,
+) -> Result<impl IntoResponse, AppError> {
+    let ret = state
+        .evaluate_ops_observability_alerts_for_workspace_by_ops(&user)
+        .await?;
+    Ok((StatusCode::OK, Json(ret)))
+}
+
 /// List ops observability alert notifications.
 #[utoipa::path(
     get,
