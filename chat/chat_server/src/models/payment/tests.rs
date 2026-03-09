@@ -1,10 +1,10 @@
 use super::receipt_verify::{
     extract_receipt_records, is_retryable_apple_status, normalize_verify_mode,
-    select_matching_record, verify_receipt, ReceiptRecord,
+    select_matching_record, verify_receipt, ReceiptRecord, ReceiptVerifyResult,
 };
 use super::types::{
     GetIapOrderByTransaction, ListIapProducts, ListWalletLedger, VerifyIapOrderInput,
-    WalletLedgerItem,
+    VerifyIapOrderOutput, WalletLedgerItem,
 };
 use crate::config::PaymentConfig;
 use crate::{AppError, AppState};
@@ -118,6 +118,60 @@ async fn query_wallet_ledger(
         .map_err(Into::into)
 }
 
+fn assert_order_output(
+    out: &VerifyIapOrderOutput,
+    expected_status: &str,
+    expected_verify_mode: &str,
+    expected_credited: bool,
+    expected_wallet_balance: i64,
+) {
+    assert_eq!(out.status, expected_status);
+    assert_eq!(out.verify_mode, expected_verify_mode);
+    assert_eq!(out.credited, expected_credited);
+    assert_eq!(out.wallet_balance, expected_wallet_balance);
+}
+
+fn assert_single_credit_ledger_entry(ledger: &[WalletLedgerItem], expected_delta: i64) {
+    assert_eq!(ledger.len(), 1);
+    assert_eq!(ledger[0].entry_type, "iap_credit");
+    assert_eq!(ledger[0].amount_delta, expected_delta);
+}
+
+fn assert_verify_receipt_output(
+    out: &ReceiptVerifyResult,
+    expected_status: &str,
+    expected_verify_mode: &str,
+    expected_verify_reason: Option<&str>,
+) {
+    assert_eq!(out.status, expected_status);
+    assert_eq!(out.verify_mode, expected_verify_mode);
+    assert_eq!(out.verify_reason.as_deref(), expected_verify_reason);
+}
+
+fn assert_request_paths(requests: &[(String, Value)], expected_paths: &[&str]) {
+    assert_eq!(requests.len(), expected_paths.len());
+    for (request, expected_path) in requests.iter().zip(expected_paths) {
+        assert_eq!(request.0, *expected_path);
+    }
+}
+
+fn assert_apple_verify_request_payload(payload: &Value, expected_receipt_data: &str) {
+    assert_eq!(
+        payload.get("receipt-data").and_then(Value::as_str),
+        Some(expected_receipt_data)
+    );
+    assert_eq!(
+        payload.get("password").and_then(Value::as_str),
+        Some("test-shared-secret")
+    );
+    assert_eq!(
+        payload
+            .get("exclude-old-transactions")
+            .and_then(Value::as_bool),
+        Some(true)
+    );
+}
+
 #[test]
 fn extract_receipt_records_should_collect_both_paths() {
     let payload = json!({
@@ -210,9 +264,7 @@ async fn verify_receipt_should_use_apple_production_and_mark_verified() -> Resul
     )
     .await?;
 
-    assert_eq!(out.status, "verified");
-    assert_eq!(out.verify_mode, "apple");
-    assert!(out.verify_reason.is_none());
+    assert_verify_receipt_output(&out, "verified", "apple", None);
     assert_eq!(
         out.raw_payload.get("endpoint").and_then(Value::as_str),
         Some("production")
@@ -225,23 +277,8 @@ async fn verify_receipt_should_use_apple_production_and_mark_verified() -> Resul
     );
 
     let requests = requests.lock().await;
-    assert_eq!(requests.len(), 1);
-    assert_eq!(requests[0].0, "/prod");
-    assert_eq!(
-        requests[0].1.get("receipt-data").and_then(Value::as_str),
-        Some("receipt_ok_1")
-    );
-    assert_eq!(
-        requests[0].1.get("password").and_then(Value::as_str),
-        Some("test-shared-secret")
-    );
-    assert_eq!(
-        requests[0]
-            .1
-            .get("exclude-old-transactions")
-            .and_then(Value::as_bool),
-        Some(true)
-    );
+    assert_request_paths(&requests, &["/prod"]);
+    assert_apple_verify_request_payload(&requests[0].1, "receipt_ok_1");
     server.abort();
     Ok(())
 }
@@ -277,9 +314,7 @@ async fn verify_receipt_should_fallback_to_sandbox_when_prod_returns_21007() -> 
     )
     .await?;
 
-    assert_eq!(out.status, "verified");
-    assert_eq!(out.verify_mode, "apple");
-    assert!(out.verify_reason.is_none());
+    assert_verify_receipt_output(&out, "verified", "apple", None);
     assert_eq!(
         out.raw_payload.get("endpoint").and_then(Value::as_str),
         Some("sandbox")
@@ -290,9 +325,7 @@ async fn verify_receipt_should_fallback_to_sandbox_when_prod_returns_21007() -> 
     );
 
     let requests = requests.lock().await;
-    assert_eq!(requests.len(), 2);
-    assert_eq!(requests[0].0, "/prod");
-    assert_eq!(requests[1].0, "/sandbox");
+    assert_request_paths(&requests, &["/prod", "/sandbox"]);
     server.abort();
     Ok(())
 }
@@ -319,8 +352,7 @@ async fn verify_receipt_should_return_error_for_retryable_apple_status() -> Resu
     assert!(err.to_string().contains("transient status 21005"));
 
     let requests = requests.lock().await;
-    assert_eq!(requests.len(), 1);
-    assert_eq!(requests[0].0, "/prod");
+    assert_request_paths(&requests, &["/prod"]);
     server.abort();
     Ok(())
 }
@@ -348,11 +380,11 @@ async fn verify_receipt_should_reject_when_transaction_not_found_in_apple_payloa
     )
     .await?;
 
-    assert_eq!(out.status, "rejected");
-    assert_eq!(out.verify_mode, "apple");
-    assert_eq!(
-        out.verify_reason.as_deref(),
-        Some("transaction/product not found in apple receipt")
+    assert_verify_receipt_output(
+        &out,
+        "rejected",
+        "apple",
+        Some("transaction/product not found in apple receipt"),
     );
     assert_eq!(
         out.raw_payload
@@ -362,8 +394,7 @@ async fn verify_receipt_should_reject_when_transaction_not_found_in_apple_payloa
     );
 
     let requests = requests.lock().await;
-    assert_eq!(requests.len(), 1);
-    assert_eq!(requests[0].0, "/prod");
+    assert_request_paths(&requests, &["/prod"]);
     server.abort();
     Ok(())
 }
@@ -387,18 +418,13 @@ async fn verify_iap_order_should_credit_wallet_and_create_ledger() -> Result<()>
     let out = state
         .verify_iap_order(&user, verify_input("tx-credit-1", "mock_ok_receipt"))
         .await?;
-    assert_eq!(out.status, "verified");
-    assert_eq!(out.verify_mode, "mock");
-    assert!(out.credited);
-    assert_eq!(out.wallet_balance, 60);
+    assert_order_output(&out, "verified", "mock", true, 60);
 
     let balance = state.get_wallet_balance(1, 1).await?;
     assert_eq!(balance.balance, 60);
 
     let ledger = query_wallet_ledger(&state, 1, 1).await?;
-    assert_eq!(ledger.len(), 1);
-    assert_eq!(ledger[0].entry_type, "iap_credit");
-    assert_eq!(ledger[0].amount_delta, 60);
+    assert_single_credit_ledger_entry(&ledger, 60);
     Ok(())
 }
 
@@ -416,11 +442,10 @@ async fn verify_iap_order_should_be_idempotent_for_same_transaction_id() -> Resu
 
     assert_eq!(first.order_id, second.order_id);
     assert!(first.credited);
-    assert!(!second.credited);
-    assert_eq!(second.wallet_balance, 60);
+    assert_order_output(&second, "verified", "mock", false, 60);
 
     let ledger = query_wallet_ledger(&state, 1, 1).await?;
-    assert_eq!(ledger.len(), 1);
+    assert_single_credit_ledger_entry(&ledger, 60);
     Ok(())
 }
 
@@ -432,10 +457,7 @@ async fn verify_iap_order_should_create_rejected_order_without_credit() -> Resul
     let out = state
         .verify_iap_order(&user, verify_input("tx-reject-1", "mock_reject:test"))
         .await?;
-    assert_eq!(out.status, "rejected");
-    assert_eq!(out.verify_mode, "mock");
-    assert!(!out.credited);
-    assert_eq!(out.wallet_balance, 0);
+    assert_order_output(&out, "rejected", "mock", false, 0);
 
     let ledger = query_wallet_ledger(&state, 1, 1).await?;
     assert!(ledger.is_empty());
@@ -504,15 +526,10 @@ async fn verify_iap_order_should_allow_retry_after_transient_apple_status() -> R
     assert!(!first_query.found);
 
     let second = state.verify_iap_order(&user, input).await?;
-    assert_eq!(second.status, "verified");
-    assert_eq!(second.verify_mode, "apple");
-    assert!(second.credited);
-    assert_eq!(second.wallet_balance, 60);
+    assert_order_output(&second, "verified", "apple", true, 60);
 
     let requests = requests.lock().await;
-    assert_eq!(requests.len(), 2);
-    assert_eq!(requests[0].0, "/prod");
-    assert_eq!(requests[1].0, "/prod");
+    assert_request_paths(&requests, &["/prod", "/prod"]);
     server.abort();
     Ok(())
 }
