@@ -43,6 +43,12 @@ Options:
                                Override cargo advisory allowlist CSV for supply chain gate
   --supply-chain-pip-allowlist <path>
                                Override pip-audit allowlist CSV for supply chain gate
+  --enforce-supply-chain-chaos-evidence
+                               Enable supply chain chaos evidence freshness gate check
+  --supply-chain-chaos-evidence <path>
+                               Supply chain chaos evidence env file
+  --supply-chain-chaos-max-age-hours <hours>
+                               Max age in hours for chaos evidence, default: 168
   --root <path>                Repo root path (default: git top-level or cwd)
   -h, --help                   Show this help
 
@@ -53,6 +59,7 @@ Notes:
   4) V2-D gate is optional and runs only when --enforce-v2d-stage-acceptance is set.
   5) AI Judge M7 gate is optional and runs only when --enforce-ai-judge-m7-acceptance is set.
   6) Supply chain gate is optional and runs only when --enforce-supply-chain-security is set.
+  7) Supply chain chaos evidence gate is optional and runs only when --enforce-supply-chain-chaos-evidence is set.
 USAGE
 }
 
@@ -122,6 +129,26 @@ normalize_bool() {
     return
   fi
   printf 'false'
+}
+
+parse_epoch_from_iso8601_utc() {
+  local value
+  value="$(trim "$1")"
+  if [[ -z "$value" ]]; then
+    return 1
+  fi
+
+  if date -u -d "$value" +%s >/dev/null 2>&1; then
+    date -u -d "$value" +%s
+    return 0
+  fi
+
+  if date -u -j -f "%Y-%m-%dT%H:%M:%SZ" "$value" +%s >/dev/null 2>&1; then
+    date -u -j -f "%Y-%m-%dT%H:%M:%SZ" "$value" +%s
+    return 0
+  fi
+
+  return 1
 }
 
 read_yaml_scalar_in_section() {
@@ -382,6 +409,9 @@ SUPPLY_CHAIN_ALLOW_MISSING_TOOLS="false"
 SUPPLY_CHAIN_GATE_SCRIPT=""
 SUPPLY_CHAIN_CARGO_ADVISORY_ALLOWLIST=""
 SUPPLY_CHAIN_PIP_AUDIT_ALLOWLIST=""
+ENFORCE_SUPPLY_CHAIN_CHAOS_EVIDENCE="false"
+SUPPLY_CHAIN_CHAOS_EVIDENCE=""
+SUPPLY_CHAIN_CHAOS_MAX_AGE_HOURS="168"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -469,6 +499,18 @@ while [[ $# -gt 0 ]]; do
       SUPPLY_CHAIN_PIP_AUDIT_ALLOWLIST="$2"
       shift 2
       ;;
+    --enforce-supply-chain-chaos-evidence)
+      ENFORCE_SUPPLY_CHAIN_CHAOS_EVIDENCE="true"
+      shift
+      ;;
+    --supply-chain-chaos-evidence)
+      SUPPLY_CHAIN_CHAOS_EVIDENCE="$2"
+      shift 2
+      ;;
+    --supply-chain-chaos-max-age-hours)
+      SUPPLY_CHAIN_CHAOS_MAX_AGE_HOURS="$2"
+      shift 2
+      ;;
     --root)
       ROOT="$2"
       shift 2
@@ -536,6 +578,12 @@ if [[ "$ENFORCE_SUPPLY_CHAIN_SECURITY" == "true" ]]; then
   fi
   if [[ -z "$SUPPLY_CHAIN_PIP_AUDIT_ALLOWLIST" ]]; then
     SUPPLY_CHAIN_PIP_AUDIT_ALLOWLIST="$ROOT/scripts/release/security_allowlists/pip_audit_vulns_allowlist.csv"
+  fi
+fi
+
+if [[ "$ENFORCE_SUPPLY_CHAIN_CHAOS_EVIDENCE" == "true" ]]; then
+  if [[ -z "$SUPPLY_CHAIN_CHAOS_EVIDENCE" ]]; then
+    SUPPLY_CHAIN_CHAOS_EVIDENCE="$ROOT/docs/loadtest/evidence/supply_chain_preprod_chaos.env"
   fi
 fi
 
@@ -748,6 +796,61 @@ if [[ "$ENFORCE_SUPPLY_CHAIN_SECURITY" == "true" ]]; then
       mark_pass "supply chain security gate passed"
     else
       mark_fail "supply chain security gate failed"
+    fi
+  fi
+fi
+
+if [[ "$ENFORCE_SUPPLY_CHAIN_CHAOS_EVIDENCE" == "true" ]]; then
+  if [[ ! "$SUPPLY_CHAIN_CHAOS_MAX_AGE_HOURS" =~ ^[0-9]+$ ]]; then
+    mark_fail "supply chain chaos max age must be numeric hours: $SUPPLY_CHAIN_CHAOS_MAX_AGE_HOURS"
+  elif [[ "$SUPPLY_CHAIN_CHAOS_MAX_AGE_HOURS" -eq 0 ]]; then
+    mark_fail "supply chain chaos max age must be greater than zero"
+  elif [[ ! -f "$SUPPLY_CHAIN_CHAOS_EVIDENCE" ]]; then
+    mark_fail "supply chain chaos evidence file not found: $SUPPLY_CHAIN_CHAOS_EVIDENCE"
+  else
+    scenario_advisory="$(to_lower "$(trim "$(read_env_value "SCENARIO_ADVISORY_SOURCE_UNAVAILABLE" "$SUPPLY_CHAIN_CHAOS_EVIDENCE")")")"
+    scenario_pip_audit="$(to_lower "$(trim "$(read_env_value "SCENARIO_PIP_AUDIT_MISSING" "$SUPPLY_CHAIN_CHAOS_EVIDENCE")")")"
+    scenario_allowlist="$(to_lower "$(trim "$(read_env_value "SCENARIO_ALLOWLIST_EXPIRED" "$SUPPLY_CHAIN_CHAOS_EVIDENCE")")")"
+    chaos_last_run_at="$(trim "$(read_env_value "CHAOS_LAST_RUN_AT" "$SUPPLY_CHAIN_CHAOS_EVIDENCE")")"
+
+    if [[ "$scenario_advisory" != "pass" ]]; then
+      mark_fail "supply chain chaos scenario advisory_source_unavailable is not pass"
+    else
+      mark_pass "supply chain chaos scenario advisory_source_unavailable=pass"
+    fi
+
+    if [[ "$scenario_pip_audit" != "pass" ]]; then
+      mark_fail "supply chain chaos scenario pip_audit_missing is not pass"
+    else
+      mark_pass "supply chain chaos scenario pip_audit_missing=pass"
+    fi
+
+    if [[ "$scenario_allowlist" != "pass" ]]; then
+      mark_fail "supply chain chaos scenario allowlist_expired is not pass"
+    else
+      mark_pass "supply chain chaos scenario allowlist_expired=pass"
+    fi
+
+    if [[ -z "$chaos_last_run_at" ]]; then
+      mark_fail "supply chain chaos evidence missing CHAOS_LAST_RUN_AT"
+    else
+      chaos_last_run_epoch=""
+      if ! chaos_last_run_epoch="$(parse_epoch_from_iso8601_utc "$chaos_last_run_at")"; then
+        mark_fail "supply chain chaos evidence CHAOS_LAST_RUN_AT is invalid: $chaos_last_run_at"
+      else
+        now_epoch="$(date -u +%s)"
+        if [[ "$chaos_last_run_epoch" -gt "$now_epoch" ]]; then
+          mark_fail "supply chain chaos evidence CHAOS_LAST_RUN_AT is in the future: $chaos_last_run_at"
+        else
+          chaos_age_secs=$((now_epoch - chaos_last_run_epoch))
+          chaos_max_age_secs=$((SUPPLY_CHAIN_CHAOS_MAX_AGE_HOURS * 3600))
+          if [[ "$chaos_age_secs" -gt "$chaos_max_age_secs" ]]; then
+            mark_fail "supply chain chaos evidence is stale: age_seconds=$chaos_age_secs max_age_seconds=$chaos_max_age_secs"
+          else
+            mark_pass "supply chain chaos evidence freshness ok: age_seconds=$chaos_age_secs max_age_seconds=$chaos_max_age_secs"
+          fi
+        fi
+      fi
     fi
   fi
 fi

@@ -44,6 +44,9 @@ VALID_M7_FAULT="$TMP_DIR/m7.fault.valid.env"
 BAD_M7_FAULT="$TMP_DIR/m7.fault.bad.env"
 SUPPLY_GATE_PASS="$TMP_DIR/supply.gate.pass.sh"
 SUPPLY_GATE_FAIL="$TMP_DIR/supply.gate.fail.sh"
+VALID_SUPPLY_CHAOS="$TMP_DIR/supply.chaos.valid.env"
+BAD_SUPPLY_CHAOS="$TMP_DIR/supply.chaos.bad.env"
+STALE_SUPPLY_CHAOS="$TMP_DIR/supply.chaos.stale.env"
 
 cat >"$VALID_CHAT" <<'EOF'
 payment:
@@ -164,6 +167,34 @@ exit 1
 EOF
 chmod +x "$SUPPLY_GATE_FAIL"
 
+FRESH_CHAOS_LAST_RUN_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+cat >"$VALID_SUPPLY_CHAOS" <<EOF
+CHAOS_STAGE=preprod
+CHAOS_SCENARIOS=advisory_source_unavailable,pip_audit_missing,allowlist_expired
+SCENARIO_ADVISORY_SOURCE_UNAVAILABLE=pass
+SCENARIO_PIP_AUDIT_MISSING=pass
+SCENARIO_ALLOWLIST_EXPIRED=pass
+CHAOS_LAST_RUN_AT=$FRESH_CHAOS_LAST_RUN_AT
+EOF
+
+cat >"$BAD_SUPPLY_CHAOS" <<'EOF'
+CHAOS_STAGE=preprod
+CHAOS_SCENARIOS=advisory_source_unavailable,pip_audit_missing,allowlist_expired
+SCENARIO_ADVISORY_SOURCE_UNAVAILABLE=pass
+SCENARIO_PIP_AUDIT_MISSING=fail
+SCENARIO_ALLOWLIST_EXPIRED=pass
+CHAOS_LAST_RUN_AT=2026-03-08T12:00:00Z
+EOF
+
+cat >"$STALE_SUPPLY_CHAOS" <<'EOF'
+CHAOS_STAGE=preprod
+CHAOS_SCENARIOS=advisory_source_unavailable,pip_audit_missing,allowlist_expired
+SCENARIO_ADVISORY_SOURCE_UNAVAILABLE=pass
+SCENARIO_PIP_AUDIT_MISSING=pass
+SCENARIO_ALLOWLIST_EXPIRED=pass
+CHAOS_LAST_RUN_AT=2020-01-01T00:00:00Z
+EOF
+
 expect_pass "valid production config should pass" \
   "$SCRIPT" \
   --runtime-env production \
@@ -236,6 +267,36 @@ expect_fail "supply chain gate fail should fail preflight" \
   --enforce-supply-chain-security \
   --supply-chain-gate-script "$SUPPLY_GATE_FAIL" \
   --supply-chain-report-out "$TMP_DIR/supply.report.fail.md"
+
+expect_pass "fresh supply chain chaos evidence should pass preflight" \
+  "$SCRIPT" \
+  --runtime-env production \
+  --chat-config "$VALID_CHAT" \
+  --tauri-app-config "$VALID_TAURI" \
+  --ai-judge-env "$VALID_AI_ENV" \
+  --enforce-supply-chain-chaos-evidence \
+  --supply-chain-chaos-evidence "$VALID_SUPPLY_CHAOS" \
+  --supply-chain-chaos-max-age-hours 24
+
+expect_fail "chaos evidence with failed scenario should fail preflight" \
+  "$SCRIPT" \
+  --runtime-env production \
+  --chat-config "$VALID_CHAT" \
+  --tauri-app-config "$VALID_TAURI" \
+  --ai-judge-env "$VALID_AI_ENV" \
+  --enforce-supply-chain-chaos-evidence \
+  --supply-chain-chaos-evidence "$BAD_SUPPLY_CHAOS" \
+  --supply-chain-chaos-max-age-hours 24
+
+expect_fail "stale chaos evidence should fail preflight" \
+  "$SCRIPT" \
+  --runtime-env production \
+  --chat-config "$VALID_CHAT" \
+  --tauri-app-config "$VALID_TAURI" \
+  --ai-judge-env "$VALID_AI_ENV" \
+  --enforce-supply-chain-chaos-evidence \
+  --supply-chain-chaos-evidence "$STALE_SUPPLY_CHAOS" \
+  --supply-chain-chaos-max-age-hours 24
 
 BAD_CHAT_MOCK="$TMP_DIR/chat.mock.yml"
 cat >"$BAD_CHAT_MOCK" <<'EOF'
