@@ -31,6 +31,18 @@ Options:
                                AI Judge M7 acceptance report output path
   --ai-judge-m7-allow-missing-scenarios
                                Pass through --allow-missing-scenarios to AI Judge M7 gate
+  --enforce-supply-chain-security
+                               Enable supply chain security gate check
+  --supply-chain-report-out <path>
+                               Supply chain gate report output path
+  --supply-chain-allow-missing-tools
+                               Pass through --allow-missing-tools to supply chain gate
+  --supply-chain-gate-script <path>
+                               Override supply chain gate script path (test/debug)
+  --supply-chain-cargo-allowlist <path>
+                               Override cargo advisory allowlist CSV for supply chain gate
+  --supply-chain-pip-allowlist <path>
+                               Override pip-audit allowlist CSV for supply chain gate
   --root <path>                Repo root path (default: git top-level or cwd)
   -h, --help                   Show this help
 
@@ -40,6 +52,7 @@ Notes:
   3) Tauri checks are skipped when --tauri-app-config is not provided.
   4) V2-D gate is optional and runs only when --enforce-v2d-stage-acceptance is set.
   5) AI Judge M7 gate is optional and runs only when --enforce-ai-judge-m7-acceptance is set.
+  6) Supply chain gate is optional and runs only when --enforce-supply-chain-security is set.
 USAGE
 }
 
@@ -363,6 +376,12 @@ AI_JUDGE_M7_PREPROD_SUMMARY=""
 AI_JUDGE_M7_FAULT_MATRIX=""
 AI_JUDGE_M7_REPORT_OUT=""
 AI_JUDGE_M7_ALLOW_MISSING_SCENARIOS="false"
+ENFORCE_SUPPLY_CHAIN_SECURITY="false"
+SUPPLY_CHAIN_REPORT_OUT=""
+SUPPLY_CHAIN_ALLOW_MISSING_TOOLS="false"
+SUPPLY_CHAIN_GATE_SCRIPT=""
+SUPPLY_CHAIN_CARGO_ADVISORY_ALLOWLIST=""
+SUPPLY_CHAIN_PIP_AUDIT_ALLOWLIST=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -426,6 +445,30 @@ while [[ $# -gt 0 ]]; do
       AI_JUDGE_M7_ALLOW_MISSING_SCENARIOS="true"
       shift
       ;;
+    --enforce-supply-chain-security)
+      ENFORCE_SUPPLY_CHAIN_SECURITY="true"
+      shift
+      ;;
+    --supply-chain-report-out)
+      SUPPLY_CHAIN_REPORT_OUT="$2"
+      shift 2
+      ;;
+    --supply-chain-allow-missing-tools)
+      SUPPLY_CHAIN_ALLOW_MISSING_TOOLS="true"
+      shift
+      ;;
+    --supply-chain-gate-script)
+      SUPPLY_CHAIN_GATE_SCRIPT="$2"
+      shift 2
+      ;;
+    --supply-chain-cargo-allowlist)
+      SUPPLY_CHAIN_CARGO_ADVISORY_ALLOWLIST="$2"
+      shift 2
+      ;;
+    --supply-chain-pip-allowlist)
+      SUPPLY_CHAIN_PIP_AUDIT_ALLOWLIST="$2"
+      shift 2
+      ;;
     --root)
       ROOT="$2"
       shift 2
@@ -478,6 +521,21 @@ if [[ "$ENFORCE_AI_JUDGE_M7_ACCEPTANCE" == "true" ]]; then
   fi
   if [[ -z "$AI_JUDGE_M7_REPORT_OUT" ]]; then
     AI_JUDGE_M7_REPORT_OUT="$ROOT/docs/dev_plan/AI裁判M7阶段验收报告-$(date +%F)-from-preflight.md"
+  fi
+fi
+
+if [[ "$ENFORCE_SUPPLY_CHAIN_SECURITY" == "true" ]]; then
+  if [[ -z "$SUPPLY_CHAIN_REPORT_OUT" ]]; then
+    SUPPLY_CHAIN_REPORT_OUT="$ROOT/docs/dev_plan/供应链安全门禁报告-$(date +%F)-from-preflight.md"
+  fi
+  if [[ -z "$SUPPLY_CHAIN_GATE_SCRIPT" ]]; then
+    SUPPLY_CHAIN_GATE_SCRIPT="$ROOT/scripts/release/supply_chain_security_gate.sh"
+  fi
+  if [[ -z "$SUPPLY_CHAIN_CARGO_ADVISORY_ALLOWLIST" ]]; then
+    SUPPLY_CHAIN_CARGO_ADVISORY_ALLOWLIST="$ROOT/scripts/release/security_allowlists/cargo_deny_advisories_allowlist.csv"
+  fi
+  if [[ -z "$SUPPLY_CHAIN_PIP_AUDIT_ALLOWLIST" ]]; then
+    SUPPLY_CHAIN_PIP_AUDIT_ALLOWLIST="$ROOT/scripts/release/security_allowlists/pip_audit_vulns_allowlist.csv"
   fi
 fi
 
@@ -668,6 +726,28 @@ if [[ "$ENFORCE_AI_JUDGE_M7_ACCEPTANCE" == "true" ]]; then
       mark_pass "ai judge m7 stage acceptance gate passed"
     else
       mark_fail "ai judge m7 stage acceptance gate failed"
+    fi
+  fi
+fi
+
+if [[ "$ENFORCE_SUPPLY_CHAIN_SECURITY" == "true" ]]; then
+  if [[ ! -f "$SUPPLY_CHAIN_GATE_SCRIPT" ]]; then
+    mark_fail "supply chain gate script not found: $SUPPLY_CHAIN_GATE_SCRIPT"
+  else
+    supply_chain_args=(
+      --root "$ROOT"
+      --report-out "$SUPPLY_CHAIN_REPORT_OUT"
+      --cargo-advisory-allowlist "$SUPPLY_CHAIN_CARGO_ADVISORY_ALLOWLIST"
+      --pip-audit-allowlist "$SUPPLY_CHAIN_PIP_AUDIT_ALLOWLIST"
+    )
+    if [[ "$SUPPLY_CHAIN_ALLOW_MISSING_TOOLS" == "true" ]]; then
+      supply_chain_args+=(--allow-missing-tools)
+    fi
+
+    if bash "$SUPPLY_CHAIN_GATE_SCRIPT" "${supply_chain_args[@]}"; then
+      mark_pass "supply chain security gate passed"
+    else
+      mark_fail "supply chain security gate failed"
     fi
   fi
 fi

@@ -1,0 +1,3 @@
+# advisory_id,target,expires_on,owner,reason
+RUSTSEC-2023-0071,chat,2026-06-30,backend-security,waiting upstream patch for transitive dependency
+RUSTSEC-2023-0071,swiftide-pgvector,2026-06-30,backend-security,waiting upstream patch for transitive dependency

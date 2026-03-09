@@ -42,6 +42,8 @@ VALID_M7_REG="$TMP_DIR/m7.reg.valid.env"
 VALID_M7_LOAD="$TMP_DIR/m7.load.valid.env"
 VALID_M7_FAULT="$TMP_DIR/m7.fault.valid.env"
 BAD_M7_FAULT="$TMP_DIR/m7.fault.bad.env"
+SUPPLY_GATE_PASS="$TMP_DIR/supply.gate.pass.sh"
+SUPPLY_GATE_FAIL="$TMP_DIR/supply.gate.fail.sh"
 
 cat >"$VALID_CHAT" <<'EOF'
 payment:
@@ -133,6 +135,35 @@ FI_MODEL_OVERLOAD=pass
 FI_CONSISTENCY_CONFLICT=pass
 EOF
 
+cat >"$SUPPLY_GATE_PASS" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --report-out)
+      report_out="$2"
+      shift 2
+      ;;
+    *)
+      shift
+      ;;
+  esac
+done
+if [[ -n "${report_out:-}" ]]; then
+  mkdir -p "$(dirname "$report_out")"
+  echo "# mock supply chain report" >"$report_out"
+fi
+exit 0
+EOF
+chmod +x "$SUPPLY_GATE_PASS"
+
+cat >"$SUPPLY_GATE_FAIL" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+exit 1
+EOF
+chmod +x "$SUPPLY_GATE_FAIL"
+
 expect_pass "valid production config should pass" \
   "$SCRIPT" \
   --runtime-env production \
@@ -185,6 +216,26 @@ expect_fail "ai judge m7 gate fail should fail preflight" \
   --ai-judge-m7-preprod-summary "$VALID_M7_LOAD" \
   --ai-judge-m7-fault-matrix "$BAD_M7_FAULT" \
   --ai-judge-m7-report-out "$TMP_DIR/m7.report.fail.md"
+
+expect_pass "valid production config with supply chain gate should pass" \
+  "$SCRIPT" \
+  --runtime-env production \
+  --chat-config "$VALID_CHAT" \
+  --tauri-app-config "$VALID_TAURI" \
+  --ai-judge-env "$VALID_AI_ENV" \
+  --enforce-supply-chain-security \
+  --supply-chain-gate-script "$SUPPLY_GATE_PASS" \
+  --supply-chain-report-out "$TMP_DIR/supply.report.pass.md"
+
+expect_fail "supply chain gate fail should fail preflight" \
+  "$SCRIPT" \
+  --runtime-env production \
+  --chat-config "$VALID_CHAT" \
+  --tauri-app-config "$VALID_TAURI" \
+  --ai-judge-env "$VALID_AI_ENV" \
+  --enforce-supply-chain-security \
+  --supply-chain-gate-script "$SUPPLY_GATE_FAIL" \
+  --supply-chain-report-out "$TMP_DIR/supply.report.fail.md"
 
 BAD_CHAT_MOCK="$TMP_DIR/chat.mock.yml"
 cat >"$BAD_CHAT_MOCK" <<'EOF'
