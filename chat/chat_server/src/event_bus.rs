@@ -20,10 +20,45 @@ pub const TOPIC_DEBATE_PARTICIPANT_JOINED: &str = "debate.participant.joined.v1"
 pub const TOPIC_DEBATE_SESSION_STATUS_CHANGED: &str = "debate.session.status.changed.v1";
 pub const TOPIC_DEBATE_MESSAGE_PINNED: &str = "debate.message.pinned.v1";
 pub const TOPIC_AI_JUDGE_JOB_CREATED: &str = "ai.judge.job.created.v1";
-const LEDGER_STATUS_SUCCEEDED: &str = "succeeded";
-const LEDGER_STATUS_FAILED: &str = "failed";
-const DLQ_STATUS_PENDING: &str = "pending";
-const DLQ_STATUS_REPLAYED: &str = "replayed";
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+enum ConsumeLedgerStatus {
+    Succeeded,
+    Failed,
+}
+
+impl ConsumeLedgerStatus {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Succeeded => "succeeded",
+            Self::Failed => "failed",
+        }
+    }
+
+    fn from_db(status: &str) -> Option<Self> {
+        match status.trim().to_ascii_lowercase().as_str() {
+            "succeeded" => Some(Self::Succeeded),
+            "failed" => Some(Self::Failed),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+enum KafkaDlqStatus {
+    Pending,
+    Replayed,
+    Discarded,
+}
+
+impl KafkaDlqStatus {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Pending => "pending",
+            Self::Replayed => "replayed",
+            Self::Discarded => "discarded",
+        }
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -348,6 +383,7 @@ impl EventBus {
 #[derive(Debug, Clone, Copy)]
 enum ConsumeProcessOutcome {
     Succeeded,
+    Retrying,
     Failed,
     Duplicated,
 }
@@ -356,6 +392,7 @@ impl std::fmt::Display for ConsumeProcessOutcome {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Succeeded => write!(f, "succeeded"),
+            Self::Retrying => write!(f, "retrying"),
             Self::Failed => write!(f, "failed"),
             Self::Duplicated => write!(f, "duplicated"),
         }
@@ -535,7 +572,11 @@ async fn consume_worker_message(
                 retry_policy.backoff_ms(failure_count)
             };
             Ok(ConsumeWorkerResult {
-                outcome: ConsumeProcessOutcome::Failed,
+                outcome: if should_commit {
+                    ConsumeProcessOutcome::Failed
+                } else {
+                    ConsumeProcessOutcome::Retrying
+                },
                 should_commit,
                 retry_backoff_ms,
             })
@@ -562,7 +603,7 @@ pub(crate) async fn process_worker_envelope(
     .fetch_optional(&mut *tx)
     .await?;
     let ledger_id = if let Some((id, status)) = existing {
-        if status == LEDGER_STATUS_SUCCEEDED {
+        if ConsumeLedgerStatus::from_db(&status) == Some(ConsumeLedgerStatus::Succeeded) {
             tx.rollback().await?;
             return Ok(WorkerProcessOutcome::Duplicated);
         }
@@ -587,7 +628,7 @@ pub(crate) async fn process_worker_envelope(
         .bind(&envelope.event_type)
         .bind(&envelope.aggregate_id)
         .bind(&envelope.payload)
-        .bind(LEDGER_STATUS_SUCCEEDED)
+        .bind(ConsumeLedgerStatus::Succeeded.as_str())
         .fetch_one(&mut *tx)
         .await?
     };
@@ -611,7 +652,7 @@ pub(crate) async fn process_worker_envelope(
                 "#,
             )
             .bind(ledger_id)
-            .bind(LEDGER_STATUS_SUCCEEDED)
+            .bind(ConsumeLedgerStatus::Succeeded.as_str())
             .bind(&meta.topic)
             .bind(meta.partition)
             .bind(meta.offset)
@@ -635,7 +676,7 @@ pub(crate) async fn process_worker_envelope(
                 "#,
             )
             .bind(ledger_id)
-            .bind(LEDGER_STATUS_FAILED)
+            .bind(ConsumeLedgerStatus::Failed.as_str())
             .bind(&error_message)
             .execute(&mut *tx)
             .await?;
@@ -727,7 +768,7 @@ async fn persist_failed_ledger_row(pool: &PgPool, row: &FailedConsumeRow) -> any
     .bind(&row.event_type)
     .bind(&row.aggregate_id)
     .bind(&row.payload)
-    .bind(LEDGER_STATUS_FAILED)
+    .bind(ConsumeLedgerStatus::Failed.as_str())
     .bind(&row.error_message)
     .execute(pool)
     .await?;
@@ -787,7 +828,7 @@ async fn upsert_kafka_dlq_failure(pool: &PgPool, row: &FailedConsumeRow) -> anyh
     .bind(&row.event_type)
     .bind(&row.aggregate_id)
     .bind(&row.payload)
-    .bind(DLQ_STATUS_PENDING)
+    .bind(KafkaDlqStatus::Pending.as_str())
     .bind(&row.error_message)
     .fetch_one(pool)
     .await?;
@@ -807,12 +848,13 @@ async fn mark_kafka_dlq_replayed(
             updated_at = NOW()
         WHERE consumer_group = $1
           AND event_id = $2
-          AND status <> 'discarded'
+          AND status <> $4
         "#,
     )
     .bind(consumer_group)
     .bind(event_id)
-    .bind(DLQ_STATUS_REPLAYED)
+    .bind(KafkaDlqStatus::Replayed.as_str())
+    .bind(KafkaDlqStatus::Discarded.as_str())
     .execute(pool)
     .await?;
     Ok(())
@@ -897,5 +939,26 @@ mod tests {
 
         let cfg = KafkaConfig::default();
         assert!(!kafka_worker_enabled(&cfg));
+    }
+
+    #[test]
+    fn consume_process_outcome_display_should_include_retrying() {
+        assert_eq!(ConsumeProcessOutcome::Succeeded.to_string(), "succeeded");
+        assert_eq!(ConsumeProcessOutcome::Retrying.to_string(), "retrying");
+        assert_eq!(ConsumeProcessOutcome::Failed.to_string(), "failed");
+        assert_eq!(ConsumeProcessOutcome::Duplicated.to_string(), "duplicated");
+    }
+
+    #[test]
+    fn consume_ledger_status_from_db_should_be_case_insensitive() {
+        assert_eq!(
+            ConsumeLedgerStatus::from_db("SUCCEEDED"),
+            Some(ConsumeLedgerStatus::Succeeded)
+        );
+        assert_eq!(
+            ConsumeLedgerStatus::from_db("failed"),
+            Some(ConsumeLedgerStatus::Failed)
+        );
+        assert_eq!(ConsumeLedgerStatus::from_db("unknown"), None);
     }
 }
