@@ -123,6 +123,10 @@ pub async fn get_router(state: AppState) -> Result<Router, AppError> {
             get(get_ops_observability_metrics_dictionary_handler),
         )
         .route(
+            "/ops/observability/slo-snapshot",
+            get(get_ops_observability_slo_snapshot_handler),
+        )
+        .route(
             "/ops/observability/thresholds",
             put(upsert_ops_observability_thresholds_handler),
         )

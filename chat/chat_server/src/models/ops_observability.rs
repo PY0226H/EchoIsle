@@ -169,6 +169,44 @@ pub struct GetOpsMetricsDictionaryOutput {
     pub items: Vec<OpsMetricsDictionaryItem>,
 }
 
+#[derive(Debug, Clone, ToSchema, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OpsSloSignalSnapshot {
+    pub success_count: u64,
+    pub failed_count: u64,
+    pub completed_count: u64,
+    pub success_rate_pct: f64,
+    pub avg_dispatch_attempts: f64,
+    pub p95_latency_ms: f64,
+    pub pending_dlq_count: u64,
+}
+
+#[derive(Debug, Clone, ToSchema, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OpsSloRuleSnapshotItem {
+    pub alert_key: String,
+    pub rule_type: String,
+    pub title: String,
+    pub severity: String,
+    pub is_active: bool,
+    pub status: String,
+    pub suppressed: bool,
+    pub last_emitted_status: Option<String>,
+    pub message: String,
+    pub metrics: Value,
+}
+
+#[derive(Debug, Clone, ToSchema, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GetOpsSloSnapshotOutput {
+    pub ws_id: u64,
+    pub window_minutes: i64,
+    pub generated_at_ms: i64,
+    pub thresholds: OpsObservabilityThresholds,
+    pub signal: OpsSloSignalSnapshot,
+    pub rules: Vec<OpsSloRuleSnapshotItem>,
+}
+
 #[derive(Debug, Clone, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct OpsAlertEvalReport {
@@ -581,6 +619,26 @@ fn build_ops_metrics_dictionary_items() -> Vec<OpsMetricsDictionaryItem> {
     ]
 }
 
+fn build_ops_slo_signal_snapshot(signal: OpsRecentJudgeSignal) -> OpsSloSignalSnapshot {
+    let success_count = signal.success_count.max(0) as u64;
+    let failed_count = signal.failed_count.max(0) as u64;
+    let completed_count = success_count.saturating_add(failed_count);
+    let success_rate_pct = if completed_count == 0 {
+        100.0
+    } else {
+        (success_count as f64 * 100.0) / completed_count as f64
+    };
+    OpsSloSignalSnapshot {
+        success_count,
+        failed_count,
+        completed_count,
+        success_rate_pct,
+        avg_dispatch_attempts: signal.avg_dispatch_attempts.max(0.0),
+        p95_latency_ms: signal.p95_latency_ms.max(0.0),
+        pending_dlq_count: signal.pending_dlq_count.max(0) as u64,
+    }
+}
+
 fn normalize_alert_limit(limit: Option<u64>) -> i64 {
     limit.unwrap_or(20).clamp(1, 200) as i64
 }
@@ -959,6 +1017,85 @@ impl AppState {
             version: "v1".to_string(),
             generated_at_ms: now_millis(),
             items: build_ops_metrics_dictionary_items(),
+        })
+    }
+
+    pub async fn get_ops_observability_slo_snapshot(
+        &self,
+        user: &User,
+    ) -> Result<GetOpsSloSnapshotOutput, AppError> {
+        self.ensure_ops_permission(user, OpsPermission::JudgeReview)
+            .await?;
+        let now_ms = now_millis();
+        let row: Option<OpsObservabilityConfigRow> = sqlx::query_as(
+            r#"
+            SELECT thresholds_json, anomaly_state_json, updated_by, updated_at
+            FROM ops_observability_configs
+            WHERE ws_id = $1
+            "#,
+        )
+        .bind(user.ws_id)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        let (thresholds, anomaly_state) = if let Some(row) = row {
+            (
+                parse_thresholds(row.thresholds_json),
+                parse_anomaly_state(row.anomaly_state_json, now_ms),
+            )
+        } else {
+            (OpsObservabilityThresholds::default(), HashMap::new())
+        };
+        let signal = self.load_recent_judge_signal(user.ws_id).await?;
+        let signal_snapshot = build_ops_slo_signal_snapshot(signal);
+        let mut rules = Vec::with_capacity(rule_specs().len());
+        for spec in rule_specs() {
+            let evaluated = evaluate_alert_for_rule(spec, &thresholds, signal);
+            let previous: Option<OpsAlertStateRow> = sqlx::query_as(
+                r#"
+                SELECT is_active, last_emitted_status
+                FROM ops_alert_states
+                WHERE ws_id = $1 AND alert_key = $2
+                "#,
+            )
+            .bind(user.ws_id)
+            .bind(spec.alert_key)
+            .fetch_optional(&self.pool)
+            .await?;
+            let suppressed = anomaly_state
+                .get(spec.alert_key)
+                .map(|v| v.suppress_until_ms > now_ms)
+                .unwrap_or(false);
+            let status = if evaluated.is_active {
+                if suppressed {
+                    ALERT_STATUS_SUPPRESSED
+                } else {
+                    ALERT_STATUS_RAISED
+                }
+            } else {
+                ALERT_STATUS_CLEARED
+            };
+            rules.push(OpsSloRuleSnapshotItem {
+                alert_key: evaluated.alert_key,
+                rule_type: evaluated.rule_type,
+                title: evaluated.title,
+                severity: evaluated.severity,
+                is_active: evaluated.is_active,
+                status: status.to_string(),
+                suppressed,
+                last_emitted_status: previous.map(|v| v.last_emitted_status),
+                message: evaluated.message,
+                metrics: evaluated.metrics,
+            });
+        }
+
+        Ok(GetOpsSloSnapshotOutput {
+            ws_id: user.ws_id as u64,
+            window_minutes: OPS_ALERT_EVAL_WINDOW_MINUTES,
+            generated_at_ms: now_ms,
+            thresholds,
+            signal: signal_snapshot,
+            rules,
         })
     }
 

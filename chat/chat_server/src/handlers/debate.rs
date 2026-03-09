@@ -19,8 +19,8 @@ pub(crate) use super::debate_judge::{
 pub(crate) use super::debate_ops::{
     create_debate_session_ops_handler, create_debate_topic_ops_handler,
     discard_kafka_dlq_event_handler, get_ops_observability_config_handler,
-    get_ops_observability_metrics_dictionary_handler, get_ops_rbac_me_handler,
-    list_judge_reviews_ops_handler, list_kafka_dlq_events_handler,
+    get_ops_observability_metrics_dictionary_handler, get_ops_observability_slo_snapshot_handler,
+    get_ops_rbac_me_handler, list_judge_reviews_ops_handler, list_kafka_dlq_events_handler,
     list_ops_alert_notifications_handler, list_ops_role_assignments_handler,
     replay_kafka_dlq_event_handler, request_judge_rejudge_ops_handler,
     revoke_ops_role_assignment_handler, update_debate_session_ops_handler,

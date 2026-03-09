@@ -197,6 +197,26 @@ pub(crate) async fn get_ops_observability_metrics_dictionary_handler(
     Ok((StatusCode::OK, Json(ret)))
 }
 
+/// Get current SLO snapshot for ops observability.
+#[utoipa::path(
+    get,
+    path = "/api/debate/ops/observability/slo-snapshot",
+    responses(
+        (status = 200, description = "Ops SLO snapshot", body = crate::GetOpsSloSnapshotOutput),
+        (status = 409, description = "Permission conflict", body = crate::ErrorOutput),
+    ),
+    security(
+        ("token" = [])
+    )
+)]
+pub(crate) async fn get_ops_observability_slo_snapshot_handler(
+    Extension(user): Extension<User>,
+    State(state): State<AppState>,
+) -> Result<impl IntoResponse, AppError> {
+    let ret = state.get_ops_observability_slo_snapshot(&user).await?;
+    Ok((StatusCode::OK, Json(ret)))
+}
+
 /// Upsert ops observability thresholds for current workspace.
 #[utoipa::path(
     put,
