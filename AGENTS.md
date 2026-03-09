@@ -11,6 +11,7 @@ A skill is a set of local instructions stored in a `SKILL.md` file.
 - `post-module-test-guard`: Generate or update tests for changed module behavior and run repository quality gates after implementation. (file: `/Users/panyihang/Documents/aicomm/skills/post-module-test-guard/SKILL.md`)
 - `post-module-interview-journal`: Generate interview-ready development records after each module implementation. (file: `/Users/panyihang/Documents/aicomm/skills/post-module-interview-journal/SKILL.md`)
 - `post-module-explanation-journal`: Generate deep Chinese explanation documents for newly added or modified module code under `docs/explanation`. (file: `/Users/panyihang/Documents/aicomm/skills/post-module-explanation-journal/SKILL.md`)
+- `post-module-plan-sync`: After each module implementation/refactor/fix, sync the currently active development plan document with module status, next-step suggestions, and completion history. (file: `/Users/panyihang/Documents/aicomm/skills/post-module-plan-sync/SKILL.md`)
 - `python-venv-guard`: Enforce Python virtual environment usage before any Python command, and forbid global python/pip usage. (file: `/Users/panyihang/Documents/aicomm/skills/python-venv-guard/SKILL.md`)
 - `pre-module-prd-goal-guard`: Before each module development/refactor/optimization, fully read the PRD and align implementation decisions with the product target end-state. (file: `/Users/panyihang/Documents/aicomm/skills/pre-module-prd-goal-guard/SKILL.md`)
 - `post-optimization-plan-sync`: After each backend optimization module, sync optimization matrix and next-step recommendation, then append optimization history. (file: `/Users/panyihang/Documents/aicomm/skills/post-optimization-plan-sync/SKILL.md`)
@@ -57,6 +58,12 @@ For any turn that includes module-level implementation/refactor/fix, run hooks i
 2. `post-module-interview-journal`
 3. `post-module-explanation-journal`
 
+Only for code/module development turns (implementation/fix) run additionally:
+
+4. `post-module-plan-sync`
+
+`post-module-plan-sync` must NOT run in refactor/optimization turns.
+
 ### Post-module hook requirements
 
 - Testing hook must:
@@ -71,11 +78,16 @@ For any turn that includes module-level implementation/refactor/fix, run hooks i
   - follow `docs/explanation/00-讲解规范.md`
   - create a new markdown file under `docs/explanation/`
   - explain only new/modified code paths with architecture, execution flow, tradeoffs, and testing evidence
+- Plan sync hook must:
+  - sync the currently active development plan document (dynamic resolution; do not hardcode a single path)
+  - update module status matrix and next-step suggestions
+  - append module completion sync history
 
 ## Mandatory post-optimization hook
 
 - For any turn that completes a backend optimization/refactor module, run `post-optimization-plan-sync` before the final response.
+- Optimization/refactor turns must use `post-optimization-plan-sync` instead of `post-module-plan-sync`.
 - Optimization hook must:
-  - read `/Users/panyihang/Documents/aicomm/docs/后端代码结构优化计划.md`
+  - resolve and read the currently active optimization/restructure plan document (dynamic resolution)
   - overwrite-sync “优化执行矩阵” and “下一步优化建议” (default rewrite sections `8,9`)
   - append optimization completion sync history and clearly state the next optimization phase

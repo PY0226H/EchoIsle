@@ -515,9 +515,9 @@ async fn verify_iap_order_should_be_idempotent_for_same_transaction_id() -> Resu
         .verify_iap_order(&user, verify_input("tx-idempotent-1", "mock_ok_receipt"))
         .await?;
 
-    assert_eq!(first.order_id, second.order_id);
-    assert!(first.credited);
+    assert_order_output(&first, "verified", "mock", true, 60);
     assert_order_output(&second, "verified", "mock", false, 60);
+    assert_eq!(first.order_id, second.order_id);
 
     let ledger = query_wallet_ledger(&state, 1, 1).await?;
     assert_single_credit_ledger_entry(&ledger, 60);
@@ -593,6 +593,9 @@ async fn verify_iap_order_should_allow_retry_after_transient_apple_status() -> R
 
     let second = state.verify_iap_order(&user, input).await?;
     assert_order_output(&second, "verified", "apple", true, 60);
+
+    let second_query = query_order_snapshot(&state, &user, "tx-apple-retry-1").await?;
+    assert_order_query_verified(&second_query, "com.aicomm.coins.60");
 
     assert_stub_request_paths(&requests, &["/prod", "/prod"]).await;
     server.abort();
