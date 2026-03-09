@@ -66,6 +66,12 @@ pub struct AppStateInner {
     pub(crate) dispatch_trigger_tx: Option<UnboundedSender<JudgeDispatchTrigger>>,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum AppBootstrapMode {
+    ApiServer,
+    StandaloneWorker,
+}
+
 pub async fn get_router(state: AppState) -> Result<Router, AppError> {
     let chat = Router::new()
         .route(
@@ -244,6 +250,17 @@ impl TokenVerify for AppState {
 
 impl AppState {
     pub async fn try_new(config: AppConfig) -> Result<Self, AppError> {
+        Self::try_new_with_bootstrap(config, AppBootstrapMode::ApiServer).await
+    }
+
+    pub async fn try_new_for_standalone_worker(config: AppConfig) -> Result<Self, AppError> {
+        Self::try_new_with_bootstrap(config, AppBootstrapMode::StandaloneWorker).await
+    }
+
+    async fn try_new_with_bootstrap(
+        config: AppConfig,
+        mode: AppBootstrapMode,
+    ) -> Result<Self, AppError> {
         fs::create_dir_all(&config.server.base_dir)
             .await
             .context("create base_dir failed")?;
@@ -257,11 +274,19 @@ impl AppState {
             .await
             .context("init redis store failed")?;
         let event_bus = EventBus::from_config(&config.kafka).context("init event bus failed")?;
-        event_bus
-            .maybe_spawn_consumer_worker(pool.clone())
-            .context("start kafka consumer worker failed")?;
-        let (dispatch_trigger_tx, dispatch_trigger_rx) =
-            unbounded_channel::<JudgeDispatchTrigger>();
+        if mode == AppBootstrapMode::ApiServer {
+            event_bus
+                .maybe_spawn_consumer_worker(pool.clone())
+                .context("start kafka consumer worker failed")?;
+        }
+        let (dispatch_trigger_tx, dispatch_trigger_rx) = if mode == AppBootstrapMode::ApiServer
+            && config.worker_runtime.ai_judge_dispatch_worker_enabled
+        {
+            let (tx, rx) = unbounded_channel::<JudgeDispatchTrigger>();
+            (Some(tx), Some(rx))
+        } else {
+            (None, None)
+        };
         let state = Self {
             inner: Arc::new(AppStateInner {
                 config,
@@ -271,10 +296,12 @@ impl AppState {
                 redis,
                 event_bus,
                 dispatch_metrics: AiJudgeDispatchMetrics::default(),
-                dispatch_trigger_tx: Some(dispatch_trigger_tx),
+                dispatch_trigger_tx,
             }),
         };
-        spawn_background_workers(state.clone(), dispatch_trigger_rx);
+        if mode == AppBootstrapMode::ApiServer {
+            spawn_background_workers(state.clone(), dispatch_trigger_rx);
+        }
         Ok(state)
     }
 

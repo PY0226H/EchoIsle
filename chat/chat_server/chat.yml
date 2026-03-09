@@ -53,6 +53,14 @@ ai_judge:
   alert_outbox_path: /internal/judge/alerts/outbox
   alert_outbox_delivery_path: /internal/judge/alerts/outbox/{event_id}/delivery
   alert_outbox_timeout_ms: 5000
+worker_runtime:
+  debate_lifecycle_worker_enabled: true
+  ai_judge_dispatch_worker_enabled: true
+  ops_observability_worker_enabled: true
+  ai_judge_alert_outbox_bridge_worker_enabled: true
+  debate_lifecycle_interval_secs: 2
+  debate_lifecycle_batch_size: 200
+  ops_observability_interval_secs: 30
 payment:
   verify_mode: mock
   apple_verify_url_prod: https://buy.itunes.apple.com/verifyReceipt

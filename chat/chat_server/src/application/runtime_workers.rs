@@ -8,32 +8,53 @@ use tracing::{debug, warn};
 
 use crate::{models::JudgeDispatchTrigger, AppState};
 
-const DEBATE_SESSION_WORKER_INTERVAL_SECS: u64 = 2;
-const DEBATE_SESSION_WORKER_BATCH_SIZE: i64 = 200;
-const OPS_OBSERVABILITY_WORKER_INTERVAL_SECS: u64 = 30;
-
 pub(crate) fn spawn_background_workers(
     state: AppState,
-    dispatch_trigger_rx: UnboundedReceiver<JudgeDispatchTrigger>,
+    dispatch_trigger_rx: Option<UnboundedReceiver<JudgeDispatchTrigger>>,
 ) {
-    spawn_debate_session_worker(state.clone());
-    spawn_ai_judge_dispatch_worker(state.clone(), dispatch_trigger_rx);
-    spawn_ops_observability_alert_worker(state.clone());
-    spawn_ai_judge_alert_outbox_bridge_worker(state);
+    let runtime = state.config.worker_runtime.clone();
+
+    if runtime.debate_lifecycle_worker_enabled {
+        spawn_debate_session_worker(state.clone());
+    }
+
+    if runtime.ai_judge_dispatch_worker_enabled {
+        match dispatch_trigger_rx {
+            Some(rx) => spawn_ai_judge_dispatch_worker(state.clone(), rx),
+            None => warn!(
+                "ai_judge_dispatch_worker_enabled=true but dispatch trigger receiver is missing"
+            ),
+        }
+    }
+
+    if runtime.ops_observability_worker_enabled {
+        spawn_ops_observability_alert_worker(state.clone());
+    }
+
+    if runtime.ai_judge_alert_outbox_bridge_worker_enabled {
+        spawn_ai_judge_alert_outbox_bridge_worker(state);
+    }
 }
 
 fn spawn_debate_session_worker(state: AppState) {
     tokio::spawn(async move {
+        let interval_secs = state
+            .config
+            .worker_runtime
+            .debate_lifecycle_interval_secs
+            .max(1);
+        let batch_size = state
+            .config
+            .worker_runtime
+            .debate_lifecycle_batch_size
+            .max(1);
         loop {
-            if let Err(err) = state
-                .advance_debate_sessions(DEBATE_SESSION_WORKER_BATCH_SIZE)
-                .await
-            {
+            if let Err(err) = state.advance_debate_sessions(batch_size).await {
                 warn!("debate session worker tick failed: {}", err);
             } else {
                 debug!("debate session worker tick success");
             }
-            sleep(Duration::from_secs(DEBATE_SESSION_WORKER_INTERVAL_SECS)).await;
+            sleep(Duration::from_secs(interval_secs)).await;
         }
     });
 }
@@ -109,6 +130,11 @@ fn spawn_ai_judge_dispatch_worker(
 
 fn spawn_ops_observability_alert_worker(state: AppState) {
     tokio::spawn(async move {
+        let interval_secs = state
+            .config
+            .worker_runtime
+            .ops_observability_interval_secs
+            .max(1);
         loop {
             match state.evaluate_ops_observability_alerts_once().await {
                 Ok(report) => {
@@ -122,7 +148,7 @@ fn spawn_ops_observability_alert_worker(state: AppState) {
                 }
                 Err(err) => warn!("ops observability alert worker tick failed: {}", err),
             }
-            sleep(Duration::from_secs(OPS_OBSERVABILITY_WORKER_INTERVAL_SECS)).await;
+            sleep(Duration::from_secs(interval_secs)).await;
         }
     });
 }

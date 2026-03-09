@@ -68,6 +68,7 @@ mod tests {
             kafka: crate::config::KafkaConfig::default(),
             redis: crate::config::RedisConfig::default(),
             ai_judge: crate::config::AiJudgeConfig::default(),
+            worker_runtime: crate::config::WorkerRuntimeConfig::default(),
             payment: crate::config::PaymentConfig::default(),
         };
         Ok(AppState::new_for_unit_test(config)?)

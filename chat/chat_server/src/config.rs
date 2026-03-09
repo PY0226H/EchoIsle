@@ -16,6 +16,8 @@ pub struct AppConfig {
     #[serde(default)]
     pub ai_judge: AiJudgeConfig,
     #[serde(default)]
+    pub worker_runtime: WorkerRuntimeConfig,
+    #[serde(default)]
     pub payment: PaymentConfig,
 }
 
@@ -127,6 +129,24 @@ pub struct AiJudgeConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkerRuntimeConfig {
+    #[serde(default = "default_worker_runtime_debate_lifecycle_worker_enabled")]
+    pub debate_lifecycle_worker_enabled: bool,
+    #[serde(default = "default_worker_runtime_ai_judge_dispatch_worker_enabled")]
+    pub ai_judge_dispatch_worker_enabled: bool,
+    #[serde(default = "default_worker_runtime_ops_observability_worker_enabled")]
+    pub ops_observability_worker_enabled: bool,
+    #[serde(default = "default_worker_runtime_ai_judge_alert_outbox_bridge_worker_enabled")]
+    pub ai_judge_alert_outbox_bridge_worker_enabled: bool,
+    #[serde(default = "default_worker_runtime_debate_lifecycle_interval_secs")]
+    pub debate_lifecycle_interval_secs: u64,
+    #[serde(default = "default_worker_runtime_debate_lifecycle_batch_size")]
+    pub debate_lifecycle_batch_size: i64,
+    #[serde(default = "default_worker_runtime_ops_observability_interval_secs")]
+    pub ops_observability_interval_secs: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PaymentConfig {
     #[serde(default = "default_payment_verify_mode")]
     pub verify_mode: String,
@@ -163,6 +183,25 @@ impl Default for AiJudgeConfig {
             alert_outbox_path: default_ai_judge_alert_outbox_path(),
             alert_outbox_delivery_path: default_ai_judge_alert_outbox_delivery_path(),
             alert_outbox_timeout_ms: default_ai_judge_alert_outbox_timeout_ms(),
+        }
+    }
+}
+
+impl Default for WorkerRuntimeConfig {
+    fn default() -> Self {
+        Self {
+            debate_lifecycle_worker_enabled: default_worker_runtime_debate_lifecycle_worker_enabled(
+            ),
+            ai_judge_dispatch_worker_enabled:
+                default_worker_runtime_ai_judge_dispatch_worker_enabled(),
+            ops_observability_worker_enabled:
+                default_worker_runtime_ops_observability_worker_enabled(),
+            ai_judge_alert_outbox_bridge_worker_enabled:
+                default_worker_runtime_ai_judge_alert_outbox_bridge_worker_enabled(),
+            debate_lifecycle_interval_secs: default_worker_runtime_debate_lifecycle_interval_secs(),
+            debate_lifecycle_batch_size: default_worker_runtime_debate_lifecycle_batch_size(),
+            ops_observability_interval_secs: default_worker_runtime_ops_observability_interval_secs(
+            ),
         }
     }
 }
@@ -344,6 +383,34 @@ fn default_ai_judge_alert_outbox_timeout_ms() -> u64 {
     5_000
 }
 
+fn default_worker_runtime_debate_lifecycle_worker_enabled() -> bool {
+    true
+}
+
+fn default_worker_runtime_ai_judge_dispatch_worker_enabled() -> bool {
+    true
+}
+
+fn default_worker_runtime_ops_observability_worker_enabled() -> bool {
+    true
+}
+
+fn default_worker_runtime_ai_judge_alert_outbox_bridge_worker_enabled() -> bool {
+    true
+}
+
+fn default_worker_runtime_debate_lifecycle_interval_secs() -> u64 {
+    2
+}
+
+fn default_worker_runtime_debate_lifecycle_batch_size() -> i64 {
+    200
+}
+
+fn default_worker_runtime_ops_observability_interval_secs() -> u64 {
+    30
+}
+
 fn default_payment_verify_mode() -> String {
     "apple".to_string()
 }
@@ -445,6 +512,7 @@ mod tests {
             kafka: KafkaConfig::default(),
             redis: RedisConfig::default(),
             ai_judge: AiJudgeConfig::default(),
+            worker_runtime: WorkerRuntimeConfig::default(),
             payment: PaymentConfig::default(),
         }
     }
@@ -525,5 +593,17 @@ mod tests {
             "/internal/judge/alerts/outbox/{event_id}/delivery"
         );
         assert_eq!(cfg.alert_outbox_timeout_ms, 5_000);
+    }
+
+    #[test]
+    fn worker_runtime_defaults_should_be_stable() {
+        let cfg = WorkerRuntimeConfig::default();
+        assert!(cfg.debate_lifecycle_worker_enabled);
+        assert!(cfg.ai_judge_dispatch_worker_enabled);
+        assert!(cfg.ops_observability_worker_enabled);
+        assert!(cfg.ai_judge_alert_outbox_bridge_worker_enabled);
+        assert_eq!(cfg.debate_lifecycle_interval_secs, 2);
+        assert_eq!(cfg.debate_lifecycle_batch_size, 200);
+        assert_eq!(cfg.ops_observability_interval_secs, 30);
     }
 }
