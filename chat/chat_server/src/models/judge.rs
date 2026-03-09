@@ -6,6 +6,7 @@ mod draw_vote;
 mod helpers;
 mod report_submit;
 mod request_report;
+mod request_report_query;
 mod rows;
 mod types;
 
