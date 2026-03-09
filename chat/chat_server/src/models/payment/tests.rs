@@ -205,6 +205,13 @@ fn assert_payment_conflict(err: &AppError) {
     assert!(matches!(err, AppError::PaymentConflict(_)));
 }
 
+fn assert_retryable_payment_error_contains(err: &AppError, status_code: i64) {
+    assert!(matches!(err, AppError::PaymentError(_)));
+    assert!(err
+        .to_string()
+        .contains(format!("transient status {status_code}").as_str()));
+}
+
 #[test]
 fn extract_receipt_records_should_collect_both_paths() {
     let payload = json!({
@@ -381,8 +388,7 @@ async fn verify_receipt_should_return_error_for_retryable_apple_status() -> Resu
     .await
     .expect_err("retryable status should return error");
 
-    assert!(matches!(err, AppError::PaymentError(_)));
-    assert!(err.to_string().contains("transient status 21005"));
+    assert_retryable_payment_error_contains(&err, 21005);
 
     let requests = requests.lock().await;
     assert_request_paths(&requests, &["/prod"]);
@@ -545,8 +551,7 @@ async fn verify_iap_order_should_allow_retry_after_transient_apple_status() -> R
         .verify_iap_order(&user, input.clone())
         .await
         .expect_err("first call should fail with retryable status");
-    assert!(matches!(first_err, AppError::PaymentError(_)));
-    assert!(first_err.to_string().contains("transient status 21005"));
+    assert_retryable_payment_error_contains(&first_err, 21005);
 
     let first_query = query_order_snapshot(&state, &user, "tx-apple-retry-1").await?;
     assert_order_query_not_found(&first_query);
