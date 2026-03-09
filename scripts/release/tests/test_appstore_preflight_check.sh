@@ -32,6 +32,15 @@ expect_pass() {
   exit 1
 }
 
+compute_sha256() {
+  local file="$1"
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$file" | awk '{print $1}'
+    return 0
+  fi
+  shasum -a 256 "$file" | awk '{print $1}'
+}
+
 VALID_CHAT="$TMP_DIR/chat.valid.yml"
 VALID_TAURI="$TMP_DIR/app.valid.yml"
 VALID_AI_ENV="$TMP_DIR/ai.valid.env"
@@ -47,6 +56,12 @@ SUPPLY_GATE_FAIL="$TMP_DIR/supply.gate.fail.sh"
 VALID_SUPPLY_CHAOS="$TMP_DIR/supply.chaos.valid.env"
 BAD_SUPPLY_CHAOS="$TMP_DIR/supply.chaos.bad.env"
 STALE_SUPPLY_CHAOS="$TMP_DIR/supply.chaos.stale.env"
+VALID_SBOM_RUST="$TMP_DIR/sbom.rust.valid.json"
+VALID_SBOM_PYTHON="$TMP_DIR/sbom.python.valid.json"
+VALID_SBOM_LICENSE="$TMP_DIR/sbom.license.valid.env"
+VALID_SBOM_EVIDENCE="$TMP_DIR/sbom.evidence.valid.env"
+BAD_SBOM_EVIDENCE_HASH="$TMP_DIR/sbom.evidence.bad.hash.env"
+STALE_SBOM_EVIDENCE="$TMP_DIR/sbom.evidence.stale.env"
 
 cat >"$VALID_CHAT" <<'EOF'
 payment:
@@ -195,6 +210,65 @@ SCENARIO_ALLOWLIST_EXPIRED=pass
 CHAOS_LAST_RUN_AT=2020-01-01T00:00:00Z
 EOF
 
+cat >"$VALID_SBOM_RUST" <<'EOF'
+{"generatedAt":"2026-03-08T12:00:00Z","format":"test","targets":[{"target":"chat","components":[{"name":"axum","version":"0.7.0"}]}]}
+EOF
+
+cat >"$VALID_SBOM_PYTHON" <<'EOF'
+{"generatedAt":"2026-03-08T12:00:00Z","format":"test","components":[{"name":"fastapi","version":"0.116.1","pinned":true}]}
+EOF
+
+cat >"$VALID_SBOM_LICENSE" <<'EOF'
+LICENSE_GENERATED_AT=2026-03-08T12:00:00Z
+LICENSE_CHECK_RUST=pass
+LICENSE_CHECK_PYTHON_PINNED=pass
+LICENSE_CHECK_PYTHON_METADATA=warn
+EOF
+
+FRESH_SBOM_GENERATED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+SBOM_RUST_SHA="$(compute_sha256 "$VALID_SBOM_RUST")"
+SBOM_PYTHON_SHA="$(compute_sha256 "$VALID_SBOM_PYTHON")"
+SBOM_LICENSE_SHA="$(compute_sha256 "$VALID_SBOM_LICENSE")"
+
+cat >"$VALID_SBOM_EVIDENCE" <<EOF
+SBOM_STAGE=preprod
+SBOM_GENERATED_AT=$FRESH_SBOM_GENERATED_AT
+SBOM_RUST_PATH=$VALID_SBOM_RUST
+SBOM_PYTHON_PATH=$VALID_SBOM_PYTHON
+SBOM_LICENSE_ATTESTATION_PATH=$VALID_SBOM_LICENSE
+SBOM_RUST_SHA256=$SBOM_RUST_SHA
+SBOM_PYTHON_SHA256=$SBOM_PYTHON_SHA
+SBOM_LICENSE_SHA256=$SBOM_LICENSE_SHA
+SBOM_LICENSE_CHECK_RUST=pass
+SBOM_LICENSE_CHECK_PYTHON_PINNED=pass
+EOF
+
+cat >"$BAD_SBOM_EVIDENCE_HASH" <<EOF
+SBOM_STAGE=preprod
+SBOM_GENERATED_AT=$FRESH_SBOM_GENERATED_AT
+SBOM_RUST_PATH=$VALID_SBOM_RUST
+SBOM_PYTHON_PATH=$VALID_SBOM_PYTHON
+SBOM_LICENSE_ATTESTATION_PATH=$VALID_SBOM_LICENSE
+SBOM_RUST_SHA256=deadbeef
+SBOM_PYTHON_SHA256=$SBOM_PYTHON_SHA
+SBOM_LICENSE_SHA256=$SBOM_LICENSE_SHA
+SBOM_LICENSE_CHECK_RUST=pass
+SBOM_LICENSE_CHECK_PYTHON_PINNED=pass
+EOF
+
+cat >"$STALE_SBOM_EVIDENCE" <<EOF
+SBOM_STAGE=preprod
+SBOM_GENERATED_AT=2020-01-01T00:00:00Z
+SBOM_RUST_PATH=$VALID_SBOM_RUST
+SBOM_PYTHON_PATH=$VALID_SBOM_PYTHON
+SBOM_LICENSE_ATTESTATION_PATH=$VALID_SBOM_LICENSE
+SBOM_RUST_SHA256=$SBOM_RUST_SHA
+SBOM_PYTHON_SHA256=$SBOM_PYTHON_SHA
+SBOM_LICENSE_SHA256=$SBOM_LICENSE_SHA
+SBOM_LICENSE_CHECK_RUST=pass
+SBOM_LICENSE_CHECK_PYTHON_PINNED=pass
+EOF
+
 expect_pass "valid production config should pass" \
   "$SCRIPT" \
   --runtime-env production \
@@ -297,6 +371,36 @@ expect_fail "stale chaos evidence should fail preflight" \
   --enforce-supply-chain-chaos-evidence \
   --supply-chain-chaos-evidence "$STALE_SUPPLY_CHAOS" \
   --supply-chain-chaos-max-age-hours 24
+
+expect_pass "fresh supply chain sbom evidence should pass preflight" \
+  "$SCRIPT" \
+  --runtime-env production \
+  --chat-config "$VALID_CHAT" \
+  --tauri-app-config "$VALID_TAURI" \
+  --ai-judge-env "$VALID_AI_ENV" \
+  --enforce-supply-chain-sbom-attestation \
+  --supply-chain-sbom-evidence "$VALID_SBOM_EVIDENCE" \
+  --supply-chain-sbom-max-age-hours 24
+
+expect_fail "sbom evidence with hash mismatch should fail preflight" \
+  "$SCRIPT" \
+  --runtime-env production \
+  --chat-config "$VALID_CHAT" \
+  --tauri-app-config "$VALID_TAURI" \
+  --ai-judge-env "$VALID_AI_ENV" \
+  --enforce-supply-chain-sbom-attestation \
+  --supply-chain-sbom-evidence "$BAD_SBOM_EVIDENCE_HASH" \
+  --supply-chain-sbom-max-age-hours 24
+
+expect_fail "stale sbom evidence should fail preflight" \
+  "$SCRIPT" \
+  --runtime-env production \
+  --chat-config "$VALID_CHAT" \
+  --tauri-app-config "$VALID_TAURI" \
+  --ai-judge-env "$VALID_AI_ENV" \
+  --enforce-supply-chain-sbom-attestation \
+  --supply-chain-sbom-evidence "$STALE_SBOM_EVIDENCE" \
+  --supply-chain-sbom-max-age-hours 24
 
 BAD_CHAT_MOCK="$TMP_DIR/chat.mock.yml"
 cat >"$BAD_CHAT_MOCK" <<'EOF'

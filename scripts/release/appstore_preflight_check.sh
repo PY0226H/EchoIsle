@@ -49,6 +49,12 @@ Options:
                                Supply chain chaos evidence env file
   --supply-chain-chaos-max-age-hours <hours>
                                Max age in hours for chaos evidence, default: 168
+  --enforce-supply-chain-sbom-attestation
+                               Enable supply chain SBOM and license attestation gate check
+  --supply-chain-sbom-evidence <path>
+                               Supply chain SBOM attestation evidence env file
+  --supply-chain-sbom-max-age-hours <hours>
+                               Max age in hours for SBOM attestation evidence, default: 168
   --root <path>                Repo root path (default: git top-level or cwd)
   -h, --help                   Show this help
 
@@ -60,6 +66,7 @@ Notes:
   5) AI Judge M7 gate is optional and runs only when --enforce-ai-judge-m7-acceptance is set.
   6) Supply chain gate is optional and runs only when --enforce-supply-chain-security is set.
   7) Supply chain chaos evidence gate is optional and runs only when --enforce-supply-chain-chaos-evidence is set.
+  8) Supply chain SBOM attestation gate is optional and runs only when --enforce-supply-chain-sbom-attestation is set.
 USAGE
 }
 
@@ -148,6 +155,19 @@ parse_epoch_from_iso8601_utc() {
     return 0
   fi
 
+  return 1
+}
+
+sha256_file() {
+  local file="$1"
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$file" | awk '{print $1}'
+    return 0
+  fi
+  if command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 "$file" | awk '{print $1}'
+    return 0
+  fi
   return 1
 }
 
@@ -412,6 +432,9 @@ SUPPLY_CHAIN_PIP_AUDIT_ALLOWLIST=""
 ENFORCE_SUPPLY_CHAIN_CHAOS_EVIDENCE="false"
 SUPPLY_CHAIN_CHAOS_EVIDENCE=""
 SUPPLY_CHAIN_CHAOS_MAX_AGE_HOURS="168"
+ENFORCE_SUPPLY_CHAIN_SBOM_ATTESTATION="false"
+SUPPLY_CHAIN_SBOM_EVIDENCE=""
+SUPPLY_CHAIN_SBOM_MAX_AGE_HOURS="168"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -511,6 +534,18 @@ while [[ $# -gt 0 ]]; do
       SUPPLY_CHAIN_CHAOS_MAX_AGE_HOURS="$2"
       shift 2
       ;;
+    --enforce-supply-chain-sbom-attestation)
+      ENFORCE_SUPPLY_CHAIN_SBOM_ATTESTATION="true"
+      shift
+      ;;
+    --supply-chain-sbom-evidence)
+      SUPPLY_CHAIN_SBOM_EVIDENCE="$2"
+      shift 2
+      ;;
+    --supply-chain-sbom-max-age-hours)
+      SUPPLY_CHAIN_SBOM_MAX_AGE_HOURS="$2"
+      shift 2
+      ;;
     --root)
       ROOT="$2"
       shift 2
@@ -584,6 +619,12 @@ fi
 if [[ "$ENFORCE_SUPPLY_CHAIN_CHAOS_EVIDENCE" == "true" ]]; then
   if [[ -z "$SUPPLY_CHAIN_CHAOS_EVIDENCE" ]]; then
     SUPPLY_CHAIN_CHAOS_EVIDENCE="$ROOT/docs/loadtest/evidence/supply_chain_preprod_chaos.env"
+  fi
+fi
+
+if [[ "$ENFORCE_SUPPLY_CHAIN_SBOM_ATTESTATION" == "true" ]]; then
+  if [[ -z "$SUPPLY_CHAIN_SBOM_EVIDENCE" ]]; then
+    SUPPLY_CHAIN_SBOM_EVIDENCE="$ROOT/docs/loadtest/evidence/supply_chain_sbom_attestation.env"
   fi
 fi
 
@@ -849,6 +890,118 @@ if [[ "$ENFORCE_SUPPLY_CHAIN_CHAOS_EVIDENCE" == "true" ]]; then
           else
             mark_pass "supply chain chaos evidence freshness ok: age_seconds=$chaos_age_secs max_age_seconds=$chaos_max_age_secs"
           fi
+        fi
+      fi
+    fi
+  fi
+fi
+
+if [[ "$ENFORCE_SUPPLY_CHAIN_SBOM_ATTESTATION" == "true" ]]; then
+  if [[ ! "$SUPPLY_CHAIN_SBOM_MAX_AGE_HOURS" =~ ^[0-9]+$ ]]; then
+    mark_fail "supply chain sbom max age must be numeric hours: $SUPPLY_CHAIN_SBOM_MAX_AGE_HOURS"
+  elif [[ "$SUPPLY_CHAIN_SBOM_MAX_AGE_HOURS" -eq 0 ]]; then
+    mark_fail "supply chain sbom max age must be greater than zero"
+  elif [[ ! -f "$SUPPLY_CHAIN_SBOM_EVIDENCE" ]]; then
+    mark_fail "supply chain sbom evidence file not found: $SUPPLY_CHAIN_SBOM_EVIDENCE"
+  else
+    sbom_generated_at="$(trim "$(read_env_value "SBOM_GENERATED_AT" "$SUPPLY_CHAIN_SBOM_EVIDENCE")")"
+    sbom_rust_path="$(trim "$(read_env_value "SBOM_RUST_PATH" "$SUPPLY_CHAIN_SBOM_EVIDENCE")")"
+    sbom_python_path="$(trim "$(read_env_value "SBOM_PYTHON_PATH" "$SUPPLY_CHAIN_SBOM_EVIDENCE")")"
+    sbom_license_path="$(trim "$(read_env_value "SBOM_LICENSE_ATTESTATION_PATH" "$SUPPLY_CHAIN_SBOM_EVIDENCE")")"
+    sbom_rust_sha_expected="$(trim "$(read_env_value "SBOM_RUST_SHA256" "$SUPPLY_CHAIN_SBOM_EVIDENCE")")"
+    sbom_python_sha_expected="$(trim "$(read_env_value "SBOM_PYTHON_SHA256" "$SUPPLY_CHAIN_SBOM_EVIDENCE")")"
+    sbom_license_sha_expected="$(trim "$(read_env_value "SBOM_LICENSE_SHA256" "$SUPPLY_CHAIN_SBOM_EVIDENCE")")"
+
+    sbom_license_rust_status="$(to_lower "$(trim "$(read_env_value "SBOM_LICENSE_CHECK_RUST" "$SUPPLY_CHAIN_SBOM_EVIDENCE")")")"
+    sbom_license_python_status="$(to_lower "$(trim "$(read_env_value "SBOM_LICENSE_CHECK_PYTHON_PINNED" "$SUPPLY_CHAIN_SBOM_EVIDENCE")")")"
+
+    if [[ "$sbom_license_rust_status" != "pass" ]]; then
+      mark_fail "supply chain sbom license check rust is not pass"
+    else
+      mark_pass "supply chain sbom license check rust=pass"
+    fi
+
+    if [[ "$sbom_license_python_status" != "pass" ]]; then
+      mark_fail "supply chain sbom license check python pinned is not pass"
+    else
+      mark_pass "supply chain sbom license check python pinned=pass"
+    fi
+
+    if [[ -z "$sbom_generated_at" ]]; then
+      mark_fail "supply chain sbom evidence missing SBOM_GENERATED_AT"
+    else
+      sbom_generated_epoch=""
+      if ! sbom_generated_epoch="$(parse_epoch_from_iso8601_utc "$sbom_generated_at")"; then
+        mark_fail "supply chain sbom evidence SBOM_GENERATED_AT is invalid: $sbom_generated_at"
+      else
+        now_epoch="$(date -u +%s)"
+        if [[ "$sbom_generated_epoch" -gt "$now_epoch" ]]; then
+          mark_fail "supply chain sbom evidence SBOM_GENERATED_AT is in the future: $sbom_generated_at"
+        else
+          sbom_age_secs=$((now_epoch - sbom_generated_epoch))
+          sbom_max_age_secs=$((SUPPLY_CHAIN_SBOM_MAX_AGE_HOURS * 3600))
+          if [[ "$sbom_age_secs" -gt "$sbom_max_age_secs" ]]; then
+            mark_fail "supply chain sbom evidence is stale: age_seconds=$sbom_age_secs max_age_seconds=$sbom_max_age_secs"
+          else
+            mark_pass "supply chain sbom evidence freshness ok: age_seconds=$sbom_age_secs max_age_seconds=$sbom_max_age_secs"
+          fi
+        fi
+      fi
+    fi
+
+    if [[ -z "$sbom_rust_path" || ! -f "$sbom_rust_path" ]]; then
+      mark_fail "supply chain sbom rust file missing: $sbom_rust_path"
+    else
+      mark_pass "supply chain sbom rust file present"
+      if [[ -z "$sbom_rust_sha_expected" ]]; then
+        mark_fail "supply chain sbom rust sha256 missing in evidence"
+      else
+        if sbom_rust_sha_actual="$(sha256_file "$sbom_rust_path" 2>/dev/null)"; then
+          if [[ "$sbom_rust_sha_actual" == "$sbom_rust_sha_expected" ]]; then
+            mark_pass "supply chain sbom rust sha256 matched"
+          else
+            mark_fail "supply chain sbom rust sha256 mismatch"
+          fi
+        else
+          mark_fail "supply chain sbom rust sha256 compute failed"
+        fi
+      fi
+    fi
+
+    if [[ -z "$sbom_python_path" || ! -f "$sbom_python_path" ]]; then
+      mark_fail "supply chain sbom python file missing: $sbom_python_path"
+    else
+      mark_pass "supply chain sbom python file present"
+      if [[ -z "$sbom_python_sha_expected" ]]; then
+        mark_fail "supply chain sbom python sha256 missing in evidence"
+      else
+        if sbom_python_sha_actual="$(sha256_file "$sbom_python_path" 2>/dev/null)"; then
+          if [[ "$sbom_python_sha_actual" == "$sbom_python_sha_expected" ]]; then
+            mark_pass "supply chain sbom python sha256 matched"
+          else
+            mark_fail "supply chain sbom python sha256 mismatch"
+          fi
+        else
+          mark_fail "supply chain sbom python sha256 compute failed"
+        fi
+      fi
+    fi
+
+    if [[ -z "$sbom_license_path" || ! -f "$sbom_license_path" ]]; then
+      mark_fail "supply chain sbom license attestation file missing: $sbom_license_path"
+    else
+      mark_pass "supply chain sbom license attestation file present"
+      if [[ -z "$sbom_license_sha_expected" ]]; then
+        mark_fail "supply chain sbom license attestation sha256 missing in evidence"
+      else
+        if sbom_license_sha_actual="$(sha256_file "$sbom_license_path" 2>/dev/null)"; then
+          if [[ "$sbom_license_sha_actual" == "$sbom_license_sha_expected" ]]; then
+            mark_pass "supply chain sbom license attestation sha256 matched"
+          else
+            mark_fail "supply chain sbom license attestation sha256 mismatch"
+          fi
+        else
+          mark_fail "supply chain sbom license attestation sha256 compute failed"
         fi
       fi
     fi

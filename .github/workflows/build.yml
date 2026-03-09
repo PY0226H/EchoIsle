@@ -118,6 +118,19 @@ jobs:
             --root "$GITHUB_WORKSPACE" \
             --report-out "$GITHUB_WORKSPACE/docs/dev_plan/供应链预发故障注入演练报告-preflight-${GITHUB_SHA}.md" \
             --evidence-out "$GITHUB_WORKSPACE/docs/loadtest/evidence/supply_chain_preprod_chaos-preflight-${GITHUB_SHA}.env"
+      - name: Supply chain SBOM and license attestation (release preflight evidence)
+        if: startsWith(github.ref, 'refs/tags/') || startsWith(github.ref, 'refs/heads/release/')
+        run: |
+          bash scripts/release/supply_chain_sbom_attestation.sh \
+            --root "$GITHUB_WORKSPACE" \
+            --cargo-deny-bin cargo-deny \
+            --python-bin python \
+            --python-requirements "$GITHUB_WORKSPACE/ai_judge_service/requirements.txt" \
+            --report-out "$GITHUB_WORKSPACE/docs/dev_plan/供应链SBOM与许可证证明报告-preflight-${GITHUB_SHA}.md" \
+            --rust-sbom-out "$GITHUB_WORKSPACE/docs/loadtest/evidence/supply_chain_rust_sbom-preflight-${GITHUB_SHA}.json" \
+            --python-sbom-out "$GITHUB_WORKSPACE/docs/loadtest/evidence/supply_chain_python_sbom-preflight-${GITHUB_SHA}.json" \
+            --license-attestation-out "$GITHUB_WORKSPACE/docs/loadtest/evidence/supply_chain_license_attestation-preflight-${GITHUB_SHA}.env" \
+            --evidence-out "$GITHUB_WORKSPACE/docs/loadtest/evidence/supply_chain_sbom_attestation-preflight-${GITHUB_SHA}.env"
       - name: Release preflight hard enforcement
         if: startsWith(github.ref, 'refs/tags/') || startsWith(github.ref, 'refs/heads/release/')
         run: |
@@ -146,7 +159,10 @@ jobs:
             --supply-chain-pip-allowlist "$GITHUB_WORKSPACE/scripts/release/security_allowlists/pip_audit_vulns_allowlist.csv" \
             --enforce-supply-chain-chaos-evidence \
             --supply-chain-chaos-evidence "$GITHUB_WORKSPACE/docs/loadtest/evidence/supply_chain_preprod_chaos-preflight-${GITHUB_SHA}.env" \
-            --supply-chain-chaos-max-age-hours 168
+            --supply-chain-chaos-max-age-hours 168 \
+            --enforce-supply-chain-sbom-attestation \
+            --supply-chain-sbom-evidence "$GITHUB_WORKSPACE/docs/loadtest/evidence/supply_chain_sbom_attestation-preflight-${GITHUB_SHA}.env" \
+            --supply-chain-sbom-max-age-hours 168
       - name: Upload supply chain security report
         if: always()
         uses: actions/upload-artifact@v4
@@ -181,6 +197,24 @@ jobs:
         with:
           name: supply-chain-chaos-preflight-evidence-${{ github.sha }}
           path: docs/loadtest/evidence/supply_chain_preprod_chaos-preflight-${{ github.sha }}.env
+          if-no-files-found: warn
+      - name: Upload release preflight supply chain SBOM and license report
+        if: always() && (startsWith(github.ref, 'refs/tags/') || startsWith(github.ref, 'refs/heads/release/'))
+        uses: actions/upload-artifact@v4
+        with:
+          name: supply-chain-sbom-preflight-report-${{ github.sha }}
+          path: docs/dev_plan/供应链SBOM与许可证证明报告-preflight-${{ github.sha }}.md
+          if-no-files-found: warn
+      - name: Upload release preflight supply chain SBOM and license evidence
+        if: always() && (startsWith(github.ref, 'refs/tags/') || startsWith(github.ref, 'refs/heads/release/'))
+        uses: actions/upload-artifact@v4
+        with:
+          name: supply-chain-sbom-preflight-evidence-${{ github.sha }}
+          path: |
+            docs/loadtest/evidence/supply_chain_rust_sbom-preflight-${{ github.sha }}.json
+            docs/loadtest/evidence/supply_chain_python_sbom-preflight-${{ github.sha }}.json
+            docs/loadtest/evidence/supply_chain_license_attestation-preflight-${{ github.sha }}.env
+            docs/loadtest/evidence/supply_chain_sbom_attestation-preflight-${{ github.sha }}.env
           if-no-files-found: warn
       - name: Generate a changelog
         uses: orhun/git-cliff-action@v2
