@@ -2863,6 +2863,150 @@ mod tests {
         assert!(normalize_alert_status_filter(Some("invalid".to_string())).is_err());
     }
 
+    #[test]
+    fn normalize_split_review_note_should_validate_max_len() {
+        let ok_note = "a".repeat(SPLIT_REVIEW_NOTE_MAX_LEN);
+        assert!(normalize_split_review_note(Some(ok_note)).is_ok());
+        let too_long_note = "a".repeat(SPLIT_REVIEW_NOTE_MAX_LEN + 1);
+        let err = normalize_split_review_note(Some(too_long_note))
+            .expect_err("too long split review note should be rejected");
+        match err {
+            AppError::DebateError(msg) => {
+                assert!(msg.contains("split readiness review note too long"));
+            }
+            other => panic!("unexpected error: {other}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn upsert_ops_service_split_review_should_support_set_and_clear_flag() -> Result<()> {
+        let (_tdb, state) = AppState::new_for_test().await?;
+        state.update_workspace_owner(1, 1).await?;
+        let owner = state.find_user_by_id(1).await?.expect("owner should exist");
+
+        let set_ret = state
+            .upsert_ops_service_split_review(
+                &owner,
+                UpsertOpsServiceSplitReviewInput {
+                    payment_compliance_required: Some(true),
+                    review_note: Some("need isolated payment domain".to_string()),
+                },
+            )
+            .await?;
+        let set_item = set_ret
+            .thresholds
+            .iter()
+            .find(|v| v.key == "payment_compliance_isolation")
+            .expect("payment threshold should exist");
+        assert_eq!(set_item.status, "met");
+        assert!(set_item.triggered);
+        assert_eq!(set_ret.overall_status, "review_required");
+
+        let clear_ret = state
+            .upsert_ops_service_split_review(
+                &owner,
+                UpsertOpsServiceSplitReviewInput {
+                    payment_compliance_required: None,
+                    review_note: Some("".to_string()),
+                },
+            )
+            .await?;
+        let clear_item = clear_ret
+            .thresholds
+            .iter()
+            .find(|v| v.key == "payment_compliance_isolation")
+            .expect("payment threshold should exist");
+        assert_eq!(clear_item.status, "insufficient_data");
+        assert!(!clear_item.triggered);
+        assert_eq!(
+            clear_item.evidence["manualInputRequired"],
+            Value::Bool(true),
+            "clearing compliance flag should return to manual-input-required state"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn upsert_ops_service_split_review_should_keep_complete_snapshot_under_concurrency(
+    ) -> Result<()> {
+        let (_tdb, state) = AppState::new_for_test().await?;
+        state.update_workspace_owner(1, 1).await?;
+        let owner = state.find_user_by_id(1).await?.expect("owner should exist");
+        let barrier = Arc::new(Barrier::new(3));
+
+        let state_a = state.clone();
+        let owner_a = owner.clone();
+        let barrier_a = barrier.clone();
+        let task_a = tokio::spawn(async move {
+            barrier_a.wait().await;
+            state_a
+                .upsert_ops_service_split_review(
+                    &owner_a,
+                    UpsertOpsServiceSplitReviewInput {
+                        payment_compliance_required: Some(true),
+                        review_note: Some("review-a".to_string()),
+                    },
+                )
+                .await
+        });
+
+        let state_b = state.clone();
+        let owner_b = owner.clone();
+        let barrier_b = barrier.clone();
+        let task_b = tokio::spawn(async move {
+            barrier_b.wait().await;
+            state_b
+                .upsert_ops_service_split_review(
+                    &owner_b,
+                    UpsertOpsServiceSplitReviewInput {
+                        payment_compliance_required: Some(false),
+                        review_note: Some("review-b".to_string()),
+                    },
+                )
+                .await
+        });
+
+        barrier.wait().await;
+        task_a.await??;
+        task_b.await??;
+
+        let row: (Option<bool>, String) = sqlx::query_as(
+            r#"
+            SELECT payment_compliance_required, review_note
+            FROM ops_service_split_reviews
+            WHERE ws_id = 1
+            "#,
+        )
+        .fetch_one(&state.pool)
+        .await?;
+        assert!(
+            row == (Some(true), "review-a".to_string())
+                || row == (Some(false), "review-b".to_string()),
+            "concurrent upsert should keep one complete snapshot, got: {:?}",
+            row
+        );
+
+        let ret = state.get_ops_service_split_readiness(&owner).await?;
+        let payment_item = ret
+            .thresholds
+            .iter()
+            .find(|v| v.key == "payment_compliance_isolation")
+            .expect("payment threshold should exist");
+        match row.0 {
+            Some(true) => {
+                assert_eq!(payment_item.status, "met");
+                assert!(payment_item.triggered);
+            }
+            Some(false) => {
+                assert_eq!(payment_item.status, "not_met");
+                assert!(!payment_item.triggered);
+            }
+            None => panic!("row should not be None after concurrent set"),
+        }
+        assert_eq!(payment_item.evidence["reviewNote"], Value::String(row.1));
+        Ok(())
+    }
+
     #[tokio::test]
     async fn apply_ops_observability_anomaly_action_should_support_suppress_ack_and_clear(
     ) -> Result<()> {
