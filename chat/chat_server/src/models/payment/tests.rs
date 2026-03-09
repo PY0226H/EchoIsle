@@ -100,6 +100,12 @@ async fn load_user(state: &AppState, user_id: i64) -> Result<User> {
         .ok_or_else(|| anyhow!("user id {user_id} should exist"))
 }
 
+async fn load_two_users(state: &AppState, user1_id: i64, user2_id: i64) -> Result<(User, User)> {
+    let user1 = load_user(state, user1_id).await?;
+    let user2 = load_user(state, user2_id).await?;
+    Ok((user1, user2))
+}
+
 async fn query_wallet_ledger(
     state: &AppState,
     ws_id: u64,
@@ -506,8 +512,7 @@ async fn verify_iap_order_should_create_rejected_order_without_credit() -> Resul
 #[tokio::test]
 async fn verify_iap_order_should_reject_cross_user_transaction_replay() -> Result<()> {
     let (_tdb, state) = AppState::new_for_test().await?;
-    let user1 = load_user(&state, 1).await?;
-    let user2 = load_user(&state, 2).await?;
+    let (user1, user2) = load_two_users(&state, 1, 2).await?;
 
     state
         .verify_iap_order(&user1, verify_input("tx-replay-1", "mock_ok_receipt"))
@@ -594,8 +599,7 @@ async fn get_iap_order_by_transaction_should_return_verified_snapshot() -> Resul
 #[tokio::test]
 async fn get_iap_order_by_transaction_should_return_conflict_for_other_user() -> Result<()> {
     let (_tdb, state) = AppState::new_for_test().await?;
-    let user1 = load_user(&state, 1).await?;
-    let user2 = load_user(&state, 2).await?;
+    let (user1, user2) = load_two_users(&state, 1, 2).await?;
 
     state
         .verify_iap_order(
