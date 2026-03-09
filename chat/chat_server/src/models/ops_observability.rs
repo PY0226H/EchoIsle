@@ -25,6 +25,8 @@ const OPS_ALERT_RULE_LOW_SUCCESS_RATE: &str = "low_success_rate";
 const OPS_ALERT_RULE_HIGH_RETRY: &str = "high_retry";
 const OPS_ALERT_RULE_HIGH_DB_LATENCY: &str = "high_db_latency";
 const OPS_ALERT_RULE_DLQ_PENDING: &str = "dlq_pending";
+const OPS_ALERT_RULE_SPLIT_REVIEW_REQUIRED_KEY: &str = "split_readiness_review_required";
+const OPS_ALERT_RULE_SPLIT_REVIEW_REQUIRED_TYPE: &str = "split_readiness";
 const OPS_ALERT_EVAL_WINDOW_MINUTES: i64 = 10;
 const OPS_ANOMALY_ACTION_ACKNOWLEDGE: &str = "acknowledge";
 const OPS_ANOMALY_ACTION_SUPPRESS: &str = "suppress";
@@ -1209,6 +1211,39 @@ fn build_emit_plan(
     None
 }
 
+fn build_split_review_required_alert(
+    snapshot: &GetOpsServiceSplitReadinessOutput,
+    triggered_by: i64,
+) -> EvaluatedAlert {
+    let triggered_thresholds: Vec<String> = snapshot
+        .thresholds
+        .iter()
+        .filter(|item| item.triggered)
+        .map(|item| item.key.clone())
+        .collect();
+    let payment_required = snapshot
+        .thresholds
+        .iter()
+        .find(|item| item.key == "payment_compliance_isolation")
+        .and_then(|item| item.evidence.get("paymentComplianceRequired"))
+        .and_then(|value| value.as_bool());
+    EvaluatedAlert {
+        alert_key: OPS_ALERT_RULE_SPLIT_REVIEW_REQUIRED_KEY.to_string(),
+        rule_type: OPS_ALERT_RULE_SPLIT_REVIEW_REQUIRED_TYPE.to_string(),
+        severity: ALERT_SEVERITY_WARNING.to_string(),
+        title: "服务拆分评审已触发".to_string(),
+        message: "split-readiness 从 hold 进入 review_required，请启动 R6 架构评审。".to_string(),
+        metrics: json!({
+            "overallStatus": snapshot.overall_status,
+            "nextStep": snapshot.next_step,
+            "triggeredThresholds": triggered_thresholds,
+            "paymentComplianceRequired": payment_required,
+            "triggeredBy": triggered_by,
+        }),
+        is_active: true,
+    }
+}
+
 impl AppState {
     pub async fn upsert_ops_service_split_review(
         &self,
@@ -1218,6 +1253,7 @@ impl AppState {
         self.ensure_ops_permission(user, OpsPermission::JudgeReview)
             .await?;
         let review_note = normalize_split_review_note(input.review_note)?;
+        let before_snapshot = self.get_ops_service_split_readiness(user).await?;
         let mut tx = self.pool.begin().await?;
         sqlx::query(
             r#"
@@ -1254,7 +1290,20 @@ impl AppState {
         .execute(&mut *tx)
         .await?;
         tx.commit().await?;
-        self.get_ops_service_split_readiness(user).await
+        let after_snapshot = self.get_ops_service_split_readiness(user).await?;
+        if before_snapshot.overall_status != "review_required"
+            && after_snapshot.overall_status == "review_required"
+        {
+            let recipients = self.list_alert_recipients(user.ws_id).await?;
+            let plan = EmitAlertPlan {
+                status: ALERT_STATUS_RAISED,
+                mark_active: true,
+                evaluated: build_split_review_required_alert(&after_snapshot, user.id),
+            };
+            self.emit_observability_alert(user.ws_id, plan, &recipients)
+                .await?;
+        }
+        Ok(after_snapshot)
     }
 
     pub async fn list_ops_service_split_review_audits(
