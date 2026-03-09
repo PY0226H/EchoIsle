@@ -28,6 +28,7 @@ pub(crate) use super::debate_ops::{
     run_ops_observability_evaluation_once_handler, update_debate_session_ops_handler,
     update_debate_topic_ops_handler, upsert_ops_observability_anomaly_state_handler,
     upsert_ops_observability_thresholds_handler, upsert_ops_role_assignment_handler,
+    upsert_ops_service_split_review_handler,
 };
 
 /// List debate topics in the current workspace.

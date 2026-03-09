@@ -6,7 +6,7 @@ use crate::{
     ListKafkaDlqEventsQuery, ListOpsAlertNotificationsQuery, OpsCreateDebateSessionInput,
     OpsCreateDebateTopicInput, OpsObservabilityThresholds, OpsUpdateDebateSessionInput,
     OpsUpdateDebateTopicInput, RunOpsObservabilityEvaluationQuery,
-    UpdateOpsObservabilityAnomalyStateInput, UpsertOpsRoleInput,
+    UpdateOpsObservabilityAnomalyStateInput, UpsertOpsRoleInput, UpsertOpsServiceSplitReviewInput,
 };
 use axum::{
     extract::{Path, Query, State},
@@ -241,6 +241,28 @@ pub(crate) async fn get_ops_service_split_readiness_handler(
     State(state): State<AppState>,
 ) -> Result<impl IntoResponse, AppError> {
     let ret = state.get_ops_service_split_readiness(&user).await?;
+    Ok((StatusCode::OK, Json(ret)))
+}
+
+/// Upsert manual review input for split-readiness compliance threshold.
+#[utoipa::path(
+    put,
+    path = "/api/debate/ops/observability/split-readiness/review",
+    request_body = UpsertOpsServiceSplitReviewInput,
+    responses(
+        (status = 200, description = "Service split readiness snapshot", body = crate::GetOpsServiceSplitReadinessOutput),
+        (status = 409, description = "Permission conflict", body = crate::ErrorOutput),
+    ),
+    security(
+        ("token" = [])
+    )
+)]
+pub(crate) async fn upsert_ops_service_split_review_handler(
+    Extension(user): Extension<User>,
+    State(state): State<AppState>,
+    Json(input): Json<UpsertOpsServiceSplitReviewInput>,
+) -> Result<impl IntoResponse, AppError> {
+    let ret = state.upsert_ops_service_split_review(&user, input).await?;
     Ok((StatusCode::OK, Json(ret)))
 }
 

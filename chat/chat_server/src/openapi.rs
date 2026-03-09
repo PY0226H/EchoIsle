@@ -22,7 +22,8 @@ use crate::{
     RequestJudgeJobOutput, RevokeOpsRoleOutput, RunOpsObservabilityEvaluationQuery, SigninUser,
     SubmitDrawVoteInput, SubmitDrawVoteOutput, SubmitJudgeReportInput, SubmitJudgeReportOutput,
     UpdateChat, UpdateChatMembers, UpdateOpsObservabilityAnomalyStateInput, UpsertOpsRoleInput,
-    VerifyIapOrderInput, VerifyIapOrderOutput, WalletBalanceOutput, WalletLedgerItem,
+    UpsertOpsServiceSplitReviewInput, VerifyIapOrderInput, VerifyIapOrderOutput,
+    WalletBalanceOutput, WalletLedgerItem,
 };
 use axum::Router;
 use chat_core::{AgentType, Chat, ChatAgent, ChatType, ChatUser, Message, User, Workspace};
@@ -56,6 +57,7 @@ pub(crate) trait OpenApiRouter {
             crate::handlers::debate_ops::get_ops_observability_metrics_dictionary_handler,
             crate::handlers::debate_ops::get_ops_observability_slo_snapshot_handler,
             crate::handlers::debate_ops::get_ops_service_split_readiness_handler,
+            crate::handlers::debate_ops::upsert_ops_service_split_review_handler,
             crate::handlers::debate_ops::upsert_ops_observability_thresholds_handler,
             crate::handlers::debate_ops::upsert_ops_observability_anomaly_state_handler,
             crate::handlers::debate_ops::apply_ops_observability_anomaly_action_handler,
@@ -121,6 +123,7 @@ pub(crate) trait OpenApiRouter {
                 OpsMetricsDictionaryItem, GetOpsMetricsDictionaryOutput,
                 OpsSloSignalSnapshot, OpsSloRuleSnapshotItem, GetOpsSloSnapshotOutput,
                 OpsServiceSplitThresholdItem, GetOpsServiceSplitReadinessOutput,
+                UpsertOpsServiceSplitReviewInput,
                 ListOpsAlertNotificationsQuery, OpsAlertNotificationItem, ListOpsAlertNotificationsOutput,
                 ListKafkaDlqEventsQuery, KafkaDlqEventItem, ListKafkaDlqEventsOutput, KafkaDlqActionOutput,
                 ListJudgeReviewOpsQuery, JudgeReviewOpsItem, ListJudgeReviewOpsOutput,

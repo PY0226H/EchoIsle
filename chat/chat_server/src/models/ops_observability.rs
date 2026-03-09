@@ -43,6 +43,7 @@ const SPLIT_READINESS_PRESSURE_FAILED_RATIO_THRESHOLD: f64 = 0.3;
 const SPLIT_READINESS_PRESSURE_FAILED_RATIO_MIN_DISPATCHED: u64 = 30;
 const SPLIT_READINESS_WS_RUNNING_SESSIONS_THRESHOLD: i64 = 100;
 const SPLIT_READINESS_WS_MESSAGES_10M_THRESHOLD: i64 = 20_000;
+const SPLIT_REVIEW_NOTE_MAX_LEN: usize = 1000;
 
 fn clamp_float(value: f64, min: f64, max: f64, fallback: f64) -> f64 {
     if !value.is_finite() {
@@ -133,6 +134,14 @@ struct OpsObservabilityConfigRow {
     updated_at: DateTime<Utc>,
 }
 
+#[derive(Debug, Clone, FromRow)]
+struct OpsServiceSplitReviewRow {
+    payment_compliance_required: Option<bool>,
+    review_note: String,
+    updated_by: i64,
+    updated_at: DateTime<Utc>,
+}
+
 #[derive(Debug, Clone, IntoParams, ToSchema, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ListOpsAlertNotificationsQuery {
@@ -145,6 +154,13 @@ pub struct ListOpsAlertNotificationsQuery {
 #[serde(rename_all = "camelCase")]
 pub struct RunOpsObservabilityEvaluationQuery {
     pub dry_run: Option<bool>,
+}
+
+#[derive(Debug, Clone, ToSchema, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpsertOpsServiceSplitReviewInput {
+    pub payment_compliance_required: Option<bool>,
+    pub review_note: Option<String>,
 }
 
 #[derive(Debug, Clone, ToSchema, Serialize, Deserialize)]
@@ -784,6 +800,17 @@ fn normalize_alert_status_filter(status: Option<String>) -> Result<Option<String
     ))
 }
 
+fn normalize_split_review_note(raw: Option<String>) -> Result<String, AppError> {
+    let note = raw.unwrap_or_default().trim().to_string();
+    if note.chars().count() > SPLIT_REVIEW_NOTE_MAX_LEN {
+        return Err(AppError::DebateError(format!(
+            "split readiness review note too long, max {} chars",
+            SPLIT_REVIEW_NOTE_MAX_LEN
+        )));
+    }
+    Ok(note)
+}
+
 fn parse_recipient_ids(value: &Value) -> Vec<u64> {
     let Some(arr) = value.as_array() else {
         return vec![];
@@ -1125,6 +1152,37 @@ fn build_emit_plan(
 }
 
 impl AppState {
+    pub async fn upsert_ops_service_split_review(
+        &self,
+        user: &User,
+        input: UpsertOpsServiceSplitReviewInput,
+    ) -> Result<GetOpsServiceSplitReadinessOutput, AppError> {
+        self.ensure_ops_permission(user, OpsPermission::JudgeReview)
+            .await?;
+        let review_note = normalize_split_review_note(input.review_note)?;
+        sqlx::query(
+            r#"
+            INSERT INTO ops_service_split_reviews(
+                ws_id, payment_compliance_required, review_note, updated_by, created_at, updated_at
+            )
+            VALUES ($1, $2, $3, $4, NOW(), NOW())
+            ON CONFLICT (ws_id)
+            DO UPDATE SET
+                payment_compliance_required = EXCLUDED.payment_compliance_required,
+                review_note = EXCLUDED.review_note,
+                updated_by = EXCLUDED.updated_by,
+                updated_at = NOW()
+            "#,
+        )
+        .bind(user.ws_id)
+        .bind(input.payment_compliance_required)
+        .bind(review_note)
+        .bind(user.id)
+        .execute(&self.pool)
+        .await?;
+        self.get_ops_service_split_readiness(user).await
+    }
+
     pub async fn get_ops_service_split_readiness(
         &self,
         user: &User,
@@ -1133,6 +1191,16 @@ impl AppState {
             .await?;
         let generated_at_ms = now_millis();
         let signal = self.load_recent_judge_signal(user.ws_id).await?;
+        let compliance_review: Option<OpsServiceSplitReviewRow> = sqlx::query_as(
+            r#"
+            SELECT payment_compliance_required, review_note, updated_by, updated_at
+            FROM ops_service_split_reviews
+            WHERE ws_id = $1
+            "#,
+        )
+        .bind(user.ws_id)
+        .fetch_optional(&self.pool)
+        .await?;
         let dispatch_metrics = self.get_judge_dispatch_metrics();
         let pending_running_jobs: i64 = sqlx::query_scalar(
             r#"
@@ -1197,10 +1265,20 @@ impl AppState {
             "保持当前拓扑，持续观察 dispatch 压力信号。"
         };
 
-        let payment_compliance_status = "insufficient_data";
-        let payment_compliance_triggered = false;
-        let payment_compliance_recommendation =
-            "当前代码侧无合规域信号，需由法务/支付合规评审结论驱动。";
+        let payment_compliance_required = compliance_review
+            .as_ref()
+            .and_then(|row| row.payment_compliance_required);
+        let payment_compliance_status = match payment_compliance_required {
+            Some(true) => "met",
+            Some(false) => "not_met",
+            None => "insufficient_data",
+        };
+        let payment_compliance_triggered = payment_compliance_required.unwrap_or(false);
+        let payment_compliance_recommendation = match payment_compliance_required {
+            Some(true) => "已标记合规隔离需求，进入 R6 架构评审并准备独立部署方案。",
+            Some(false) => "已确认当前无合规隔离硬要求，可继续保持现有部署域。",
+            None => "当前未录入合规评审结论，请由法务/支付合规负责人补充。",
+        };
 
         let ws_scale_triggered = running_sessions >= SPLIT_READINESS_WS_RUNNING_SESSIONS_THRESHOLD
             || recent_messages_10m >= SPLIT_READINESS_WS_MESSAGES_10M_THRESHOLD;
@@ -1245,9 +1323,13 @@ impl AppState {
                 triggered: payment_compliance_triggered,
                 recommendation: payment_compliance_recommendation.to_string(),
                 evidence: json!({
-                    "manualInputRequired": true,
+                    "manualInputRequired": payment_compliance_required.is_none(),
+                    "paymentComplianceRequired": payment_compliance_required,
                     "source": "compliance_review",
-                    "note": "该阈值不由运行时指标自动判定"
+                    "reviewNote": compliance_review.as_ref().map(|v| v.review_note.clone()).unwrap_or_default(),
+                    "updatedBy": compliance_review.as_ref().map(|v| v.updated_by as u64),
+                    "updatedAt": compliance_review.as_ref().map(|v| v.updated_at.to_rfc3339()),
+                    "note": "该阈值由人工评审录入，不由运行时指标自动判定"
                 }),
             },
             OpsServiceSplitThresholdItem {

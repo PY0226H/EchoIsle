@@ -8,6 +8,7 @@ use super::super::{
     request_judge_rejudge_ops_handler, revoke_ops_role_assignment_handler,
     run_ops_observability_evaluation_once_handler, upsert_ops_observability_anomaly_state_handler,
     upsert_ops_observability_thresholds_handler, upsert_ops_role_assignment_handler,
+    upsert_ops_service_split_review_handler,
 };
 use super::test_support::{
     assert_debate_conflict_prefix, assert_is_debate_conflict, insert_kafka_dlq_event,
@@ -18,7 +19,7 @@ use crate::{
     AppState, ApplyOpsObservabilityAnomalyActionInput, ListJudgeReviewOpsQuery,
     ListKafkaDlqEventsQuery, ListOpsAlertNotificationsQuery, OpsObservabilityThresholds,
     RunOpsObservabilityEvaluationQuery, UpdateOpsObservabilityAnomalyStateInput,
-    UpsertOpsRoleInput,
+    UpsertOpsRoleInput, UpsertOpsServiceSplitReviewInput,
 };
 use anyhow::Result;
 use axum::{
@@ -243,6 +244,17 @@ async fn ops_observability_config_handlers_should_require_judge_review_permissio
             .await;
     assert_debate_conflict_prefix(split_result, "ops_permission_denied:judge_review:");
 
+    let split_review_result = upsert_ops_service_split_review_handler(
+        Extension(non_owner.clone()),
+        State(state.clone()),
+        Json(UpsertOpsServiceSplitReviewInput {
+            payment_compliance_required: Some(true),
+            review_note: Some("compliance required".to_string()),
+        }),
+    )
+    .await;
+    assert_debate_conflict_prefix(split_review_result, "ops_permission_denied:judge_review:");
+
     let action_result = apply_ops_observability_anomaly_action_handler(
         Extension(non_owner.clone()),
         State(state.clone()),
@@ -344,6 +356,44 @@ async fn get_ops_service_split_readiness_handler_should_return_thresholds() -> R
         ret["overallStatus"] == "hold" || ret["overallStatus"] == "review_required",
         "unexpected overall status: {}",
         ret["overallStatus"]
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn upsert_ops_service_split_review_handler_should_update_compliance_threshold() -> Result<()>
+{
+    let (_tdb, state) = AppState::new_for_test().await?;
+    state.update_workspace_owner(1, 1).await?;
+    let owner = state.find_user_by_id(1).await?.expect("owner should exist");
+
+    let response = upsert_ops_service_split_review_handler(
+        Extension(owner),
+        State(state),
+        Json(UpsertOpsServiceSplitReviewInput {
+            payment_compliance_required: Some(true),
+            review_note: Some("payment compliance requires isolated deployment".to_string()),
+        }),
+    )
+    .await?
+    .into_response();
+    let ret = json_body_with_status(response, StatusCode::OK).await?;
+    let thresholds = ret["thresholds"]
+        .as_array()
+        .expect("thresholds should be array");
+    let compliance = thresholds
+        .iter()
+        .find(|v| v["key"] == "payment_compliance_isolation")
+        .expect("payment threshold should exist");
+    assert_eq!(compliance["status"], "met");
+    assert_eq!(compliance["triggered"], true);
+    assert_eq!(
+        compliance["evidence"]["paymentComplianceRequired"],
+        serde_json::Value::Bool(true)
+    );
+    assert_eq!(
+        ret["overallStatus"], "review_required",
+        "payment compliance requirement should trigger review"
     );
     Ok(())
 }
