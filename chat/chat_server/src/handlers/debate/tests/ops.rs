@@ -17,7 +17,8 @@ use super::test_support::{
 use crate::{
     AppState, ApplyOpsObservabilityAnomalyActionInput, ListJudgeReviewOpsQuery,
     ListKafkaDlqEventsQuery, ListOpsAlertNotificationsQuery, OpsObservabilityThresholds,
-    UpdateOpsObservabilityAnomalyStateInput, UpsertOpsRoleInput,
+    RunOpsObservabilityEvaluationQuery, UpdateOpsObservabilityAnomalyStateInput,
+    UpsertOpsRoleInput,
 };
 use anyhow::Result;
 use axum::{
@@ -249,8 +250,12 @@ async fn ops_observability_config_handlers_should_require_judge_review_permissio
     .await;
     assert_debate_conflict_prefix(action_result, "ops_permission_denied:judge_review:");
 
-    let eval_result =
-        run_ops_observability_evaluation_once_handler(Extension(non_owner), State(state)).await;
+    let eval_result = run_ops_observability_evaluation_once_handler(
+        Extension(non_owner),
+        State(state),
+        Query(RunOpsObservabilityEvaluationQuery { dry_run: None }),
+    )
+    .await;
     assert_debate_conflict_prefix(eval_result, "ops_permission_denied:judge_review:");
     Ok(())
 }
@@ -352,14 +357,75 @@ async fn run_ops_observability_evaluation_once_handler_should_return_report() ->
     state.update_workspace_owner(1, 1).await?;
     let owner = state.find_user_by_id(1).await?.expect("owner should exist");
 
-    let response = run_ops_observability_evaluation_once_handler(Extension(owner), State(state))
-        .await?
-        .into_response();
+    let response = run_ops_observability_evaluation_once_handler(
+        Extension(owner),
+        State(state),
+        Query(RunOpsObservabilityEvaluationQuery { dry_run: None }),
+    )
+    .await?
+    .into_response();
     let ret = json_body_with_status(response, StatusCode::OK).await?;
     assert_eq!(ret["workspacesScanned"], 1);
     assert!(ret.get("alertsRaised").is_some());
     assert!(ret.get("alertsCleared").is_some());
     assert!(ret.get("alertsSuppressed").is_some());
+    Ok(())
+}
+
+#[tokio::test]
+async fn run_ops_observability_evaluation_once_handler_with_dry_run_should_not_emit_alerts(
+) -> Result<()> {
+    let (_tdb, state) = AppState::new_for_test().await?;
+    state.update_workspace_owner(1, 1).await?;
+    let owner = state.find_user_by_id(1).await?.expect("owner should exist");
+    state
+        .upsert_ops_observability_thresholds(
+            &owner,
+            OpsObservabilityThresholds {
+                low_success_rate_threshold: 80.0,
+                high_retry_threshold: 1.0,
+                high_coalesced_threshold: 0.0,
+                high_db_latency_threshold_ms: 1200,
+                low_cache_hit_rate_threshold: 20.0,
+                min_request_for_cache_hit_check: 1,
+            },
+        )
+        .await?;
+    insert_kafka_dlq_event(&state, 1, "dry-run-dlq-1", serde_json::json!({"k":"v"})).await?;
+
+    let before_count: i64 = sqlx::query_scalar(
+        r#"
+        SELECT COUNT(1)::bigint
+        FROM ops_alert_notifications
+        WHERE ws_id = 1
+        "#,
+    )
+    .fetch_one(&state.pool)
+    .await?;
+
+    let response = run_ops_observability_evaluation_once_handler(
+        Extension(owner),
+        State(state.clone()),
+        Query(RunOpsObservabilityEvaluationQuery {
+            dry_run: Some(true),
+        }),
+    )
+    .await?
+    .into_response();
+    let ret = json_body_with_status(response, StatusCode::OK).await?;
+    assert_eq!(ret["workspacesScanned"], 1);
+    assert_eq!(ret["alertsRaised"], 1);
+
+    let after_count: i64 = sqlx::query_scalar(
+        r#"
+        SELECT COUNT(1)::bigint
+        FROM ops_alert_notifications
+        WHERE ws_id = 1
+        "#,
+    )
+    .fetch_one(&state.pool)
+    .await?;
+    assert_eq!(after_count, before_count);
     Ok(())
 }
 

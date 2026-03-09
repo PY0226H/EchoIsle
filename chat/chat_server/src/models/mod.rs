@@ -43,7 +43,8 @@ pub use ops_observability::{
     GetOpsObservabilityConfigOutput, GetOpsSloSnapshotOutput, ListOpsAlertNotificationsOutput,
     ListOpsAlertNotificationsQuery, OpsAlertEvalReport, OpsAlertNotificationItem,
     OpsMetricsDictionaryItem, OpsObservabilityAnomalyStateValue, OpsObservabilityThresholds,
-    OpsSloRuleSnapshotItem, OpsSloSignalSnapshot, UpdateOpsObservabilityAnomalyStateInput,
+    OpsSloRuleSnapshotItem, OpsSloSignalSnapshot, RunOpsObservabilityEvaluationQuery,
+    UpdateOpsObservabilityAnomalyStateInput,
 };
 pub use payment::{
     GetIapOrderByTransaction, GetIapOrderByTransactionOutput, IapOrderSnapshot, IapProduct,

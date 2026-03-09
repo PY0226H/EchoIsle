@@ -19,10 +19,10 @@ use crate::{
     OpsPermissionFlags, OpsRoleAssignment, OpsSloRuleSnapshotItem, OpsSloSignalSnapshot,
     OpsUpdateDebateSessionInput, OpsUpdateDebateTopicInput, PinDebateMessageInput,
     PinDebateMessageOutput, RedisHealthOutput, RequestJudgeJobInput, RequestJudgeJobOutput,
-    RevokeOpsRoleOutput, SigninUser, SubmitDrawVoteInput, SubmitDrawVoteOutput,
-    SubmitJudgeReportInput, SubmitJudgeReportOutput, UpdateChat, UpdateChatMembers,
-    UpdateOpsObservabilityAnomalyStateInput, UpsertOpsRoleInput, VerifyIapOrderInput,
-    VerifyIapOrderOutput, WalletBalanceOutput, WalletLedgerItem,
+    RevokeOpsRoleOutput, RunOpsObservabilityEvaluationQuery, SigninUser, SubmitDrawVoteInput,
+    SubmitDrawVoteOutput, SubmitJudgeReportInput, SubmitJudgeReportOutput, UpdateChat,
+    UpdateChatMembers, UpdateOpsObservabilityAnomalyStateInput, UpsertOpsRoleInput,
+    VerifyIapOrderInput, VerifyIapOrderOutput, WalletBalanceOutput, WalletLedgerItem,
 };
 use axum::Router;
 use chat_core::{AgentType, Chat, ChatAgent, ChatType, ChatUser, Message, User, Workspace};
@@ -116,7 +116,7 @@ pub(crate) trait OpenApiRouter {
                 RevokeOpsRoleOutput, OpsPermissionFlags, GetOpsRbacMeOutput,
                 OpsObservabilityThresholds, OpsObservabilityAnomalyStateValue,
                 UpdateOpsObservabilityAnomalyStateInput, ApplyOpsObservabilityAnomalyActionInput,
-                GetOpsObservabilityConfigOutput, OpsAlertEvalReport,
+                RunOpsObservabilityEvaluationQuery, GetOpsObservabilityConfigOutput, OpsAlertEvalReport,
                 OpsMetricsDictionaryItem, GetOpsMetricsDictionaryOutput,
                 OpsSloSignalSnapshot, OpsSloRuleSnapshotItem, GetOpsSloSnapshotOutput,
                 ListOpsAlertNotificationsQuery, OpsAlertNotificationItem, ListOpsAlertNotificationsOutput,

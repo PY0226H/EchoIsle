@@ -133,6 +133,12 @@ pub struct ListOpsAlertNotificationsQuery {
     pub offset: Option<u64>,
 }
 
+#[derive(Debug, Clone, IntoParams, ToSchema, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RunOpsObservabilityEvaluationQuery {
+    pub dry_run: Option<bool>,
+}
+
 #[derive(Debug, Clone, ToSchema, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct OpsAlertNotificationItem {
@@ -1878,6 +1884,63 @@ impl AppState {
                 &mut report,
             )
             .await?;
+        }
+        Ok(report)
+    }
+
+    pub async fn preview_ops_observability_alerts_for_workspace_by_ops(
+        &self,
+        user: &User,
+    ) -> Result<OpsAlertEvalReport, AppError> {
+        self.ensure_ops_permission(user, OpsPermission::JudgeReview)
+            .await?;
+        let now_ms = now_millis();
+        let row: Option<OpsObservabilityConfigRow> = sqlx::query_as(
+            r#"
+            SELECT thresholds_json, anomaly_state_json, updated_by, updated_at
+            FROM ops_observability_configs
+            WHERE ws_id = $1
+            "#,
+        )
+        .bind(user.ws_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        let (thresholds, anomaly_state) = if let Some(row) = row {
+            (
+                parse_thresholds(row.thresholds_json),
+                parse_anomaly_state(row.anomaly_state_json, now_ms),
+            )
+        } else {
+            (OpsObservabilityThresholds::default(), HashMap::new())
+        };
+        let mut report = OpsAlertEvalReport {
+            workspaces_scanned: 1,
+            ..OpsAlertEvalReport::default()
+        };
+        let signal = self.load_recent_judge_signal(user.ws_id).await?;
+        for spec in rule_specs() {
+            let evaluated = evaluate_alert_for_rule(spec, &thresholds, signal);
+            let previous: Option<OpsAlertStateRow> = sqlx::query_as(
+                r#"
+                SELECT is_active, last_emitted_status
+                FROM ops_alert_states
+                WHERE ws_id = $1 AND alert_key = $2
+                "#,
+            )
+            .bind(user.ws_id)
+            .bind(&evaluated.alert_key)
+            .fetch_optional(&self.pool)
+            .await?;
+            let suppression_state = anomaly_state.get(&evaluated.alert_key);
+            let Some(plan) = build_emit_plan(evaluated, previous, suppression_state, now_ms) else {
+                continue;
+            };
+            match plan.status {
+                ALERT_STATUS_RAISED => report.alerts_raised += 1,
+                ALERT_STATUS_CLEARED => report.alerts_cleared += 1,
+                ALERT_STATUS_SUPPRESSED => report.alerts_suppressed += 1,
+                _ => {}
+            }
         }
         Ok(report)
     }

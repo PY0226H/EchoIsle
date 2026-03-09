@@ -2,7 +2,8 @@ use crate::{
     AppError, AppState, ApplyOpsObservabilityAnomalyActionInput, ListJudgeReviewOpsQuery,
     ListKafkaDlqEventsQuery, ListOpsAlertNotificationsQuery, OpsCreateDebateSessionInput,
     OpsCreateDebateTopicInput, OpsObservabilityThresholds, OpsUpdateDebateSessionInput,
-    OpsUpdateDebateTopicInput, UpdateOpsObservabilityAnomalyStateInput, UpsertOpsRoleInput,
+    OpsUpdateDebateTopicInput, RunOpsObservabilityEvaluationQuery,
+    UpdateOpsObservabilityAnomalyStateInput, UpsertOpsRoleInput,
 };
 use axum::{
     extract::{Path, Query, State},
@@ -294,6 +295,9 @@ pub(crate) async fn apply_ops_observability_anomaly_action_handler(
 #[utoipa::path(
     post,
     path = "/api/debate/ops/observability/evaluate-once",
+    params(
+        RunOpsObservabilityEvaluationQuery
+    ),
     responses(
         (status = 200, description = "Ops alert evaluation report", body = crate::OpsAlertEvalReport),
         (status = 409, description = "Permission conflict", body = crate::ErrorOutput),
@@ -305,10 +309,17 @@ pub(crate) async fn apply_ops_observability_anomaly_action_handler(
 pub(crate) async fn run_ops_observability_evaluation_once_handler(
     Extension(user): Extension<User>,
     State(state): State<AppState>,
+    Query(query): Query<RunOpsObservabilityEvaluationQuery>,
 ) -> Result<impl IntoResponse, AppError> {
-    let ret = state
-        .evaluate_ops_observability_alerts_for_workspace_by_ops(&user)
-        .await?;
+    let ret = if query.dry_run.unwrap_or(false) {
+        state
+            .preview_ops_observability_alerts_for_workspace_by_ops(&user)
+            .await?
+    } else {
+        state
+            .evaluate_ops_observability_alerts_for_workspace_by_ops(&user)
+            .await?
+    };
     Ok((StatusCode::OK, Json(ret)))
 }
 
