@@ -131,6 +131,10 @@ pub async fn get_router(state: AppState) -> Result<Router, AppError> {
             get(get_ops_service_split_readiness_handler),
         )
         .route(
+            "/ops/observability/split-readiness/reviews",
+            get(list_ops_service_split_review_audits_handler),
+        )
+        .route(
             "/ops/observability/split-readiness/review",
             put(upsert_ops_service_split_review_handler),
         )

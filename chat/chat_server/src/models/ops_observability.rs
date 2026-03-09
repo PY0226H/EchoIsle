@@ -142,6 +142,16 @@ struct OpsServiceSplitReviewRow {
     updated_at: DateTime<Utc>,
 }
 
+#[derive(Debug, Clone, FromRow)]
+struct OpsServiceSplitReviewAuditRow {
+    id: i64,
+    ws_id: i64,
+    payment_compliance_required: Option<bool>,
+    review_note: String,
+    updated_by: i64,
+    created_at: DateTime<Utc>,
+}
+
 #[derive(Debug, Clone, IntoParams, ToSchema, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ListOpsAlertNotificationsQuery {
@@ -161,6 +171,13 @@ pub struct RunOpsObservabilityEvaluationQuery {
 pub struct UpsertOpsServiceSplitReviewInput {
     pub payment_compliance_required: Option<bool>,
     pub review_note: Option<String>,
+}
+
+#[derive(Debug, Clone, IntoParams, ToSchema, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ListOpsServiceSplitReviewAuditsQuery {
+    pub limit: Option<u64>,
+    pub offset: Option<u64>,
 }
 
 #[derive(Debug, Clone, ToSchema, Serialize, Deserialize)]
@@ -269,6 +286,26 @@ pub struct GetOpsServiceSplitReadinessOutput {
     pub overall_status: String,
     pub next_step: String,
     pub thresholds: Vec<OpsServiceSplitThresholdItem>,
+}
+
+#[derive(Debug, Clone, ToSchema, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OpsServiceSplitReviewAuditItem {
+    pub id: u64,
+    pub ws_id: u64,
+    pub payment_compliance_required: Option<bool>,
+    pub review_note: String,
+    pub updated_by: u64,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, ToSchema, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ListOpsServiceSplitReviewAuditsOutput {
+    pub total: u64,
+    pub limit: u64,
+    pub offset: u64,
+    pub items: Vec<OpsServiceSplitReviewAuditItem>,
 }
 
 #[derive(Debug, Clone, Default, ToSchema, Serialize)]
@@ -781,6 +818,14 @@ fn normalize_alert_offset(offset: Option<u64>) -> i64 {
     offset.unwrap_or(0).min(50_000) as i64
 }
 
+fn normalize_split_review_audit_limit(limit: Option<u64>) -> i64 {
+    limit.unwrap_or(20).clamp(1, 200) as i64
+}
+
+fn normalize_split_review_audit_offset(offset: Option<u64>) -> i64 {
+    offset.unwrap_or(0).min(50_000) as i64
+}
+
 fn normalize_alert_status_filter(status: Option<String>) -> Result<Option<String>, AppError> {
     let Some(status) = status else {
         return Ok(None);
@@ -821,6 +866,19 @@ fn parse_recipient_ids(value: &Value) -> Vec<u64> {
                 .or_else(|| v.as_i64().and_then(|n| u64::try_from(n).ok()))
         })
         .collect()
+}
+
+fn map_split_review_audit_row(
+    row: OpsServiceSplitReviewAuditRow,
+) -> OpsServiceSplitReviewAuditItem {
+    OpsServiceSplitReviewAuditItem {
+        id: row.id as u64,
+        ws_id: row.ws_id as u64,
+        payment_compliance_required: row.payment_compliance_required,
+        review_note: row.review_note,
+        updated_by: row.updated_by as u64,
+        created_at: row.created_at,
+    }
 }
 
 fn build_http_url(base: &str, path: &str) -> String {
@@ -1160,6 +1218,7 @@ impl AppState {
         self.ensure_ops_permission(user, OpsPermission::JudgeReview)
             .await?;
         let review_note = normalize_split_review_note(input.review_note)?;
+        let mut tx = self.pool.begin().await?;
         sqlx::query(
             r#"
             INSERT INTO ops_service_split_reviews(
@@ -1176,11 +1235,68 @@ impl AppState {
         )
         .bind(user.ws_id)
         .bind(input.payment_compliance_required)
+        .bind(&review_note)
+        .bind(user.id)
+        .execute(&mut *tx)
+        .await?;
+        sqlx::query(
+            r#"
+            INSERT INTO ops_service_split_review_audits(
+                ws_id, payment_compliance_required, review_note, updated_by, created_at
+            )
+            VALUES ($1, $2, $3, $4, NOW())
+            "#,
+        )
+        .bind(user.ws_id)
+        .bind(input.payment_compliance_required)
         .bind(review_note)
         .bind(user.id)
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await?;
+        tx.commit().await?;
         self.get_ops_service_split_readiness(user).await
+    }
+
+    pub async fn list_ops_service_split_review_audits(
+        &self,
+        user: &User,
+        query: ListOpsServiceSplitReviewAuditsQuery,
+    ) -> Result<ListOpsServiceSplitReviewAuditsOutput, AppError> {
+        self.ensure_ops_permission(user, OpsPermission::JudgeReview)
+            .await?;
+        let limit = normalize_split_review_audit_limit(query.limit);
+        let offset = normalize_split_review_audit_offset(query.offset);
+        let total: i64 = sqlx::query_scalar(
+            r#"
+            SELECT COUNT(1)::bigint
+            FROM ops_service_split_review_audits
+            WHERE ws_id = $1
+            "#,
+        )
+        .bind(user.ws_id)
+        .fetch_one(&self.pool)
+        .await?;
+        let rows: Vec<OpsServiceSplitReviewAuditRow> = sqlx::query_as(
+            r#"
+            SELECT
+                id, ws_id, payment_compliance_required, review_note, updated_by, created_at
+            FROM ops_service_split_review_audits
+            WHERE ws_id = $1
+            ORDER BY created_at DESC, id DESC
+            LIMIT $2 OFFSET $3
+            "#,
+        )
+        .bind(user.ws_id)
+        .bind(limit)
+        .bind(offset)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(ListOpsServiceSplitReviewAuditsOutput {
+            total: total.max(0) as u64,
+            limit: limit as u64,
+            offset: offset as u64,
+            items: rows.into_iter().map(map_split_review_audit_row).collect(),
+        })
     }
 
     pub async fn get_ops_service_split_readiness(

@@ -4,11 +4,11 @@ use super::super::{
     get_ops_observability_slo_snapshot_handler, get_ops_rbac_me_handler,
     get_ops_service_split_readiness_handler, list_judge_reviews_ops_handler,
     list_kafka_dlq_events_handler, list_ops_alert_notifications_handler,
-    list_ops_role_assignments_handler, replay_kafka_dlq_event_handler,
-    request_judge_rejudge_ops_handler, revoke_ops_role_assignment_handler,
-    run_ops_observability_evaluation_once_handler, upsert_ops_observability_anomaly_state_handler,
-    upsert_ops_observability_thresholds_handler, upsert_ops_role_assignment_handler,
-    upsert_ops_service_split_review_handler,
+    list_ops_role_assignments_handler, list_ops_service_split_review_audits_handler,
+    replay_kafka_dlq_event_handler, request_judge_rejudge_ops_handler,
+    revoke_ops_role_assignment_handler, run_ops_observability_evaluation_once_handler,
+    upsert_ops_observability_anomaly_state_handler, upsert_ops_observability_thresholds_handler,
+    upsert_ops_role_assignment_handler, upsert_ops_service_split_review_handler,
 };
 use super::test_support::{
     assert_debate_conflict_prefix, assert_is_debate_conflict, insert_kafka_dlq_event,
@@ -17,9 +17,9 @@ use super::test_support::{
 };
 use crate::{
     AppState, ApplyOpsObservabilityAnomalyActionInput, ListJudgeReviewOpsQuery,
-    ListKafkaDlqEventsQuery, ListOpsAlertNotificationsQuery, OpsObservabilityThresholds,
-    RunOpsObservabilityEvaluationQuery, UpdateOpsObservabilityAnomalyStateInput,
-    UpsertOpsRoleInput, UpsertOpsServiceSplitReviewInput,
+    ListKafkaDlqEventsQuery, ListOpsAlertNotificationsQuery, ListOpsServiceSplitReviewAuditsQuery,
+    OpsObservabilityThresholds, RunOpsObservabilityEvaluationQuery,
+    UpdateOpsObservabilityAnomalyStateInput, UpsertOpsRoleInput, UpsertOpsServiceSplitReviewInput,
 };
 use anyhow::Result;
 use axum::{
@@ -244,6 +244,17 @@ async fn ops_observability_config_handlers_should_require_judge_review_permissio
             .await;
     assert_debate_conflict_prefix(split_result, "ops_permission_denied:judge_review:");
 
+    let split_reviews_result = list_ops_service_split_review_audits_handler(
+        Extension(non_owner.clone()),
+        State(state.clone()),
+        Query(ListOpsServiceSplitReviewAuditsQuery {
+            limit: None,
+            offset: None,
+        }),
+    )
+    .await;
+    assert_debate_conflict_prefix(split_reviews_result, "ops_permission_denied:judge_review:");
+
     let split_review_result = upsert_ops_service_split_review_handler(
         Extension(non_owner.clone()),
         State(state.clone()),
@@ -395,6 +406,52 @@ async fn upsert_ops_service_split_review_handler_should_update_compliance_thresh
         ret["overallStatus"], "review_required",
         "payment compliance requirement should trigger review"
     );
+    Ok(())
+}
+
+#[tokio::test]
+async fn list_ops_service_split_review_audits_handler_should_return_latest_first() -> Result<()> {
+    let (_tdb, state) = AppState::new_for_test().await?;
+    state.update_workspace_owner(1, 1).await?;
+    let owner = state.find_user_by_id(1).await?.expect("owner should exist");
+
+    upsert_ops_service_split_review_handler(
+        Extension(owner.clone()),
+        State(state.clone()),
+        Json(UpsertOpsServiceSplitReviewInput {
+            payment_compliance_required: Some(true),
+            review_note: Some("first-review".to_string()),
+        }),
+    )
+    .await?;
+    upsert_ops_service_split_review_handler(
+        Extension(owner.clone()),
+        State(state.clone()),
+        Json(UpsertOpsServiceSplitReviewInput {
+            payment_compliance_required: Some(false),
+            review_note: Some("second-review".to_string()),
+        }),
+    )
+    .await?;
+
+    let response = list_ops_service_split_review_audits_handler(
+        Extension(owner),
+        State(state),
+        Query(ListOpsServiceSplitReviewAuditsQuery {
+            limit: Some(10),
+            offset: Some(0),
+        }),
+    )
+    .await?
+    .into_response();
+    let ret = json_body_with_status(response, StatusCode::OK).await?;
+    assert_eq!(ret["total"], 2);
+    let items = ret["items"].as_array().expect("items should be array");
+    assert_eq!(items.len(), 2);
+    assert_eq!(items[0]["reviewNote"], "second-review");
+    assert_eq!(items[0]["paymentComplianceRequired"], false);
+    assert_eq!(items[1]["reviewNote"], "first-review");
+    assert_eq!(items[1]["paymentComplianceRequired"], true);
     Ok(())
 }
 

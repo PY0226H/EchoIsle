@@ -3,9 +3,9 @@ use crate::{
         build_rate_limit_headers, enforce_rate_limit, rate_limit_exceeded_response,
     },
     AppError, AppState, ApplyOpsObservabilityAnomalyActionInput, ListJudgeReviewOpsQuery,
-    ListKafkaDlqEventsQuery, ListOpsAlertNotificationsQuery, OpsCreateDebateSessionInput,
-    OpsCreateDebateTopicInput, OpsObservabilityThresholds, OpsUpdateDebateSessionInput,
-    OpsUpdateDebateTopicInput, RunOpsObservabilityEvaluationQuery,
+    ListKafkaDlqEventsQuery, ListOpsAlertNotificationsQuery, ListOpsServiceSplitReviewAuditsQuery,
+    OpsCreateDebateSessionInput, OpsCreateDebateTopicInput, OpsObservabilityThresholds,
+    OpsUpdateDebateSessionInput, OpsUpdateDebateTopicInput, RunOpsObservabilityEvaluationQuery,
     UpdateOpsObservabilityAnomalyStateInput, UpsertOpsRoleInput, UpsertOpsServiceSplitReviewInput,
 };
 use axum::{
@@ -241,6 +241,32 @@ pub(crate) async fn get_ops_service_split_readiness_handler(
     State(state): State<AppState>,
 ) -> Result<impl IntoResponse, AppError> {
     let ret = state.get_ops_service_split_readiness(&user).await?;
+    Ok((StatusCode::OK, Json(ret)))
+}
+
+/// List split-readiness manual review audit history for current workspace.
+#[utoipa::path(
+    get,
+    path = "/api/debate/ops/observability/split-readiness/reviews",
+    params(
+        ListOpsServiceSplitReviewAuditsQuery
+    ),
+    responses(
+        (status = 200, description = "Service split readiness review audits", body = crate::ListOpsServiceSplitReviewAuditsOutput),
+        (status = 409, description = "Permission conflict", body = crate::ErrorOutput),
+    ),
+    security(
+        ("token" = [])
+    )
+)]
+pub(crate) async fn list_ops_service_split_review_audits_handler(
+    Extension(user): Extension<User>,
+    State(state): State<AppState>,
+    Query(query): Query<ListOpsServiceSplitReviewAuditsQuery>,
+) -> Result<impl IntoResponse, AppError> {
+    let ret = state
+        .list_ops_service_split_review_audits(&user, query)
+        .await?;
     Ok((StatusCode::OK, Json(ret)))
 }
 
