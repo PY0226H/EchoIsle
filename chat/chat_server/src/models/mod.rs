@@ -39,10 +39,10 @@ pub use kafka_dlq::{
 };
 pub use messages::{CreateMessage, ListMessages};
 pub use ops_observability::{
-    GetOpsObservabilityConfigOutput, ListOpsAlertNotificationsOutput,
-    ListOpsAlertNotificationsQuery, OpsAlertEvalReport, OpsAlertNotificationItem,
-    OpsObservabilityAnomalyStateValue, OpsObservabilityThresholds,
-    UpdateOpsObservabilityAnomalyStateInput,
+    GetOpsMetricsDictionaryOutput, GetOpsObservabilityConfigOutput,
+    ListOpsAlertNotificationsOutput, ListOpsAlertNotificationsQuery, OpsAlertEvalReport,
+    OpsAlertNotificationItem, OpsMetricsDictionaryItem, OpsObservabilityAnomalyStateValue,
+    OpsObservabilityThresholds, UpdateOpsObservabilityAnomalyStateInput,
 };
 pub use payment::{
     GetIapOrderByTransaction, GetIapOrderByTransactionOutput, IapOrderSnapshot, IapProduct,

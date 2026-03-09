@@ -149,6 +149,26 @@ pub struct ListOpsAlertNotificationsOutput {
     pub items: Vec<OpsAlertNotificationItem>,
 }
 
+#[derive(Debug, Clone, ToSchema, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OpsMetricsDictionaryItem {
+    pub key: String,
+    pub category: String,
+    pub source: String,
+    pub unit: String,
+    pub aggregation: String,
+    pub description: String,
+    pub target: Option<String>,
+}
+
+#[derive(Debug, Clone, ToSchema, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GetOpsMetricsDictionaryOutput {
+    pub version: String,
+    pub generated_at_ms: i64,
+    pub items: Vec<OpsMetricsDictionaryItem>,
+}
+
 #[derive(Debug, Clone, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct OpsAlertEvalReport {
@@ -437,6 +457,128 @@ fn build_output(
         updated_by: Some(row.updated_by as u64),
         updated_at: Some(row.updated_at),
     }
+}
+
+fn build_ops_metrics_dictionary_items() -> Vec<OpsMetricsDictionaryItem> {
+    vec![
+        OpsMetricsDictionaryItem {
+            key: "api.request_total".to_string(),
+            category: "request".to_string(),
+            source: "chat_server".to_string(),
+            unit: "count".to_string(),
+            aggregation: "sum".to_string(),
+            description: "API request total across protected endpoints.".to_string(),
+            target: None,
+        },
+        OpsMetricsDictionaryItem {
+            key: "api.error_total".to_string(),
+            category: "request".to_string(),
+            source: "chat_server".to_string(),
+            unit: "count".to_string(),
+            aggregation: "sum".to_string(),
+            description: "API error response total (4xx + 5xx).".to_string(),
+            target: None,
+        },
+        OpsMetricsDictionaryItem {
+            key: "api.latency_p95_ms".to_string(),
+            category: "request".to_string(),
+            source: "chat_server".to_string(),
+            unit: "ms".to_string(),
+            aggregation: "p95".to_string(),
+            description: "API request latency p95.".to_string(),
+            target: Some("<300".to_string()),
+        },
+        OpsMetricsDictionaryItem {
+            key: "judge.dispatch.tick_success_total".to_string(),
+            category: "judge_dispatch".to_string(),
+            source: "chat_server.internal_ai.judge.dispatch.metrics".to_string(),
+            unit: "count".to_string(),
+            aggregation: "sum".to_string(),
+            description: "Judge dispatch worker successful tick count.".to_string(),
+            target: None,
+        },
+        OpsMetricsDictionaryItem {
+            key: "judge.dispatch.failed_total".to_string(),
+            category: "judge_dispatch".to_string(),
+            source: "chat_server.internal_ai.judge.dispatch.metrics".to_string(),
+            unit: "count".to_string(),
+            aggregation: "sum".to_string(),
+            description: "Judge dispatch failed delivery total.".to_string(),
+            target: None,
+        },
+        OpsMetricsDictionaryItem {
+            key: "judge.dispatch.retryable_failed_total".to_string(),
+            category: "judge_dispatch".to_string(),
+            source: "chat_server.internal_ai.judge.dispatch.metrics".to_string(),
+            unit: "count".to_string(),
+            aggregation: "sum".to_string(),
+            description: "Judge dispatch retryable failure total.".to_string(),
+            target: None,
+        },
+        OpsMetricsDictionaryItem {
+            key: "judge.dispatch.callback_latency_p95_ms".to_string(),
+            category: "judge_dispatch".to_string(),
+            source: "ai_judge_service.trace_store".to_string(),
+            unit: "ms".to_string(),
+            aggregation: "p95".to_string(),
+            description: "Dispatch accepted to callback completed latency p95.".to_string(),
+            target: Some("<300000".to_string()),
+        },
+        OpsMetricsDictionaryItem {
+            key: "ws.replay.request_total".to_string(),
+            category: "ws_replay".to_string(),
+            source: "notify_server.ws".to_string(),
+            unit: "count".to_string(),
+            aggregation: "sum".to_string(),
+            description: "WebSocket replay request total.".to_string(),
+            target: None,
+        },
+        OpsMetricsDictionaryItem {
+            key: "ws.replay.backlog_size".to_string(),
+            category: "ws_replay".to_string(),
+            source: "notify_server.ws".to_string(),
+            unit: "count".to_string(),
+            aggregation: "gauge".to_string(),
+            description: "Replay backlog queue size.".to_string(),
+            target: None,
+        },
+        OpsMetricsDictionaryItem {
+            key: "ws.broadcast_latency_p95_ms".to_string(),
+            category: "ws_replay".to_string(),
+            source: "notify_server.ws".to_string(),
+            unit: "ms".to_string(),
+            aggregation: "p95".to_string(),
+            description: "WebSocket broadcast latency p95.".to_string(),
+            target: Some("<1000".to_string()),
+        },
+        OpsMetricsDictionaryItem {
+            key: "iap.verify.request_total".to_string(),
+            category: "iap_verify".to_string(),
+            source: "chat_server.pay.iap.verify".to_string(),
+            unit: "count".to_string(),
+            aggregation: "sum".to_string(),
+            description: "IAP verify request total.".to_string(),
+            target: None,
+        },
+        OpsMetricsDictionaryItem {
+            key: "iap.verify.error_total".to_string(),
+            category: "iap_verify".to_string(),
+            source: "chat_server.pay.iap.verify".to_string(),
+            unit: "count".to_string(),
+            aggregation: "sum".to_string(),
+            description: "IAP verify failed request total.".to_string(),
+            target: None,
+        },
+        OpsMetricsDictionaryItem {
+            key: "iap.verify.latency_p95_ms".to_string(),
+            category: "iap_verify".to_string(),
+            source: "chat_server.pay.iap.verify".to_string(),
+            unit: "ms".to_string(),
+            aggregation: "p95".to_string(),
+            description: "IAP verify latency p95.".to_string(),
+            target: Some("<2000".to_string()),
+        },
+    ]
 }
 
 fn normalize_alert_limit(limit: Option<u64>) -> i64 {
@@ -807,6 +949,19 @@ fn build_emit_plan(
 }
 
 impl AppState {
+    pub async fn get_ops_metrics_dictionary(
+        &self,
+        user: &User,
+    ) -> Result<GetOpsMetricsDictionaryOutput, AppError> {
+        self.ensure_ops_permission(user, OpsPermission::JudgeReview)
+            .await?;
+        Ok(GetOpsMetricsDictionaryOutput {
+            version: "v1".to_string(),
+            generated_at_ms: now_millis(),
+            items: build_ops_metrics_dictionary_items(),
+        })
+    }
+
     pub async fn get_ops_observability_config(
         &self,
         user: &User,

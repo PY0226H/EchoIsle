@@ -1,5 +1,6 @@
 use super::super::{
-    discard_kafka_dlq_event_handler, get_ops_observability_config_handler, get_ops_rbac_me_handler,
+    discard_kafka_dlq_event_handler, get_ops_observability_config_handler,
+    get_ops_observability_metrics_dictionary_handler, get_ops_rbac_me_handler,
     list_judge_reviews_ops_handler, list_kafka_dlq_events_handler,
     list_ops_alert_notifications_handler, list_ops_role_assignments_handler,
     replay_kafka_dlq_event_handler, request_judge_rejudge_ops_handler,
@@ -212,12 +213,39 @@ async fn ops_observability_config_handlers_should_require_judge_review_permissio
     assert_debate_conflict_prefix(get_result, "ops_permission_denied:judge_review:");
 
     let put_result = upsert_ops_observability_thresholds_handler(
-        Extension(non_owner),
-        State(state),
+        Extension(non_owner.clone()),
+        State(state.clone()),
         Json(OpsObservabilityThresholds::default()),
     )
     .await;
     assert_debate_conflict_prefix(put_result, "ops_permission_denied:judge_review:");
+
+    let dict_result =
+        get_ops_observability_metrics_dictionary_handler(Extension(non_owner), State(state)).await;
+    assert_debate_conflict_prefix(dict_result, "ops_permission_denied:judge_review:");
+    Ok(())
+}
+
+#[tokio::test]
+async fn get_ops_observability_metrics_dictionary_handler_should_return_canonical_items(
+) -> Result<()> {
+    let (_tdb, state) = AppState::new_for_test().await?;
+    state.update_workspace_owner(1, 1).await?;
+    let owner = state.find_user_by_id(1).await?.expect("owner should exist");
+
+    let response = get_ops_observability_metrics_dictionary_handler(Extension(owner), State(state))
+        .await?
+        .into_response();
+    let ret = json_body_with_status(response, StatusCode::OK).await?;
+    assert_eq!(ret["version"], "v1");
+    let items = ret["items"].as_array().expect("items should be array");
+    assert!(items.len() >= 10);
+    assert!(items.iter().any(|v| v["key"] == "api.request_total"));
+    assert!(items
+        .iter()
+        .any(|v| v["key"] == "judge.dispatch.failed_total"));
+    assert!(items.iter().any(|v| v["key"] == "ws.replay.backlog_size"));
+    assert!(items.iter().any(|v| v["key"] == "iap.verify.error_total"));
     Ok(())
 }
 

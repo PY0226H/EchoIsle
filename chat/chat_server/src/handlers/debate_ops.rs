@@ -177,6 +177,26 @@ pub(crate) async fn get_ops_observability_config_handler(
     Ok((StatusCode::OK, Json(ret)))
 }
 
+/// Get canonical ops metrics dictionary for observability and SLO governance.
+#[utoipa::path(
+    get,
+    path = "/api/debate/ops/observability/metrics-dictionary",
+    responses(
+        (status = 200, description = "Ops metrics dictionary", body = crate::GetOpsMetricsDictionaryOutput),
+        (status = 409, description = "Permission conflict", body = crate::ErrorOutput),
+    ),
+    security(
+        ("token" = [])
+    )
+)]
+pub(crate) async fn get_ops_observability_metrics_dictionary_handler(
+    Extension(user): Extension<User>,
+    State(state): State<AppState>,
+) -> Result<impl IntoResponse, AppError> {
+    let ret = state.get_ops_metrics_dictionary(&user).await?;
+    Ok((StatusCode::OK, Json(ret)))
+}
+
 /// Upsert ops observability thresholds for current workspace.
 #[utoipa::path(
     put,
