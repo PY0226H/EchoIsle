@@ -140,6 +140,22 @@ async fn query_order_snapshot(
         .map_err(Into::into)
 }
 
+async fn query_order_snapshot_expect_conflict(
+    state: &AppState,
+    user: &User,
+    transaction_id: &str,
+) -> AppError {
+    state
+        .get_iap_order_by_transaction(
+            user,
+            GetIapOrderByTransaction {
+                transaction_id: transaction_id.to_string(),
+            },
+        )
+        .await
+        .expect_err("cross user query should fail")
+}
+
 fn assert_order_output(
     out: &VerifyIapOrderOutput,
     expected_status: &str,
@@ -607,15 +623,7 @@ async fn get_iap_order_by_transaction_should_return_conflict_for_other_user() ->
             verify_input("tx-query-conflict-1", "mock_ok_receipt"),
         )
         .await?;
-    let err = state
-        .get_iap_order_by_transaction(
-            &user2,
-            GetIapOrderByTransaction {
-                transaction_id: "tx-query-conflict-1".to_string(),
-            },
-        )
-        .await
-        .expect_err("cross user query should fail");
+    let err = query_order_snapshot_expect_conflict(&state, &user2, "tx-query-conflict-1").await;
     assert_payment_conflict(&err);
     Ok(())
 }
