@@ -276,6 +276,124 @@ export default createStore({
         throw error;
       }
     },
+    async sendSmsCodeV2(_ctx, { phone, scene }) {
+      const response = await network(this, 'post', '/auth/v2/sms/send', {
+        phone,
+        scene,
+      });
+      return response?.data;
+    },
+    async signupPhoneV2({ commit }, { phone, smsCode, password, fullname }) {
+      const response = await network(this, 'post', '/auth/v2/signup/phone', {
+        phone,
+        smsCode,
+        password,
+        fullname,
+      });
+      return loadState(response, this, commit);
+    },
+    async signupEmailV2({ commit }, { email, phone, smsCode, password, fullname }) {
+      const response = await network(this, 'post', '/auth/v2/signup/email', {
+        email,
+        phone,
+        smsCode,
+        password,
+        fullname,
+      });
+      return loadState(response, this, commit);
+    },
+    async signinPasswordV2({ commit }, { account, accountType, password }) {
+      const response = await network(this, 'post', '/auth/v2/signin/password', {
+        account,
+        accountType,
+        password,
+      });
+      return loadState(response, this, commit);
+    },
+    async signinOtpV2({ commit }, { phone, smsCode }) {
+      const response = await network(this, 'post', '/auth/v2/signin/otp', {
+        phone,
+        smsCode,
+      });
+      return loadState(response, this, commit);
+    },
+    async wechatChallengeV2() {
+      const response = await network(this, 'post', '/auth/v2/wechat/challenge');
+      return response?.data;
+    },
+    async wechatSigninV2({ commit }, { state, code }) {
+      const response = await network(this, 'post', '/auth/v2/wechat/signin', {
+        state,
+        code,
+      });
+      const data = response?.data || {};
+      if (data.bindRequired) {
+        return data;
+      }
+      const authLike = {
+        data: {
+          accessToken: data.accessToken,
+          tokenType: data.tokenType,
+          expiresInSecs: data.expiresInSecs,
+          user: data.user,
+        },
+      };
+      const user = await loadState(authLike, this, commit);
+      return {
+        bindRequired: false,
+        user,
+      };
+    },
+    async wechatBindPhoneV2(
+      { commit },
+      {
+        wechatTicket,
+        phone,
+        smsCode,
+        password,
+        fullname,
+      },
+    ) {
+      const response = await network(this, 'post', '/auth/v2/wechat/bind-phone', {
+        wechatTicket,
+        phone,
+        smsCode,
+        password,
+        fullname,
+      });
+      const data = response?.data || {};
+      const authLike = {
+        data: {
+          accessToken: data.accessToken,
+          tokenType: data.tokenType,
+          expiresInSecs: data.expiresInSecs,
+          user: data.user,
+        },
+      };
+      const user = await loadState(authLike, this, commit);
+      return {
+        bindRequired: false,
+        user,
+      };
+    },
+    async bindPhoneV2({ state, commit }, { phone, smsCode }) {
+      const response = await network(
+        this,
+        'post',
+        '/auth/v2/phone/bind',
+        {
+          phone,
+          smsCode,
+        },
+        state.token ? { Authorization: `Bearer ${state.token}` } : {},
+      );
+      const ret = response?.data || {};
+      if (ret?.user) {
+        localStorage.setItem('user', JSON.stringify(ret.user));
+        commit('setUser', ret.user);
+      }
+      return ret;
+    },
     async logout({ state, commit }, { skipRemote = false } = {}) {
       if (!skipRemote && state.token) {
         try {

@@ -247,7 +247,7 @@ impl AppState {
             r#"
             SELECT
                 r.user_id,
-                u.email AS user_email,
+                COALESCE(u.email, '') AS user_email,
                 u.fullname AS user_fullname,
                 r.role,
                 r.granted_by,
@@ -304,7 +304,7 @@ impl AppState {
                 updated_at = NOW()
             RETURNING
                 user_id,
-                (SELECT email FROM users WHERE id = workspace_user_roles.user_id) AS user_email,
+                (SELECT COALESCE(email, '') FROM users WHERE id = workspace_user_roles.user_id) AS user_email,
                 (SELECT fullname FROM users WHERE id = workspace_user_roles.user_id) AS user_fullname,
                 role,
                 granted_by,

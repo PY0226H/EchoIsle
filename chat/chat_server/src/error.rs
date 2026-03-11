@@ -9,6 +9,9 @@ pub enum AppError {
     #[error("email already exists: {0}")]
     EmailAlreadyExists(String),
 
+    #[error("phone already exists: {0}")]
+    PhoneAlreadyExists(String),
+
     #[error("create chat error: {0}")]
     CreateChatError(String),
 
@@ -78,6 +81,7 @@ impl IntoResponse for AppError {
             Self::AnyError(_) => StatusCode::INTERNAL_SERVER_ERROR,
             Self::HttpHeaderError(_) => StatusCode::UNPROCESSABLE_ENTITY,
             Self::EmailAlreadyExists(_) => StatusCode::CONFLICT,
+            Self::PhoneAlreadyExists(_) => StatusCode::CONFLICT,
             Self::CreateChatError(_) => StatusCode::BAD_REQUEST,
             Self::CreateAgentError(_) => StatusCode::BAD_REQUEST,
             Self::UpdateAgentError(_) => StatusCode::BAD_REQUEST,

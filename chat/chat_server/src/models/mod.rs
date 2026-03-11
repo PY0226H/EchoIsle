@@ -58,7 +58,7 @@ pub use rbac::{
     RevokeOpsRoleOutput, UpsertOpsRoleInput,
 };
 use serde::{Deserialize, Serialize};
-pub use user::{CreateUser, SigninUser};
+pub use user::{CreateUser, CreateUserAutoWorkspaceInput, SigninUser};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChatFile {

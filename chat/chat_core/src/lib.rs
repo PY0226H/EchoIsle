@@ -50,6 +50,12 @@ pub struct User {
     pub fullname: String,
     pub email: String,
     #[sqlx(default)]
+    pub phone_e164: Option<String>,
+    #[sqlx(default)]
+    pub phone_verified_at: Option<DateTime<Utc>>,
+    #[sqlx(default)]
+    pub phone_bind_required: bool,
+    #[sqlx(default)]
     #[serde(skip)]
     pub password_hash: Option<String>,
     #[sqlx(default)]
@@ -208,6 +214,9 @@ impl User {
             ws_name: "".to_string(),
             fullname: fullname.to_string(),
             email: email.to_string(),
+            phone_e164: None,
+            phone_verified_at: None,
+            phone_bind_required: false,
             password_hash: None,
             is_bot: false,
             created_at: chrono::Utc::now(),

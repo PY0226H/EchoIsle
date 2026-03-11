@@ -1,48 +1,75 @@
 <template>
   <div class="flex items-center justify-center min-h-screen bg-gray-100">
-    <div class="w-full max-w-md p-8 space-y-8 bg-white rounded-xl shadow-2xl">
-      <h1 class="text-3xl font-bold text-center text-gray-800">Create Your Account</h1>
-      <p class="text-center text-gray-600">Join us and start collaborating</p>
-      <form @submit.prevent="register" class="mt-8 space-y-6">
+    <div class="w-full max-w-md p-8 space-y-6 bg-white rounded-xl shadow-2xl">
+      <h1 class="text-3xl font-bold text-center text-gray-800">
+        {{ wechatTicket ? '微信绑定手机号' : '注册账号' }}
+      </h1>
+
+      <template v-if="!wechatTicket">
+        <div class="grid grid-cols-2 gap-2">
+          <button
+            type="button"
+            @click="mode = 'phone_signup'"
+            class="px-2 py-2 text-xs rounded-md border"
+            :class="mode === 'phone_signup' ? 'bg-blue-600 text-white border-blue-600' : 'bg-white text-gray-700 border-gray-300'"
+          >
+            手机号注册
+          </button>
+          <button
+            type="button"
+            @click="mode = 'email_signup'"
+            class="px-2 py-2 text-xs rounded-md border"
+            :class="mode === 'email_signup' ? 'bg-blue-600 text-white border-blue-600' : 'bg-white text-gray-700 border-gray-300'"
+          >
+            邮箱注册(绑手机)
+          </button>
+        </div>
+      </template>
+
+      <form @submit.prevent="register" class="space-y-4">
         <div>
-          <label for="fullName" class="block text-sm font-medium text-gray-700">Full Name</label>
-          <input type="text" id="fullName" v-model="fullName" placeholder="Enter your full name" required
-                 class="mt-1 block w-full px-3 py-2 bg-gray-50 border border-gray-300 rounded-md text-sm shadow-sm placeholder-gray-400
-                        focus:outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500" />
+          <label class="block text-sm font-medium text-gray-700">昵称</label>
+          <input v-model="fullName" type="text" required class="mt-1 block w-full px-3 py-2 border rounded-md" />
+        </div>
+
+        <div v-if="mode === 'email_signup'">
+          <label class="block text-sm font-medium text-gray-700">邮箱</label>
+          <input v-model="email" type="email" required class="mt-1 block w-full px-3 py-2 border rounded-md" />
         </div>
 
         <div>
-          <label for="email" class="block text-sm font-medium text-gray-700">Email</label>
-          <input type="email" id="email" v-model="email" placeholder="Enter your email" required
-                 class="mt-1 block w-full px-3 py-2 bg-gray-50 border border-gray-300 rounded-md text-sm shadow-sm placeholder-gray-400
-                        focus:outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500" />
+          <label class="block text-sm font-medium text-gray-700">手机号(+86)</label>
+          <input v-model="phone" type="text" required class="mt-1 block w-full px-3 py-2 border rounded-md" />
         </div>
 
         <div>
-          <label for="workspaceName" class="block text-sm font-medium text-gray-700">Workspace Name</label>
-          <input type="text" id="workspaceName" v-model="workspaceName" placeholder="Enter your workspace name" required
-                 class="mt-1 block w-full px-3 py-2 bg-gray-50 border border-gray-300 rounded-md text-sm shadow-sm placeholder-gray-400
-                        focus:outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500" />
+          <label class="block text-sm font-medium text-gray-700">密码</label>
+          <input v-model="password" type="password" required class="mt-1 block w-full px-3 py-2 border rounded-md" />
         </div>
 
         <div>
-          <label for="password" class="block text-sm font-medium text-gray-700">Password</label>
-          <input type="password" id="password" v-model="password" placeholder="Enter your password" required
-                 class="mt-1 block w-full px-3 py-2 bg-gray-50 border border-gray-300 rounded-md text-sm shadow-sm placeholder-gray-400
-                        focus:outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500" />
+          <label class="block text-sm font-medium text-gray-700">验证码</label>
+          <div class="mt-1 flex gap-2">
+            <input v-model="smsCode" type="text" required class="flex-1 px-3 py-2 border rounded-md" />
+            <button type="button" @click="sendCode" class="px-3 py-2 text-xs text-white bg-blue-600 rounded-md">
+              发码
+            </button>
+          </div>
         </div>
 
-        <button type="submit"
-                class="w-full flex justify-center py-2 px-4 border border-transparent rounded-md shadow-sm text-sm font-medium text-white bg-blue-600 hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500 transition duration-150 ease-in-out">
-          Register
+        <p v-if="tips" class="text-xs text-gray-600">{{ tips }}</p>
+        <p v-if="errorText" class="text-sm text-red-600">{{ errorText }}</p>
+
+        <button type="submit" class="w-full py-2 px-4 text-sm text-white bg-blue-600 rounded-md hover:bg-blue-700">
+          {{ wechatTicket ? '绑定并创建账号' : '注册' }}
         </button>
       </form>
 
-      <p class="mt-2 text-center text-sm text-gray-600">
-        Already have an account?
+      <p v-if="!wechatTicket" class="text-center text-sm text-gray-600">
+        已有账号？
         <router-link to="/login" class="font-medium text-blue-600 hover:text-blue-500">
-          Login here
-        </router-link>.
+          去登录
+        </router-link>
       </p>
     </div>
   </div>
@@ -52,28 +79,81 @@
 export default {
   data() {
     return {
+      mode: 'phone_signup',
       fullName: '',
       email: '',
-      workspaceName: '',
+      phone: '',
       password: '',
+      smsCode: '',
+      tips: '',
+      errorText: '',
+      wechatTicket: '',
     };
   },
+  mounted() {
+    this.wechatTicket = (this.$route?.query?.wechatTicket || '').toString();
+    if (this.wechatTicket) {
+      this.mode = 'wechat_bind';
+    }
+  },
   methods: {
-    async register() {
+    async sendCode() {
+      this.errorText = '';
+      this.tips = '';
+      const scene = this.mode === 'phone_signup' ? 'signup_phone' : 'bind_phone';
       try {
-        this.$store.dispatch('userRegister', { email: this.email, workspaceId: this.workspaceName });
-        const user = await this.$store.dispatch('signup', {
-          email: this.email,
-          fullname: this.fullName,
-          password: this.password,
-          workspace: this.workspaceName
+        const ret = await this.$store.dispatch('sendSmsCodeV2', {
+          phone: this.phone,
+          scene,
         });
-
-        console.log('Signup successful, user:', user);
-        this.$router.push('/home'); // Redirect to home after successful signup
+        if (ret?.debugCode) {
+          this.tips = `开发环境验证码：${ret.debugCode}`;
+        } else {
+          this.tips = '验证码已发送，请查收短信。';
+        }
       } catch (error) {
-        console.error('Signup failed:', error);
-        // Handle signup failure, show error message to user, etc.
+        this.errorText = error?.response?.data?.error || '发送验证码失败';
+      }
+    },
+    async register() {
+      this.errorText = '';
+      this.tips = '';
+      try {
+        let user = null;
+        if (this.wechatTicket) {
+          const ret = await this.$store.dispatch('wechatBindPhoneV2', {
+            wechatTicket: this.wechatTicket,
+            phone: this.phone,
+            smsCode: this.smsCode,
+            password: this.password,
+            fullname: this.fullName,
+          });
+          user = ret?.user;
+        } else if (this.mode === 'phone_signup') {
+          this.$store.dispatch('userRegister', { email: this.phone, workspaceId: 'auto' });
+          user = await this.$store.dispatch('signupPhoneV2', {
+            phone: this.phone,
+            smsCode: this.smsCode,
+            password: this.password,
+            fullname: this.fullName,
+          });
+        } else {
+          this.$store.dispatch('userRegister', { email: this.email, workspaceId: 'auto' });
+          user = await this.$store.dispatch('signupEmailV2', {
+            email: this.email,
+            phone: this.phone,
+            smsCode: this.smsCode,
+            password: this.password,
+            fullname: this.fullName,
+          });
+        }
+        if (user?.phoneBindRequired) {
+          this.$router.push('/bind-phone');
+          return;
+        }
+        this.$router.push('/home');
+      } catch (error) {
+        this.errorText = error?.response?.data?.error || '注册失败';
       }
     },
   },

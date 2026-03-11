@@ -10,6 +10,7 @@ import Wallet from '../views/Wallet.vue';
 import Me from '../views/Me.vue';
 import Notifications from '../views/Notifications.vue';
 import DebateOpsAdmin from '../views/DebateOpsAdmin.vue';
+import PhoneBind from '../views/PhoneBind.vue';
 import store from '../store';
 import {
   hasAnyOpsPermission,
@@ -33,6 +34,7 @@ const routes = [
   { path: '/wallet', name: 'Wallet', component: Wallet, meta: { requiresAuth: true } },
   { path: '/me', name: 'Me', component: Me, meta: { requiresAuth: true } },
   { path: '/notifications', name: 'Notifications', component: Notifications, meta: { requiresAuth: true } },
+  { path: '/bind-phone', name: 'PhoneBind', component: PhoneBind, meta: { requiresAuth: true } },
   { path: '/login', name: 'Login', component: Login },
   { path: '/register', name: 'Register', component: Register },
 
@@ -61,6 +63,15 @@ router.beforeEach(async (to, from, next) => {
   const isAuthenticated = !!store.getters.getUser;
   if (to.matched.some((record) => record.meta.requiresAuth) && !isAuthenticated) {
     return next({ name: 'Login' });
+  }
+
+  const user = store.getters.getUser;
+  const phoneBindRequired = !!user?.phoneBindRequired;
+  if (isAuthenticated && phoneBindRequired && to.name !== 'PhoneBind') {
+    return next({ name: 'PhoneBind' });
+  }
+  if (isAuthenticated && !phoneBindRequired && to.name === 'PhoneBind') {
+    return next({ name: 'Home' });
   }
 
   const requiresOpsAccess = to.matched.some((record) => record.meta.requiresOpsAccess);

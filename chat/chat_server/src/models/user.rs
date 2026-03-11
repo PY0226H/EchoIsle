@@ -7,6 +7,7 @@ use chat_core::{ChatUser, User, Workspace};
 use serde::{Deserialize, Serialize};
 use std::mem;
 use utoipa::ToSchema;
+use uuid::Uuid;
 
 /// create a user with email and password
 #[derive(Debug, Clone, ToSchema, Serialize, Deserialize)]
@@ -27,14 +28,33 @@ pub struct SigninUser {
     pub password: String,
 }
 
+#[derive(Debug, Clone)]
+pub struct CreateUserAutoWorkspaceInput {
+    pub fullname: String,
+    pub email: Option<String>,
+    pub phone_e164: String,
+    pub password: String,
+    pub phone_bind_required: bool,
+}
+
 #[allow(dead_code)]
 impl AppState {
     /// Find a user by email
     pub async fn find_user_by_email(&self, email: &str) -> Result<Option<User>, AppError> {
         let user = sqlx::query_as(
-            "SELECT id, ws_id, fullname, email, created_at FROM users WHERE email = $1",
+            "SELECT id, ws_id, fullname, COALESCE(email, '') AS email, phone_e164, phone_verified_at, phone_bind_required, created_at FROM users WHERE email = $1",
         )
         .bind(email)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(user)
+    }
+
+    pub async fn find_user_by_phone(&self, phone_e164: &str) -> Result<Option<User>, AppError> {
+        let user = sqlx::query_as(
+            "SELECT id, ws_id, fullname, COALESCE(email, '') AS email, phone_e164, phone_verified_at, phone_bind_required, created_at FROM users WHERE phone_e164 = $1",
+        )
+        .bind(phone_e164)
         .fetch_optional(&self.pool)
         .await?;
         Ok(user)
@@ -43,7 +63,7 @@ impl AppState {
     // find a user by id
     pub async fn find_user_by_id(&self, id: i64) -> Result<Option<User>, AppError> {
         let user = sqlx::query_as(
-            "SELECT id, ws_id, fullname, email, created_at FROM users WHERE id = $1",
+            "SELECT id, ws_id, fullname, COALESCE(email, '') AS email, phone_e164, phone_verified_at, phone_bind_required, created_at FROM users WHERE id = $1",
         )
         .bind(id)
         .fetch_optional(&self.pool)
@@ -132,7 +152,7 @@ impl AppState {
     /// Verify email and password
     pub async fn verify_user(&self, input: &SigninUser) -> Result<Option<User>, AppError> {
         let user: Option<User> = sqlx::query_as(
-            "SELECT id, ws_id, fullname, email, password_hash, created_at FROM users WHERE email = $1",
+            "SELECT id, ws_id, fullname, COALESCE(email, '') AS email, phone_e164, phone_verified_at, phone_bind_required, password_hash, created_at FROM users WHERE email = $1",
         )
         .bind(&input.email)
         .fetch_optional(&self.pool)
@@ -155,10 +175,153 @@ impl AppState {
         }
     }
 
+    pub async fn verify_user_by_phone_password(
+        &self,
+        phone_e164: &str,
+        password: &str,
+    ) -> Result<Option<User>, AppError> {
+        let user: Option<User> = sqlx::query_as(
+            "SELECT id, ws_id, fullname, COALESCE(email, '') AS email, phone_e164, phone_verified_at, phone_bind_required, password_hash, created_at FROM users WHERE phone_e164 = $1",
+        )
+        .bind(phone_e164)
+        .fetch_optional(&self.pool)
+        .await?;
+        match user {
+            Some(mut user) => {
+                let password_hash = mem::take(&mut user.password_hash);
+                let is_valid = verify_password(password, &password_hash.unwrap_or_default())?;
+                if is_valid {
+                    let ws = self.find_workspace_by_id(user.ws_id as _).await?.unwrap();
+                    user.ws_name = ws.name;
+                    Ok(Some(user))
+                } else {
+                    Ok(None)
+                }
+            }
+            None => Ok(None),
+        }
+    }
+
+    pub async fn create_user_with_auto_workspace(
+        &self,
+        input: &CreateUserAutoWorkspaceInput,
+    ) -> Result<User, AppError> {
+        let mut tx = self.pool.begin().await?;
+
+        if let Some(email) = input.email.as_ref() {
+            let existing_email: Option<(i64,)> =
+                sqlx::query_as("SELECT id FROM users WHERE email = $1")
+                    .bind(email)
+                    .fetch_optional(&mut *tx)
+                    .await?;
+            if existing_email.is_some() {
+                return Err(AppError::EmailAlreadyExists(email.clone()));
+            }
+        }
+
+        let existing_phone: Option<(i64,)> =
+            sqlx::query_as("SELECT id FROM users WHERE phone_e164 = $1")
+                .bind(&input.phone_e164)
+                .fetch_optional(&mut *tx)
+                .await?;
+        if existing_phone.is_some() {
+            return Err(AppError::PhoneAlreadyExists(input.phone_e164.clone()));
+        }
+
+        let ws = create_default_workspace_in_tx(&mut tx).await?;
+        let password_hash = hash_password(&input.password)?;
+        let is_bot = input
+            .email
+            .as_ref()
+            .map(|email| is_bot_email(email))
+            .unwrap_or(false);
+
+        let mut user: User = sqlx::query_as(
+            r#"
+            INSERT INTO users (
+                ws_id, email, phone_e164, phone_verified_at, phone_bind_required,
+                fullname, password_hash, is_bot
+            )
+            VALUES ($1, $2, $3, NOW(), $4, $5, $6, $7)
+            RETURNING
+                id, ws_id, fullname, COALESCE(email, '') AS email,
+                phone_e164, phone_verified_at, phone_bind_required,
+                is_bot, created_at
+            "#,
+        )
+        .bind(ws.id)
+        .bind(input.email.as_deref())
+        .bind(&input.phone_e164)
+        .bind(input.phone_bind_required)
+        .bind(&input.fullname)
+        .bind(password_hash)
+        .bind(is_bot)
+        .fetch_one(&mut *tx)
+        .await?;
+
+        user.ws_name = ws.name.clone();
+
+        let _: Workspace = sqlx::query_as(
+            r#"
+            UPDATE workspaces
+            SET owner_id = $1
+            WHERE id = $2 AND owner_id = 0
+            RETURNING id, name, owner_id, created_at
+            "#,
+        )
+        .bind(user.id)
+        .bind(ws.id)
+        .fetch_one(&mut *tx)
+        .await?;
+
+        tx.commit().await?;
+        Ok(user)
+    }
+
+    pub async fn bind_phone_for_user(
+        &self,
+        user_id: i64,
+        phone_e164: &str,
+    ) -> Result<User, AppError> {
+        let existing_user_id: Option<i64> =
+            sqlx::query_scalar("SELECT id FROM users WHERE phone_e164 = $1")
+                .bind(phone_e164)
+                .fetch_optional(&self.pool)
+                .await?;
+        if let Some(other_id) = existing_user_id {
+            if other_id != user_id {
+                return Err(AppError::PhoneAlreadyExists(phone_e164.to_string()));
+            }
+        }
+
+        let mut user: User = sqlx::query_as(
+            r#"
+            UPDATE users
+            SET phone_e164 = $2,
+                phone_verified_at = NOW(),
+                phone_bind_required = false
+            WHERE id = $1
+            RETURNING
+                id, ws_id, fullname, COALESCE(email, '') AS email,
+                phone_e164, phone_verified_at, phone_bind_required,
+                is_bot, created_at
+            "#,
+        )
+        .bind(user_id)
+        .bind(phone_e164)
+        .fetch_one(&self.pool)
+        .await?;
+
+        if let Some(ws) = self.find_workspace_by_id(user.ws_id as u64).await? {
+            user.ws_name = ws.name;
+        }
+        Ok(user)
+    }
+
     pub async fn fetch_chat_user_by_ids(&self, ids: &[i64]) -> Result<Vec<ChatUser>, AppError> {
         let users = sqlx::query_as(
             r#"
-        SELECT id, fullname, email
+        SELECT id, fullname, COALESCE(email, '') AS email
         FROM users
         WHERE id = ANY($1)
         "#,
@@ -172,7 +335,7 @@ impl AppState {
     pub async fn fetch_chat_users(&self, ws_id: u64) -> Result<Vec<ChatUser>, AppError> {
         let users = sqlx::query_as(
             r#"
-        SELECT id, fullname, email
+        SELECT id, fullname, COALESCE(email, '') AS email
         FROM users
         WHERE ws_id = $1
         "#,
@@ -212,6 +375,32 @@ fn verify_password(password: &str, password_hash: &str) -> Result<bool, AppError
         .is_ok();
 
     Ok(is_valid)
+}
+
+async fn create_default_workspace_in_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+) -> Result<Workspace, AppError> {
+    for _ in 0..5 {
+        let raw = Uuid::now_v7().to_string().replace('-', "");
+        let candidate = format!("ws-{}", &raw[..10]);
+        let inserted = sqlx::query_as(
+            r#"
+            INSERT INTO workspaces (name, owner_id)
+            VALUES ($1, 0)
+            ON CONFLICT (name) DO NOTHING
+            RETURNING id, name, owner_id, created_at
+            "#,
+        )
+        .bind(candidate)
+        .fetch_optional(&mut **tx)
+        .await?;
+        if let Some(ws) = inserted {
+            return Ok(ws);
+        }
+    }
+    Err(AppError::AnyError(anyhow::anyhow!(
+        "failed to allocate default workspace name"
+    )))
 }
 
 #[cfg(test)]

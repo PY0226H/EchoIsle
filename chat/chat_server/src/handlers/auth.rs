@@ -2,13 +2,14 @@ use crate::{
     application::request_guard::{
         build_rate_limit_headers, enforce_rate_limit, rate_limit_exceeded_response,
     },
-    models::{CreateUser, SigninUser},
+    models::{CreateUser, CreateUserAutoWorkspaceInput, SigninUser},
+    redis_store::RedisStore,
     AppError, AppState, ErrorOutput,
 };
 use axum::{
     extract::{Path, State},
     http::{header, HeaderMap, HeaderValue, StatusCode},
-    response::IntoResponse,
+    response::{IntoResponse, Response},
     Extension, Json,
 };
 use chat_core::User;
@@ -16,6 +17,10 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use sha1::{Digest, Sha1};
 use sqlx::FromRow;
+use std::{
+    collections::HashMap,
+    sync::{LazyLock, Mutex},
+};
 use utoipa::ToSchema;
 use uuid::Uuid;
 
@@ -24,6 +29,54 @@ const SIGNIN_RATE_LIMIT_WINDOW_SECS: u64 = 60;
 const ACCESS_TOKEN_TTL_SECS: u64 = 60 * 15;
 const REFRESH_TOKEN_TTL_SECS: u64 = 60 * 60 * 24 * 30;
 const REFRESH_COOKIE_NAME: &str = "refresh_token";
+const AUTH_V1_SUNSET_DATE: &str = "Wed, 30 Apr 2026 00:00:00 GMT";
+const SMS_CODE_TTL_SECS: u64 = 300;
+const SMS_COOLDOWN_SECS: u64 = 60;
+const SMS_MAX_FAILED_ATTEMPTS: u64 = 5;
+const WECHAT_CHALLENGE_TTL_SECS: u64 = 300;
+const WECHAT_BIND_TICKET_TTL_SECS: u64 = 600;
+const SMS_PROVIDER_MOCK: &str = "mock";
+const WECHAT_PROVIDER: &str = "wechat";
+
+#[derive(Debug, Clone)]
+struct SmsFallbackEntry {
+    code: String,
+    expires_at_epoch_secs: u64,
+    cooldown_until_epoch_secs: u64,
+    failed_attempts: u64,
+}
+
+#[derive(Debug, Clone)]
+struct WechatIdentity {
+    provider_user_id: String,
+    provider_unionid: Option<String>,
+    nickname: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct WechatBindTicketPayload {
+    provider_user_id: String,
+    provider_unionid: Option<String>,
+    nickname: Option<String>,
+}
+
+struct SmsAuditLogInput<'a> {
+    phone_e164: &'a str,
+    scene: SmsScene,
+    action: &'a str,
+    result: &'a str,
+    reason: Option<&'a str>,
+    request_ip_hash: Option<&'a str>,
+    code_plain: Option<&'a str>,
+    user_id: Option<i64>,
+}
+
+static SMS_FALLBACK_STORE: LazyLock<Mutex<HashMap<String, SmsFallbackEntry>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+static WECHAT_CHALLENGE_FALLBACK_STORE: LazyLock<Mutex<HashMap<String, String>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+static WECHAT_BIND_TICKET_FALLBACK_STORE: LazyLock<Mutex<HashMap<String, String>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
 
 #[derive(Debug, Serialize, ToSchema, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -105,6 +158,360 @@ struct IssuedTokens {
     refresh_jti: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct SendSmsCodeV2Input {
+    pub phone: String,
+    pub scene: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct SendSmsCodeV2Output {
+    pub sent: bool,
+    pub ttl_secs: u64,
+    pub cooldown_secs: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub debug_code: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct SignupPhoneV2Input {
+    pub phone: String,
+    pub sms_code: String,
+    pub password: String,
+    #[serde(default)]
+    pub fullname: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct SignupEmailV2Input {
+    pub email: String,
+    pub phone: String,
+    pub sms_code: String,
+    pub password: String,
+    #[serde(default)]
+    pub fullname: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct SigninPasswordV2Input {
+    pub account: String,
+    pub account_type: String,
+    pub password: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct SigninOtpV2Input {
+    pub phone: String,
+    pub sms_code: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct WechatChallengeV2Output {
+    pub state: String,
+    pub expires_in_secs: u64,
+    pub app_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct WechatSigninV2Input {
+    pub state: String,
+    pub code: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct WechatSigninV2Output {
+    pub bind_required: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub wechat_ticket: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub access_token: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub token_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expires_in_secs: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub user: Option<User>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct WechatBindPhoneV2Input {
+    pub wechat_ticket: String,
+    pub phone: String,
+    pub sms_code: String,
+    pub password: String,
+    #[serde(default)]
+    pub fullname: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct BindPhoneV2Input {
+    pub phone: String,
+    pub sms_code: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct BindPhoneV2Output {
+    pub bound: bool,
+    pub user: User,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SmsScene {
+    SignupPhone,
+    BindPhone,
+    SigninPhoneOtp,
+}
+
+impl SmsScene {
+    fn parse(raw: &str) -> Option<Self> {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "signup_phone" => Some(Self::SignupPhone),
+            "bind_phone" => Some(Self::BindPhone),
+            "signin_phone_otp" => Some(Self::SigninPhoneOtp),
+            _ => None,
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::SignupPhone => "signup_phone",
+            Self::BindPhone => "bind_phone",
+            Self::SigninPhoneOtp => "signin_phone_otp",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AccountType {
+    Email,
+    Phone,
+}
+
+impl AccountType {
+    fn parse(raw: &str) -> Option<Self> {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "email" => Some(Self::Email),
+            "phone" => Some(Self::Phone),
+            _ => None,
+        }
+    }
+}
+
+fn now_epoch_secs() -> u64 {
+    Utc::now().timestamp().max(0) as u64
+}
+
+fn runtime_env_is_production() -> bool {
+    for key in ["AICOMM_ENV", "APP_ENV", "RUST_ENV", "ENV"] {
+        if let Ok(value) = std::env::var(key) {
+            let normalized = value.trim().to_ascii_lowercase();
+            if normalized == "prod" || normalized == "production" {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+fn sms_provider_name() -> String {
+    std::env::var("AUTH_SMS_PROVIDER")
+        .unwrap_or_else(|_| SMS_PROVIDER_MOCK.to_string())
+        .trim()
+        .to_ascii_lowercase()
+}
+
+fn wechat_app_id() -> String {
+    std::env::var("AUTH_WECHAT_APP_ID")
+        .unwrap_or_else(|_| "wx-dev-mock-app-id".to_string())
+        .trim()
+        .to_string()
+}
+
+fn redis_is_disabled(state: &AppState) -> bool {
+    matches!(state.redis, RedisStore::Disabled { .. })
+}
+
+fn build_sms_fallback_key(scene: SmsScene, phone_e164: &str) -> String {
+    format!("{}:{}", scene.as_str(), phone_e164)
+}
+
+fn fallback_set_sms_entry(scene: SmsScene, phone_e164: &str, code: &str) {
+    let key = build_sms_fallback_key(scene, phone_e164);
+    let mut map = SMS_FALLBACK_STORE.lock().expect("lock sms fallback store");
+    map.insert(
+        key,
+        SmsFallbackEntry {
+            code: code.to_string(),
+            expires_at_epoch_secs: now_epoch_secs() + SMS_CODE_TTL_SECS,
+            cooldown_until_epoch_secs: now_epoch_secs() + SMS_COOLDOWN_SECS,
+            failed_attempts: 0,
+        },
+    );
+}
+
+fn fallback_get_sms_entry(scene: SmsScene, phone_e164: &str) -> Option<SmsFallbackEntry> {
+    let key = build_sms_fallback_key(scene, phone_e164);
+    let mut map = SMS_FALLBACK_STORE.lock().expect("lock sms fallback store");
+    let now = now_epoch_secs();
+    if let Some(entry) = map.get(&key) {
+        if entry.expires_at_epoch_secs > now {
+            return Some(entry.clone());
+        }
+    }
+    map.remove(&key);
+    None
+}
+
+fn fallback_update_sms_entry(scene: SmsScene, phone_e164: &str, entry: SmsFallbackEntry) {
+    let key = build_sms_fallback_key(scene, phone_e164);
+    let mut map = SMS_FALLBACK_STORE.lock().expect("lock sms fallback store");
+    map.insert(key, entry);
+}
+
+fn fallback_clear_sms_entry(scene: SmsScene, phone_e164: &str) {
+    let key = build_sms_fallback_key(scene, phone_e164);
+    let mut map = SMS_FALLBACK_STORE.lock().expect("lock sms fallback store");
+    map.remove(&key);
+}
+
+fn fallback_set_wechat_challenge(nonce: &str, state: &str) {
+    let mut map = WECHAT_CHALLENGE_FALLBACK_STORE
+        .lock()
+        .expect("lock wechat challenge fallback store");
+    map.insert(nonce.to_string(), state.to_string());
+}
+
+fn fallback_take_wechat_challenge(nonce: &str) -> Option<String> {
+    let mut map = WECHAT_CHALLENGE_FALLBACK_STORE
+        .lock()
+        .expect("lock wechat challenge fallback store");
+    map.remove(nonce)
+}
+
+fn fallback_set_wechat_bind_ticket(ticket: &str, payload_json: &str) {
+    let mut map = WECHAT_BIND_TICKET_FALLBACK_STORE
+        .lock()
+        .expect("lock wechat bind fallback store");
+    map.insert(ticket.to_string(), payload_json.to_string());
+}
+
+fn fallback_take_wechat_bind_ticket(ticket: &str) -> Option<String> {
+    let mut map = WECHAT_BIND_TICKET_FALLBACK_STORE
+        .lock()
+        .expect("lock wechat bind fallback store");
+    map.remove(ticket)
+}
+
+fn append_auth_v1_deprecation_headers(headers: &mut HeaderMap) -> Result<(), AppError> {
+    headers.insert("Deprecation", HeaderValue::from_static("true"));
+    headers.insert("Sunset", HeaderValue::from_str(AUTH_V1_SUNSET_DATE)?);
+    Ok(())
+}
+
+fn build_default_fullname_from_phone(phone_e164: &str) -> String {
+    let last4: String = phone_e164
+        .chars()
+        .rev()
+        .take(4)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect();
+    format!("用户{}", last4)
+}
+
+fn normalize_cn_phone_e164(input: &str) -> Option<String> {
+    let compact: String = input
+        .trim()
+        .chars()
+        .filter(|c| c.is_ascii_digit() || *c == '+')
+        .collect();
+    let local = if let Some(rest) = compact.strip_prefix("+86") {
+        rest.to_string()
+    } else if let Some(rest) = compact.strip_prefix("86") {
+        rest.to_string()
+    } else {
+        compact
+    };
+    if local.len() != 11 || !local.starts_with('1') {
+        return None;
+    }
+    if !local.chars().all(|c| c.is_ascii_digit()) {
+        return None;
+    }
+    let second = local.chars().nth(1)?;
+    if !matches!(second, '3' | '4' | '5' | '6' | '7' | '8' | '9') {
+        return None;
+    }
+    Some(format!("+86{}", local))
+}
+
+fn normalize_email(input: &str) -> Option<String> {
+    let normalized = input.trim().to_ascii_lowercase();
+    if normalized.is_empty() || !normalized.contains('@') {
+        return None;
+    }
+    Some(normalized)
+}
+
+fn generate_sms_code() -> String {
+    let seed = Uuid::now_v7().as_u128() % 1_000_000;
+    format!("{seed:06}")
+}
+
+fn extract_nonce_from_wechat_state(state: &str) -> Option<String> {
+    state.split(':').next().and_then(|v| {
+        let n = v.trim();
+        if n.is_empty() {
+            None
+        } else {
+            Some(n.to_string())
+        }
+    })
+}
+
+fn resolve_wechat_identity_from_code(code: &str) -> Result<WechatIdentity, AppError> {
+    let trimmed = code.trim();
+    if !trimmed.starts_with("mock_") {
+        return Err(AppError::AuthError("auth_access_invalid".to_string()));
+    }
+    let raw = trimmed.trim_start_matches("mock_");
+    let segments: Vec<&str> = raw.split(':').collect();
+    let provider_user_id = segments
+        .first()
+        .map(|v| v.trim())
+        .filter(|v| !v.is_empty())
+        .ok_or_else(|| AppError::AuthError("auth_access_invalid".to_string()))?
+        .to_string();
+    let provider_unionid = segments
+        .get(1)
+        .map(|v| v.trim())
+        .filter(|v| !v.is_empty())
+        .map(ToString::to_string);
+    let nickname = segments
+        .get(2)
+        .map(|v| v.trim())
+        .filter(|v| !v.is_empty())
+        .map(ToString::to_string);
+    Ok(WechatIdentity {
+        provider_user_id,
+        provider_unionid,
+        nickname,
+    })
+}
+
 #[utoipa::path(
     post,
     path = "/api/signup",
@@ -131,6 +538,8 @@ pub(crate) async fn signup_handler(
         &issued.refresh_token,
         REFRESH_TOKEN_TTL_SECS,
     )?;
+    append_auth_v1_deprecation_headers(&mut resp_headers)?;
+    tracing::info!(api = "/api/signup", "legacy auth v1 signup endpoint called");
     let body = Json(AuthOutput {
         access_token: issued.access_token.clone(),
         token_type: "Bearer".to_string(),
@@ -187,6 +596,8 @@ pub(crate) async fn signin_handler(
         &issued.refresh_token,
         REFRESH_TOKEN_TTL_SECS,
     )?;
+    append_auth_v1_deprecation_headers(&mut resp_headers)?;
+    tracing::info!(api = "/api/signin", "legacy auth v1 signin endpoint called");
     Ok((
         StatusCode::OK,
         resp_headers,
@@ -198,6 +609,497 @@ pub(crate) async fn signin_handler(
         }),
     )
         .into_response())
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/auth/v2/sms/send",
+    request_body = SendSmsCodeV2Input,
+    responses(
+        (status = 200, description = "SMS code sent", body = SendSmsCodeV2Output),
+        (status = 400, description = "Invalid input", body = ErrorOutput),
+        (status = 429, description = "Rate limited", body = ErrorOutput),
+    )
+)]
+pub(crate) async fn send_sms_code_v2_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(input): Json<SendSmsCodeV2Input>,
+) -> Result<Response, AppError> {
+    if runtime_env_is_production() && sms_provider_name() == SMS_PROVIDER_MOCK {
+        return Err(AppError::AuthError(
+            "auth_sms_send_rate_limited".to_string(),
+        ));
+    }
+
+    let scene = SmsScene::parse(&input.scene)
+        .ok_or_else(|| AppError::AuthError("auth_sms_code_invalid".to_string()))?;
+    let phone_e164 = normalize_cn_phone_e164(&input.phone)
+        .ok_or_else(|| AppError::AuthError("auth_sms_code_invalid".to_string()))?;
+    let ip_hash = extract_ip_hash(&headers);
+
+    let phone_decision = enforce_auth_rate_limit(
+        &state,
+        "sms_send_phone",
+        &format!("{}:{phone_e164}", scene.as_str()),
+        5,
+        60,
+    )
+    .await?;
+    let ip_decision = enforce_auth_rate_limit(
+        &state,
+        "sms_send_ip",
+        &format!(
+            "{}:{}",
+            scene.as_str(),
+            ip_hash.clone().unwrap_or_else(|| "unknown".to_string())
+        ),
+        20,
+        60,
+    )
+    .await?;
+    let resp_headers = build_rate_limit_headers(&phone_decision)?;
+    if !phone_decision.allowed || !ip_decision.allowed {
+        let body = Json(ErrorOutput::new("auth_sms_send_rate_limited"));
+        return Ok((StatusCode::TOO_MANY_REQUESTS, resp_headers, body).into_response());
+    }
+
+    if sms_code_cooldown_active(&state, scene, &phone_e164).await? {
+        let body = Json(ErrorOutput::new("auth_sms_send_rate_limited"));
+        return Ok((StatusCode::TOO_MANY_REQUESTS, resp_headers, body).into_response());
+    }
+
+    let code = generate_sms_code();
+    store_sms_code(&state, scene, &phone_e164, &code).await?;
+    insert_sms_audit_log(
+        &state,
+        SmsAuditLogInput {
+            phone_e164: &phone_e164,
+            scene,
+            action: "send",
+            result: "sent",
+            reason: None,
+            request_ip_hash: ip_hash.as_deref(),
+            code_plain: Some(&code),
+            user_id: None,
+        },
+    )
+    .await?;
+
+    let debug_code = if !runtime_env_is_production() && sms_provider_name() == SMS_PROVIDER_MOCK {
+        Some(code)
+    } else {
+        None
+    };
+    Ok((
+        StatusCode::OK,
+        resp_headers,
+        Json(SendSmsCodeV2Output {
+            sent: true,
+            ttl_secs: SMS_CODE_TTL_SECS,
+            cooldown_secs: SMS_COOLDOWN_SECS,
+            debug_code,
+        }),
+    )
+        .into_response())
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/auth/v2/signup/phone",
+    request_body = SignupPhoneV2Input,
+    responses(
+        (status = 201, description = "User created", body = AuthOutput),
+        (status = 400, description = "Invalid input", body = ErrorOutput),
+        (status = 401, description = "Auth error", body = ErrorOutput),
+        (status = 409, description = "Conflict", body = ErrorOutput),
+    )
+)]
+pub(crate) async fn signup_phone_v2_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(input): Json<SignupPhoneV2Input>,
+) -> Result<impl IntoResponse, AppError> {
+    let phone_e164 = normalize_cn_phone_e164(&input.phone)
+        .ok_or_else(|| AppError::AuthError("auth_sms_code_invalid".to_string()))?;
+    verify_sms_code(
+        &state,
+        SmsScene::SignupPhone,
+        &phone_e164,
+        &input.sms_code,
+        None,
+    )
+    .await?;
+
+    let fullname = if input.fullname.trim().is_empty() {
+        build_default_fullname_from_phone(&phone_e164)
+    } else {
+        input.fullname.trim().to_string()
+    };
+    let user = state
+        .create_user_with_auto_workspace(&CreateUserAutoWorkspaceInput {
+            fullname,
+            email: None,
+            phone_e164: phone_e164.clone(),
+            password: input.password.clone(),
+            phone_bind_required: false,
+        })
+        .await?;
+
+    let (status, resp_headers, body) =
+        issue_auth_success_response(&state, &headers, user, StatusCode::CREATED).await?;
+    Ok((status, resp_headers, Json(body)))
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/auth/v2/signup/email",
+    request_body = SignupEmailV2Input,
+    responses(
+        (status = 201, description = "User created", body = AuthOutput),
+        (status = 400, description = "Invalid input", body = ErrorOutput),
+        (status = 401, description = "Auth error", body = ErrorOutput),
+        (status = 409, description = "Conflict", body = ErrorOutput),
+    )
+)]
+pub(crate) async fn signup_email_v2_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(input): Json<SignupEmailV2Input>,
+) -> Result<impl IntoResponse, AppError> {
+    let email = normalize_email(&input.email)
+        .ok_or_else(|| AppError::AuthError("auth_access_invalid".to_string()))?;
+    let phone_e164 = normalize_cn_phone_e164(&input.phone)
+        .ok_or_else(|| AppError::AuthError("auth_sms_code_invalid".to_string()))?;
+    verify_sms_code(
+        &state,
+        SmsScene::BindPhone,
+        &phone_e164,
+        &input.sms_code,
+        None,
+    )
+    .await?;
+
+    let fullname = if input.fullname.trim().is_empty() {
+        build_default_fullname_from_phone(&phone_e164)
+    } else {
+        input.fullname.trim().to_string()
+    };
+    let user = state
+        .create_user_with_auto_workspace(&CreateUserAutoWorkspaceInput {
+            fullname,
+            email: Some(email),
+            phone_e164: phone_e164.clone(),
+            password: input.password.clone(),
+            phone_bind_required: false,
+        })
+        .await?;
+
+    let (status, resp_headers, body) =
+        issue_auth_success_response(&state, &headers, user, StatusCode::CREATED).await?;
+    Ok((status, resp_headers, Json(body)))
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/auth/v2/signin/password",
+    request_body = SigninPasswordV2Input,
+    responses(
+        (status = 200, description = "User signed in", body = AuthOutput),
+        (status = 400, description = "Invalid input", body = ErrorOutput),
+        (status = 401, description = "Auth error", body = ErrorOutput),
+        (status = 429, description = "Rate limited", body = ErrorOutput),
+    )
+)]
+pub(crate) async fn signin_password_v2_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(input): Json<SigninPasswordV2Input>,
+) -> Result<Response, AppError> {
+    let account_type = AccountType::parse(&input.account_type)
+        .ok_or_else(|| AppError::AuthError("auth_access_invalid".to_string()))?;
+    let limiter_account = input.account.trim().to_ascii_lowercase();
+    let decision = enforce_rate_limit(
+        &state,
+        "signin_v2_password",
+        &limiter_account,
+        SIGNIN_RATE_LIMIT_PER_WINDOW,
+        SIGNIN_RATE_LIMIT_WINDOW_SECS,
+    )
+    .await;
+    let resp_headers = build_rate_limit_headers(&decision)?;
+    if !decision.allowed {
+        let body = Json(ErrorOutput::new("rate_limit_exceeded:signin_v2_password"));
+        return Ok((StatusCode::TOO_MANY_REQUESTS, resp_headers, body).into_response());
+    }
+
+    let user = match account_type {
+        AccountType::Email => {
+            let email = normalize_email(&input.account)
+                .ok_or_else(|| AppError::AuthError("auth_access_invalid".to_string()))?;
+            state
+                .verify_user(&SigninUser {
+                    email,
+                    password: input.password.clone(),
+                })
+                .await?
+        }
+        AccountType::Phone => {
+            let phone_e164 = normalize_cn_phone_e164(&input.account)
+                .ok_or_else(|| AppError::AuthError("auth_access_invalid".to_string()))?;
+            state
+                .verify_user_by_phone_password(&phone_e164, &input.password)
+                .await?
+        }
+    };
+
+    let Some(user) = user else {
+        let body = Json(ErrorOutput::new("auth_access_invalid"));
+        return Ok((StatusCode::UNAUTHORIZED, resp_headers, body).into_response());
+    };
+    let (status, auth_headers, body) =
+        issue_auth_success_response(&state, &headers, user, StatusCode::OK).await?;
+    Ok((
+        status,
+        merge_headers(resp_headers, auth_headers),
+        Json(body),
+    )
+        .into_response())
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/auth/v2/signin/otp",
+    request_body = SigninOtpV2Input,
+    responses(
+        (status = 200, description = "User signed in", body = AuthOutput),
+        (status = 400, description = "Invalid input", body = ErrorOutput),
+        (status = 401, description = "Auth error", body = ErrorOutput),
+        (status = 429, description = "Rate limited", body = ErrorOutput),
+    )
+)]
+pub(crate) async fn signin_otp_v2_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(input): Json<SigninOtpV2Input>,
+) -> Result<Response, AppError> {
+    let phone_e164 = normalize_cn_phone_e164(&input.phone)
+        .ok_or_else(|| AppError::AuthError("auth_sms_code_invalid".to_string()))?;
+    verify_sms_code(
+        &state,
+        SmsScene::SigninPhoneOtp,
+        &phone_e164,
+        &input.sms_code,
+        None,
+    )
+    .await?;
+    let Some(user) = state.find_user_by_phone(&phone_e164).await? else {
+        return Err(AppError::AuthError(
+            "auth_account_not_registered".to_string(),
+        ));
+    };
+    let (status, resp_headers, body) =
+        issue_auth_success_response(&state, &headers, user, StatusCode::OK).await?;
+    Ok((status, resp_headers, Json(body)).into_response())
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/auth/v2/wechat/challenge",
+    responses(
+        (status = 200, description = "Wechat challenge issued", body = WechatChallengeV2Output),
+        (status = 401, description = "Auth error", body = ErrorOutput),
+    )
+)]
+pub(crate) async fn wechat_challenge_v2_handler(
+    State(state): State<AppState>,
+) -> Result<impl IntoResponse, AppError> {
+    let nonce = Uuid::now_v7().to_string();
+    let state_value = format!("{nonce}:{}", Uuid::now_v7());
+    store_wechat_challenge(&state, &nonce, &state_value).await?;
+    Ok((
+        StatusCode::OK,
+        Json(WechatChallengeV2Output {
+            state: state_value,
+            expires_in_secs: WECHAT_CHALLENGE_TTL_SECS,
+            app_id: wechat_app_id(),
+        }),
+    ))
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/auth/v2/wechat/signin",
+    request_body = WechatSigninV2Input,
+    responses(
+        (status = 200, description = "Wechat signin result", body = WechatSigninV2Output),
+        (status = 401, description = "Auth error", body = ErrorOutput),
+    )
+)]
+pub(crate) async fn wechat_signin_v2_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(input): Json<WechatSigninV2Input>,
+) -> Result<impl IntoResponse, AppError> {
+    verify_wechat_challenge_state(&state, &input.state).await?;
+    let identity = resolve_wechat_identity_from_code(&input.code)?;
+
+    if let Some(user) = find_user_by_wechat_identity(&state, &identity).await? {
+        let (status, resp_headers, body) =
+            issue_auth_success_response(&state, &headers, user, StatusCode::OK).await?;
+        return Ok((
+            status,
+            resp_headers,
+            Json(WechatSigninV2Output {
+                bind_required: false,
+                wechat_ticket: None,
+                access_token: Some(body.access_token),
+                token_type: Some(body.token_type),
+                expires_in_secs: Some(body.expires_in_secs),
+                user: Some(body.user),
+            }),
+        ));
+    }
+
+    let ticket = Uuid::now_v7().to_string();
+    let payload = WechatBindTicketPayload {
+        provider_user_id: identity.provider_user_id,
+        provider_unionid: identity.provider_unionid,
+        nickname: identity.nickname,
+    };
+    store_wechat_bind_ticket(&state, &ticket, &payload).await?;
+    Ok((
+        StatusCode::OK,
+        HeaderMap::new(),
+        Json(WechatSigninV2Output {
+            bind_required: true,
+            wechat_ticket: Some(ticket),
+            access_token: None,
+            token_type: None,
+            expires_in_secs: None,
+            user: None,
+        }),
+    ))
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/auth/v2/wechat/bind-phone",
+    request_body = WechatBindPhoneV2Input,
+    responses(
+        (status = 200, description = "Wechat bind and signin", body = WechatSigninV2Output),
+        (status = 401, description = "Auth error", body = ErrorOutput),
+        (status = 409, description = "Conflict", body = ErrorOutput),
+    )
+)]
+pub(crate) async fn wechat_bind_phone_v2_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(input): Json<WechatBindPhoneV2Input>,
+) -> Result<impl IntoResponse, AppError> {
+    let payload = load_wechat_bind_ticket(&state, &input.wechat_ticket)
+        .await?
+        .ok_or_else(|| AppError::AuthError("auth_wechat_bind_required".to_string()))?;
+    let phone_e164 = normalize_cn_phone_e164(&input.phone)
+        .ok_or_else(|| AppError::AuthError("auth_sms_code_invalid".to_string()))?;
+
+    verify_sms_code(
+        &state,
+        SmsScene::BindPhone,
+        &phone_e164,
+        &input.sms_code,
+        None,
+    )
+    .await?;
+
+    let user = if let Some(existing_user) = state.find_user_by_phone(&phone_e164).await? {
+        upsert_wechat_identity_for_user(
+            &state,
+            existing_user.id,
+            &payload.provider_user_id,
+            payload.provider_unionid.as_deref(),
+        )
+        .await?;
+        state
+            .bind_phone_for_user(existing_user.id, &phone_e164)
+            .await?
+    } else {
+        let fullname = if input.fullname.trim().is_empty() {
+            payload
+                .nickname
+                .unwrap_or_else(|| build_default_fullname_from_phone(&phone_e164))
+        } else {
+            input.fullname.trim().to_string()
+        };
+        let new_user = state
+            .create_user_with_auto_workspace(&CreateUserAutoWorkspaceInput {
+                fullname,
+                email: None,
+                phone_e164: phone_e164.clone(),
+                password: input.password.clone(),
+                phone_bind_required: false,
+            })
+            .await?;
+        upsert_wechat_identity_for_user(
+            &state,
+            new_user.id,
+            &payload.provider_user_id,
+            payload.provider_unionid.as_deref(),
+        )
+        .await?;
+        new_user
+    };
+
+    let (status, resp_headers, body) =
+        issue_auth_success_response(&state, &headers, user, StatusCode::OK).await?;
+    Ok((
+        status,
+        resp_headers,
+        Json(WechatSigninV2Output {
+            bind_required: false,
+            wechat_ticket: None,
+            access_token: Some(body.access_token),
+            token_type: Some(body.token_type),
+            expires_in_secs: Some(body.expires_in_secs),
+            user: Some(body.user),
+        }),
+    ))
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/auth/v2/phone/bind",
+    request_body = BindPhoneV2Input,
+    responses(
+        (status = 200, description = "Phone bind result", body = BindPhoneV2Output),
+        (status = 401, description = "Auth error", body = ErrorOutput),
+        (status = 409, description = "Conflict", body = ErrorOutput),
+    ),
+    security(("token" = []))
+)]
+pub(crate) async fn bind_phone_v2_handler(
+    Extension(user): Extension<User>,
+    State(state): State<AppState>,
+    Json(input): Json<BindPhoneV2Input>,
+) -> Result<impl IntoResponse, AppError> {
+    let phone_e164 = normalize_cn_phone_e164(&input.phone)
+        .ok_or_else(|| AppError::AuthError("auth_sms_code_invalid".to_string()))?;
+    verify_sms_code(
+        &state,
+        SmsScene::BindPhone,
+        &phone_e164,
+        &input.sms_code,
+        Some(user.id),
+    )
+    .await?;
+    let bound_user = state.bind_phone_for_user(user.id, &phone_e164).await?;
+    Ok((
+        StatusCode::OK,
+        Json(BindPhoneV2Output {
+            bound: true,
+            user: bound_user,
+        }),
+    ))
 }
 
 #[utoipa::path(
@@ -794,6 +1696,549 @@ async fn revoke_family_by_sid(
     Ok(affected)
 }
 
+async fn issue_auth_success_response(
+    state: &AppState,
+    headers: &HeaderMap,
+    user: User,
+    status: StatusCode,
+) -> Result<(StatusCode, HeaderMap, AuthOutput), AppError> {
+    let ctx = session_context_from_headers(headers);
+    let token_version = load_user_token_version(state, user.id).await?;
+    let issued = issue_auth_tokens(state, &user, token_version)?;
+    persist_refresh_session(state, &user, &issued, &ctx).await?;
+    sync_session_state_to_redis(state, &issued, user.id, token_version).await?;
+
+    let mut resp_headers = HeaderMap::new();
+    set_refresh_cookie_header(
+        &mut resp_headers,
+        &issued.refresh_token,
+        REFRESH_TOKEN_TTL_SECS,
+    )?;
+    Ok((
+        status,
+        resp_headers,
+        AuthOutput {
+            access_token: issued.access_token,
+            token_type: "Bearer".to_string(),
+            expires_in_secs: ACCESS_TOKEN_TTL_SECS,
+            user,
+        },
+    ))
+}
+
+fn merge_headers(mut base: HeaderMap, extra: HeaderMap) -> HeaderMap {
+    for (name, value) in extra.into_iter() {
+        if let Some(name) = name {
+            base.append(name, value);
+        }
+    }
+    base
+}
+
+async fn enforce_auth_rate_limit(
+    state: &AppState,
+    scope: &str,
+    key: &str,
+    limit: u64,
+    window_secs: u64,
+) -> Result<crate::RateLimitDecision, AppError> {
+    match state
+        .redis
+        .check_rate_limit(scope, key, limit, window_secs)
+        .await
+    {
+        Ok(v) => Ok(v),
+        Err(err) => {
+            if auth_fail_closed_enabled(state) {
+                tracing::warn!(
+                    "auth v2 rate limit failed under fail-closed, scope={}, key={}, err={}",
+                    scope,
+                    key,
+                    err
+                );
+                return Err(AppError::AuthError(
+                    "auth_sms_send_rate_limited".to_string(),
+                ));
+            }
+            tracing::warn!(
+                "auth v2 rate limit degraded as fail-open, scope={}, key={}, err={}",
+                scope,
+                key,
+                err
+            );
+            let now = now_epoch_secs();
+            Ok(crate::RateLimitDecision {
+                allowed: true,
+                limit,
+                remaining: limit,
+                reset_at_epoch_secs: now + window_secs.max(1),
+            })
+        }
+    }
+}
+
+async fn sms_code_cooldown_active(
+    state: &AppState,
+    scene: SmsScene,
+    phone_e164: &str,
+) -> Result<bool, AppError> {
+    let scope = format!("auth:sms:cooldown:{}", scene.as_str());
+    if redis_is_disabled(state) {
+        let entry = fallback_get_sms_entry(scene, phone_e164);
+        if let Some(entry) = entry {
+            return Ok(entry.cooldown_until_epoch_secs > now_epoch_secs());
+        }
+        return Ok(false);
+    }
+    match state.redis.get_value(&scope, phone_e164).await {
+        Ok(v) => Ok(v.is_some()),
+        Err(err) => {
+            if auth_fail_closed_enabled(state) {
+                tracing::warn!("sms cooldown read failed under fail-closed: {}", err);
+                return Err(AppError::AuthError(
+                    "auth_sms_send_rate_limited".to_string(),
+                ));
+            }
+            tracing::warn!("sms cooldown read degraded as fail-open: {}", err);
+            Ok(false)
+        }
+    }
+}
+
+async fn store_sms_code(
+    state: &AppState,
+    scene: SmsScene,
+    phone_e164: &str,
+    code: &str,
+) -> Result<(), AppError> {
+    if redis_is_disabled(state) {
+        fallback_set_sms_entry(scene, phone_e164, code);
+        return Ok(());
+    }
+    let code_scope = format!("auth:sms:code:{}", scene.as_str());
+    let cooldown_scope = format!("auth:sms:cooldown:{}", scene.as_str());
+    let attempt_scope = format!("auth:sms:attempt:{}", scene.as_str());
+
+    let code_ret = state
+        .redis
+        .set_value_with_ttl(&code_scope, phone_e164, code, SMS_CODE_TTL_SECS)
+        .await;
+    let cooldown_ret = state
+        .redis
+        .set_value_with_ttl(&cooldown_scope, phone_e164, "1", SMS_COOLDOWN_SECS.max(1))
+        .await;
+    let clear_attempt_ret = state.redis.delete_key(&attempt_scope, phone_e164).await;
+
+    let code_ok = code_ret.is_ok() && cooldown_ret.is_ok() && clear_attempt_ret.is_ok();
+    if code_ok {
+        return Ok(());
+    }
+    if auth_fail_closed_enabled(state) {
+        return Err(AppError::AuthError(
+            "auth_sms_send_rate_limited".to_string(),
+        ));
+    }
+    tracing::warn!(
+        "sms code redis write degraded as fallback, code_ret={:?}, cooldown_ret={:?}, clear_attempt_ret={:?}",
+        code_ret.err(),
+        cooldown_ret.err(),
+        clear_attempt_ret.err(),
+    );
+    fallback_set_sms_entry(scene, phone_e164, code);
+    Ok(())
+}
+
+async fn verify_sms_code(
+    state: &AppState,
+    scene: SmsScene,
+    phone_e164: &str,
+    sms_code: &str,
+    user_id: Option<i64>,
+) -> Result<(), AppError> {
+    let expected = load_sms_code(state, scene, phone_e164).await?;
+    let Some(expected) = expected else {
+        insert_sms_audit_log(
+            state,
+            SmsAuditLogInput {
+                phone_e164,
+                scene,
+                action: "verify",
+                result: "failed",
+                reason: Some("expired"),
+                request_ip_hash: None,
+                code_plain: None,
+                user_id,
+            },
+        )
+        .await?;
+        return Err(AppError::AuthError("auth_sms_code_expired".to_string()));
+    };
+
+    if expected != sms_code.trim() {
+        let mut exhausted = false;
+        if redis_is_disabled(state) {
+            if let Some(mut entry) = fallback_get_sms_entry(scene, phone_e164) {
+                entry.failed_attempts += 1;
+                exhausted = entry.failed_attempts >= SMS_MAX_FAILED_ATTEMPTS;
+                if exhausted {
+                    fallback_clear_sms_entry(scene, phone_e164);
+                } else {
+                    fallback_update_sms_entry(scene, phone_e164, entry);
+                }
+            }
+        } else {
+            let decision = state
+                .redis
+                .check_rate_limit(
+                    &format!("auth:sms:attempt:{}", scene.as_str()),
+                    phone_e164,
+                    SMS_MAX_FAILED_ATTEMPTS,
+                    SMS_CODE_TTL_SECS,
+                )
+                .await;
+            exhausted = match decision {
+                Ok(v) => !v.allowed,
+                Err(err) => {
+                    if auth_fail_closed_enabled(state) {
+                        tracing::warn!("sms attempt read failed under fail-closed: {}", err);
+                        return Err(AppError::AuthError("auth_sms_code_invalid".to_string()));
+                    }
+                    false
+                }
+            };
+            if exhausted {
+                let _ = state
+                    .redis
+                    .delete_key(&format!("auth:sms:code:{}", scene.as_str()), phone_e164)
+                    .await;
+                let _ = state
+                    .redis
+                    .delete_key(&format!("auth:sms:attempt:{}", scene.as_str()), phone_e164)
+                    .await;
+            }
+        }
+        insert_sms_audit_log(
+            state,
+            SmsAuditLogInput {
+                phone_e164,
+                scene,
+                action: "verify",
+                result: "failed",
+                reason: Some("invalid"),
+                request_ip_hash: None,
+                code_plain: Some(sms_code),
+                user_id,
+            },
+        )
+        .await?;
+        if exhausted {
+            return Err(AppError::AuthError("auth_sms_code_expired".to_string()));
+        }
+        return Err(AppError::AuthError("auth_sms_code_invalid".to_string()));
+    }
+
+    if redis_is_disabled(state) {
+        fallback_clear_sms_entry(scene, phone_e164);
+    } else {
+        let _ = state
+            .redis
+            .delete_key(&format!("auth:sms:code:{}", scene.as_str()), phone_e164)
+            .await;
+        let _ = state
+            .redis
+            .delete_key(&format!("auth:sms:attempt:{}", scene.as_str()), phone_e164)
+            .await;
+    }
+    insert_sms_audit_log(
+        state,
+        SmsAuditLogInput {
+            phone_e164,
+            scene,
+            action: "verify",
+            result: "passed",
+            reason: None,
+            request_ip_hash: None,
+            code_plain: Some(sms_code),
+            user_id,
+        },
+    )
+    .await?;
+    Ok(())
+}
+
+async fn load_sms_code(
+    state: &AppState,
+    scene: SmsScene,
+    phone_e164: &str,
+) -> Result<Option<String>, AppError> {
+    if redis_is_disabled(state) {
+        return Ok(fallback_get_sms_entry(scene, phone_e164).map(|entry| entry.code));
+    }
+    let scope = format!("auth:sms:code:{}", scene.as_str());
+    match state.redis.get_value(&scope, phone_e164).await {
+        Ok(v) => Ok(v),
+        Err(err) => {
+            if auth_fail_closed_enabled(state) {
+                tracing::warn!("sms code read failed under fail-closed: {}", err);
+                return Err(AppError::AuthError("auth_sms_code_invalid".to_string()));
+            }
+            tracing::warn!("sms code read degraded as fallback: {}", err);
+            Ok(fallback_get_sms_entry(scene, phone_e164).map(|entry| entry.code))
+        }
+    }
+}
+
+async fn insert_sms_audit_log(
+    state: &AppState,
+    entry: SmsAuditLogInput<'_>,
+) -> Result<(), AppError> {
+    let code_hash = entry.code_plain.map(hash_with_sha1);
+    sqlx::query(
+        r#"
+        INSERT INTO auth_sms_audit_logs(
+            phone_e164, scene, provider, action, result, reason, request_ip_hash, code_hash, user_id
+        )
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+        "#,
+    )
+    .bind(entry.phone_e164)
+    .bind(entry.scene.as_str())
+    .bind(sms_provider_name())
+    .bind(entry.action)
+    .bind(entry.result)
+    .bind(entry.reason)
+    .bind(entry.request_ip_hash)
+    .bind(code_hash)
+    .bind(entry.user_id)
+    .execute(&state.pool)
+    .await?;
+    Ok(())
+}
+
+fn hash_with_sha1(input: &str) -> String {
+    let mut hasher = Sha1::new();
+    hasher.update(input.as_bytes());
+    format!("{:x}", hasher.finalize())
+}
+
+async fn store_wechat_challenge(
+    state: &AppState,
+    nonce: &str,
+    state_value: &str,
+) -> Result<(), AppError> {
+    if redis_is_disabled(state) {
+        fallback_set_wechat_challenge(nonce, state_value);
+        return Ok(());
+    }
+    let ret = state
+        .redis
+        .set_value_with_ttl(
+            "auth:wechat:challenge",
+            nonce,
+            state_value,
+            WECHAT_CHALLENGE_TTL_SECS,
+        )
+        .await;
+    match ret {
+        Ok(_) => Ok(()),
+        Err(err) => {
+            if auth_fail_closed_enabled(state) {
+                tracing::warn!("wechat challenge write failed under fail-closed: {}", err);
+                return Err(AppError::AuthError("auth_wechat_state_invalid".to_string()));
+            }
+            tracing::warn!("wechat challenge write degraded as fallback: {}", err);
+            fallback_set_wechat_challenge(nonce, state_value);
+            Ok(())
+        }
+    }
+}
+
+async fn verify_wechat_challenge_state(
+    state: &AppState,
+    state_value: &str,
+) -> Result<(), AppError> {
+    let nonce = extract_nonce_from_wechat_state(state_value)
+        .ok_or_else(|| AppError::AuthError("auth_wechat_state_invalid".to_string()))?;
+    if redis_is_disabled(state) {
+        let fallback = fallback_take_wechat_challenge(&nonce);
+        if fallback.as_deref() == Some(state_value) {
+            return Ok(());
+        }
+        return Err(AppError::AuthError("auth_wechat_state_invalid".to_string()));
+    }
+    match state.redis.get_value("auth:wechat:challenge", &nonce).await {
+        Ok(Some(expected)) if expected == state_value => {
+            let _ = state
+                .redis
+                .delete_key("auth:wechat:challenge", &nonce)
+                .await;
+            Ok(())
+        }
+        Ok(_) => Err(AppError::AuthError("auth_wechat_state_invalid".to_string())),
+        Err(err) => {
+            if auth_fail_closed_enabled(state) {
+                tracing::warn!("wechat challenge read failed under fail-closed: {}", err);
+                return Err(AppError::AuthError("auth_wechat_state_invalid".to_string()));
+            }
+            let fallback = fallback_take_wechat_challenge(&nonce);
+            if fallback.as_deref() == Some(state_value) {
+                return Ok(());
+            }
+            Err(AppError::AuthError("auth_wechat_state_invalid".to_string()))
+        }
+    }
+}
+
+async fn store_wechat_bind_ticket(
+    state: &AppState,
+    ticket: &str,
+    payload: &WechatBindTicketPayload,
+) -> Result<(), AppError> {
+    let payload_json = serde_json::to_string(payload).map_err(anyhow::Error::from)?;
+    if redis_is_disabled(state) {
+        fallback_set_wechat_bind_ticket(ticket, &payload_json);
+        return Ok(());
+    }
+    let ret = state
+        .redis
+        .set_value_with_ttl(
+            "auth:wechat:ticket",
+            ticket,
+            &payload_json,
+            WECHAT_BIND_TICKET_TTL_SECS,
+        )
+        .await;
+    match ret {
+        Ok(_) => Ok(()),
+        Err(err) => {
+            if auth_fail_closed_enabled(state) {
+                tracing::warn!("wechat bind ticket write failed under fail-closed: {}", err);
+                return Err(AppError::AuthError("auth_wechat_bind_required".to_string()));
+            }
+            tracing::warn!("wechat bind ticket write degraded as fallback: {}", err);
+            fallback_set_wechat_bind_ticket(ticket, &payload_json);
+            Ok(())
+        }
+    }
+}
+
+async fn load_wechat_bind_ticket(
+    state: &AppState,
+    ticket: &str,
+) -> Result<Option<WechatBindTicketPayload>, AppError> {
+    if redis_is_disabled(state) {
+        let raw = fallback_take_wechat_bind_ticket(ticket);
+        return match raw {
+            Some(v) => Ok(Some(serde_json::from_str(&v).map_err(anyhow::Error::from)?)),
+            None => Ok(None),
+        };
+    }
+    match state.redis.get_value("auth:wechat:ticket", ticket).await {
+        Ok(Some(value)) => {
+            let _ = state.redis.delete_key("auth:wechat:ticket", ticket).await;
+            Ok(Some(
+                serde_json::from_str(&value).map_err(anyhow::Error::from)?,
+            ))
+        }
+        Ok(None) => Ok(None),
+        Err(err) => {
+            if auth_fail_closed_enabled(state) {
+                tracing::warn!("wechat bind ticket read failed under fail-closed: {}", err);
+                return Err(AppError::AuthError("auth_wechat_bind_required".to_string()));
+            }
+            let raw = fallback_take_wechat_bind_ticket(ticket);
+            match raw {
+                Some(v) => Ok(Some(serde_json::from_str(&v).map_err(anyhow::Error::from)?)),
+                None => Ok(None),
+            }
+        }
+    }
+}
+
+async fn find_user_by_wechat_identity(
+    state: &AppState,
+    identity: &WechatIdentity,
+) -> Result<Option<User>, AppError> {
+    let mut user: Option<User> = sqlx::query_as(
+        r#"
+        SELECT
+            u.id, u.ws_id, u.fullname, COALESCE(u.email, '') AS email,
+            u.phone_e164, u.phone_verified_at, u.phone_bind_required, u.is_bot, u.created_at
+        FROM auth_external_identities i
+        JOIN users u ON u.id = i.user_id
+        WHERE i.provider = $1
+          AND (
+            i.provider_user_id = $2
+            OR ($3::varchar IS NOT NULL AND i.provider_unionid = $3)
+          )
+        ORDER BY i.updated_at DESC
+        LIMIT 1
+        "#,
+    )
+    .bind(WECHAT_PROVIDER)
+    .bind(&identity.provider_user_id)
+    .bind(identity.provider_unionid.as_deref())
+    .fetch_optional(&state.pool)
+    .await?;
+    if let Some(ref mut user_item) = user {
+        if let Some(ws) = state.find_workspace_by_id(user_item.ws_id as u64).await? {
+            user_item.ws_name = ws.name;
+        }
+    }
+    Ok(user)
+}
+
+async fn upsert_wechat_identity_for_user(
+    state: &AppState,
+    user_id: i64,
+    provider_user_id: &str,
+    provider_unionid: Option<&str>,
+) -> Result<(), AppError> {
+    if let Some(unionid) = provider_unionid {
+        let union_owner: Option<i64> = sqlx::query_scalar(
+            r#"
+            SELECT user_id
+            FROM auth_external_identities
+            WHERE provider = $1 AND provider_unionid = $2
+            "#,
+        )
+        .bind(WECHAT_PROVIDER)
+        .bind(unionid)
+        .fetch_optional(&state.pool)
+        .await?;
+        if let Some(owner) = union_owner {
+            if owner != user_id {
+                return Err(AppError::AuthError(
+                    "auth_wechat_identity_conflict".to_string(),
+                ));
+            }
+        }
+    }
+
+    sqlx::query(
+        r#"
+        INSERT INTO auth_external_identities(
+            provider, provider_user_id, provider_unionid, app_id, user_id, created_at, updated_at
+        )
+        VALUES ($1, $2, $3, $4, $5, NOW(), NOW())
+        ON CONFLICT (provider, provider_user_id)
+        DO UPDATE
+        SET provider_unionid = EXCLUDED.provider_unionid,
+            app_id = EXCLUDED.app_id,
+            user_id = EXCLUDED.user_id,
+            updated_at = NOW()
+        "#,
+    )
+    .bind(WECHAT_PROVIDER)
+    .bind(provider_user_id)
+    .bind(provider_unionid)
+    .bind(wechat_app_id())
+    .bind(user_id)
+    .execute(&state.pool)
+    .await?;
+    Ok(())
+}
+
 fn session_context_from_headers(headers: &HeaderMap) -> SessionContext {
     SessionContext {
         user_agent: headers
@@ -964,6 +2409,173 @@ mod tests {
         let body = refreshed.into_body().collect().await?.to_bytes();
         let ret: RefreshOutput = serde_json::from_slice(&body)?;
         assert!(!ret.access_token.is_empty());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn send_sms_code_v2_should_return_debug_code_in_mock_mode() -> Result<()> {
+        let (_tdb, state) = AppState::new_for_test().await?;
+        let response = send_sms_code_v2_handler(
+            State(state),
+            HeaderMap::new(),
+            Json(SendSmsCodeV2Input {
+                phone: "13800138000".to_string(),
+                scene: "signup_phone".to_string(),
+            }),
+        )
+        .await?
+        .into_response();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response.into_body().collect().await?.to_bytes();
+        let ret: SendSmsCodeV2Output = serde_json::from_slice(&body)?;
+        assert!(ret.sent);
+        assert!(ret.debug_code.is_some());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn signup_phone_v2_and_signin_password_v2_should_work() -> Result<()> {
+        let (_tdb, state) = AppState::new_for_test().await?;
+
+        let sms_response = send_sms_code_v2_handler(
+            State(state.clone()),
+            HeaderMap::new(),
+            Json(SendSmsCodeV2Input {
+                phone: "13800138011".to_string(),
+                scene: "signup_phone".to_string(),
+            }),
+        )
+        .await?
+        .into_response();
+        let sms_body = sms_response.into_body().collect().await?.to_bytes();
+        let sms_ret: SendSmsCodeV2Output = serde_json::from_slice(&sms_body)?;
+        let sms_code = sms_ret.debug_code.clone().expect("debug code");
+
+        let signup_response = signup_phone_v2_handler(
+            State(state.clone()),
+            HeaderMap::new(),
+            Json(SignupPhoneV2Input {
+                phone: "13800138011".to_string(),
+                sms_code,
+                password: "123456".to_string(),
+                fullname: "Phone User".to_string(),
+            }),
+        )
+        .await?
+        .into_response();
+        assert_eq!(signup_response.status(), StatusCode::CREATED);
+
+        let signin_response = signin_password_v2_handler(
+            State(state),
+            HeaderMap::new(),
+            Json(SigninPasswordV2Input {
+                account: "13800138011".to_string(),
+                account_type: "phone".to_string(),
+                password: "123456".to_string(),
+            }),
+        )
+        .await?
+        .into_response();
+        assert_eq!(signin_response.status(), StatusCode::OK);
+        let body = signin_response.into_body().collect().await?.to_bytes();
+        let ret: AuthOutput = serde_json::from_slice(&body)?;
+        assert!(ret.user.phone_e164.is_some());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn signin_otp_v2_should_reject_not_registered_phone() -> Result<()> {
+        let (_tdb, state) = AppState::new_for_test().await?;
+        let sms_response = send_sms_code_v2_handler(
+            State(state.clone()),
+            HeaderMap::new(),
+            Json(SendSmsCodeV2Input {
+                phone: "13800138022".to_string(),
+                scene: "signin_phone_otp".to_string(),
+            }),
+        )
+        .await?
+        .into_response();
+        let sms_body = sms_response.into_body().collect().await?.to_bytes();
+        let sms_ret: SendSmsCodeV2Output = serde_json::from_slice(&sms_body)?;
+        let sms_code = sms_ret.debug_code.expect("debug code");
+
+        let err = signin_otp_v2_handler(
+            State(state),
+            HeaderMap::new(),
+            Json(SigninOtpV2Input {
+                phone: "13800138022".to_string(),
+                sms_code,
+            }),
+        )
+        .await
+        .expect_err("unregistered phone should be rejected");
+        match err {
+            AppError::AuthError(code) => assert_eq!(code, "auth_account_not_registered"),
+            _ => panic!("expect auth error"),
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn wechat_bind_phone_v2_should_bind_or_create_and_signin() -> Result<()> {
+        let (_tdb, state) = AppState::new_for_test().await?;
+
+        let challenge_response = wechat_challenge_v2_handler(State(state.clone()))
+            .await?
+            .into_response();
+        assert_eq!(challenge_response.status(), StatusCode::OK);
+        let challenge_body = challenge_response.into_body().collect().await?.to_bytes();
+        let challenge: WechatChallengeV2Output = serde_json::from_slice(&challenge_body)?;
+
+        let signin_response = wechat_signin_v2_handler(
+            State(state.clone()),
+            HeaderMap::new(),
+            Json(WechatSigninV2Input {
+                state: challenge.state,
+                code: "mock_wechat_user_01:union01:Tester".to_string(),
+            }),
+        )
+        .await?
+        .into_response();
+        assert_eq!(signin_response.status(), StatusCode::OK);
+        let signin_body = signin_response.into_body().collect().await?.to_bytes();
+        let signin_ret: WechatSigninV2Output = serde_json::from_slice(&signin_body)?;
+        assert!(signin_ret.bind_required);
+        let ticket = signin_ret.wechat_ticket.expect("wechat ticket");
+
+        let sms_response = send_sms_code_v2_handler(
+            State(state.clone()),
+            HeaderMap::new(),
+            Json(SendSmsCodeV2Input {
+                phone: "13800138033".to_string(),
+                scene: "bind_phone".to_string(),
+            }),
+        )
+        .await?
+        .into_response();
+        let sms_body = sms_response.into_body().collect().await?.to_bytes();
+        let sms_ret: SendSmsCodeV2Output = serde_json::from_slice(&sms_body)?;
+        let sms_code = sms_ret.debug_code.expect("debug code");
+
+        let bind_response = wechat_bind_phone_v2_handler(
+            State(state),
+            HeaderMap::new(),
+            Json(WechatBindPhoneV2Input {
+                wechat_ticket: ticket,
+                phone: "13800138033".to_string(),
+                sms_code,
+                password: "123456".to_string(),
+                fullname: "Wechat User".to_string(),
+            }),
+        )
+        .await?
+        .into_response();
+        assert_eq!(bind_response.status(), StatusCode::OK);
+        let bind_body = bind_response.into_body().collect().await?.to_bytes();
+        let bind_ret: WechatSigninV2Output = serde_json::from_slice(&bind_body)?;
+        assert!(!bind_ret.bind_required);
+        assert!(bind_ret.access_token.is_some());
         Ok(())
     }
 }

@@ -231,6 +231,7 @@ pub async fn get_router(state: AppState) -> Result<Router, AppError> {
         .route("/auth/logout", post(logout_handler))
         .route("/auth/logout-all", post(logout_all_handler))
         .route("/auth/sessions", get(list_auth_sessions_handler))
+        .route("/auth/v2/phone/bind", post(bind_phone_v2_handler))
         .route(
             "/auth/sessions/:sid",
             axum::routing::delete(revoke_auth_session_handler),
@@ -256,6 +257,20 @@ pub async fn get_router(state: AppState) -> Result<Router, AppError> {
         .route("/signin", post(signin_handler))
         .route("/signup", post(signup_handler))
         .route("/auth/refresh", post(refresh_handler))
+        .route("/auth/v2/sms/send", post(send_sms_code_v2_handler))
+        .route("/auth/v2/signup/phone", post(signup_phone_v2_handler))
+        .route("/auth/v2/signup/email", post(signup_email_v2_handler))
+        .route("/auth/v2/signin/password", post(signin_password_v2_handler))
+        .route("/auth/v2/signin/otp", post(signin_otp_v2_handler))
+        .route(
+            "/auth/v2/wechat/challenge",
+            post(wechat_challenge_v2_handler),
+        )
+        .route("/auth/v2/wechat/signin", post(wechat_signin_v2_handler))
+        .route(
+            "/auth/v2/wechat/bind-phone",
+            post(wechat_bind_phone_v2_handler),
+        )
         .layer(cors);
 
     let app = Router::new()
