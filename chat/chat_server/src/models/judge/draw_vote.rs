@@ -264,7 +264,7 @@ impl AppState {
                 "debate session id {session_id}"
             )));
         };
-        if session_ws_id != user.ws_id {
+        if session_ws_id != 1_i64 {
             return Err(AppError::NotFound(format!(
                 "debate session id {session_id}"
             )));
@@ -367,7 +367,7 @@ impl AppState {
                 "debate session id {session_id}"
             )));
         };
-        if session_ws_id != user.ws_id {
+        if session_ws_id != 1_i64 {
             return Err(AppError::NotFound(format!(
                 "debate session id {session_id}"
             )));

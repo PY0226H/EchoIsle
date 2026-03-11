@@ -73,9 +73,7 @@ mod tests {
     #[tokio::test]
     async fn create_access_tickets_should_return_audience_scoped_tickets() -> Result<()> {
         let state = test_state()?;
-        let mut user = chat_core::User::new(1, "Tyr Chen", "tchen@acme.org");
-        user.ws_id = 1;
-        user.ws_name = "acme".to_string();
+        let user = chat_core::User::new(1, "Tyr Chen", "tchen@acme.org");
 
         let response = create_access_tickets_handler(Extension(user.clone()), State(state.clone()))
             .await?

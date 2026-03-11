@@ -15,7 +15,7 @@ impl AppState {
             .load_session_for_action(&mut tx, session_id as i64)
             .await?
             .ok_or_else(|| AppError::NotFound(format!("debate session id {session_id}")))?;
-        if session.ws_id != user.ws_id {
+        if session.ws_id != 1_i64 {
             return Err(AppError::NotFound(format!(
                 "debate session id {session_id}"
             )));
@@ -52,7 +52,7 @@ impl AppState {
             RETURNING id, ws_id, session_id, user_id, side, content, created_at
             "#,
         )
-        .bind(user.ws_id)
+        .bind(1_i64)
         .bind(session_id as i64)
         .bind(user.id)
         .bind(side)
@@ -86,7 +86,7 @@ impl AppState {
             .load_session_for_action(&mut tx, session_id as i64)
             .await?
             .ok_or_else(|| AppError::NotFound(format!("debate session id {session_id}")))?;
-        if session.ws_id != user.ws_id {
+        if session.ws_id != 1_i64 {
             return Err(AppError::NotFound(format!(
                 "debate session id {session_id}"
             )));
@@ -126,7 +126,7 @@ impl AppState {
             .load_session_for_action(&mut tx, session_id as i64)
             .await?
             .ok_or_else(|| AppError::NotFound(format!("debate session id {session_id}")))?;
-        if session.ws_id != user.ws_id {
+        if session.ws_id != 1_i64 {
             return Err(AppError::NotFound(format!(
                 "debate session id {session_id}"
             )));
@@ -206,7 +206,7 @@ impl AppState {
         .fetch_optional(&mut *tx)
         .await?
         .ok_or_else(|| AppError::NotFound(format!("debate message id {message_id}")))?;
-        if msg.ws_id != user.ws_id {
+        if msg.ws_id != 1_i64 {
             return Err(AppError::NotFound(format!(
                 "debate message id {message_id}"
             )));
@@ -327,7 +327,7 @@ impl AppState {
             RETURNING id, session_id, message_id, pin_seconds, expires_at, cost_coins
             "#,
         )
-        .bind(user.ws_id)
+        .bind(1_i64)
         .bind(msg.session_id)
         .bind(msg.id)
         .bind(user.id)
@@ -356,7 +356,7 @@ impl AppState {
         if let Err(err) = self
             .event_bus
             .publish_debate_message_pinned(DebateMessagePinnedEvent {
-                ws_id: user.ws_id as u64,
+                ws_id: 1_i64 as u64,
                 session_id: pin.session_id as u64,
                 message_id: pin.message_id as u64,
                 user_id: user.id as u64,

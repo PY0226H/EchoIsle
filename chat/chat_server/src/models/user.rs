@@ -39,7 +39,7 @@ impl AppState {
     /// Find a user by email
     pub async fn find_user_by_email(&self, email: &str) -> Result<Option<User>, AppError> {
         let user = sqlx::query_as(
-            "SELECT id, ws_id, fullname, COALESCE(email, '') AS email, phone_e164, phone_verified_at, phone_bind_required, created_at FROM users WHERE email = $1",
+            "SELECT id, fullname, COALESCE(email, '') AS email, phone_e164, phone_verified_at, phone_bind_required, created_at FROM users WHERE email = $1",
         )
         .bind(email)
         .fetch_optional(&self.pool)
@@ -49,7 +49,7 @@ impl AppState {
 
     pub async fn find_user_by_phone(&self, phone_e164: &str) -> Result<Option<User>, AppError> {
         let user = sqlx::query_as(
-            "SELECT id, ws_id, fullname, COALESCE(email, '') AS email, phone_e164, phone_verified_at, phone_bind_required, created_at FROM users WHERE phone_e164 = $1",
+            "SELECT id, fullname, COALESCE(email, '') AS email, phone_e164, phone_verified_at, phone_bind_required, created_at FROM users WHERE phone_e164 = $1",
         )
         .bind(phone_e164)
         .fetch_optional(&self.pool)
@@ -60,7 +60,7 @@ impl AppState {
     // find a user by id
     pub async fn find_user_by_id(&self, id: i64) -> Result<Option<User>, AppError> {
         let user = sqlx::query_as(
-            "SELECT id, ws_id, fullname, COALESCE(email, '') AS email, phone_e164, phone_verified_at, phone_bind_required, created_at FROM users WHERE id = $1",
+            "SELECT id, fullname, COALESCE(email, '') AS email, phone_e164, phone_verified_at, phone_bind_required, created_at FROM users WHERE id = $1",
         )
         .bind(id)
         .fetch_optional(&self.pool)
@@ -83,12 +83,11 @@ impl AppState {
         let is_bot = is_bot_email(&input.email);
         let user: User = sqlx::query_as(
             r#"
-            INSERT INTO users (ws_id, email, fullname, password_hash, is_bot)
-            VALUES ($1, $2, $3, $4, $5)
-            RETURNING id, ws_id, COALESCE('default', '') AS ws_name, fullname, email, is_bot, created_at
+            INSERT INTO users (email, fullname, password_hash, is_bot)
+            VALUES ($1, $2, $3, $4)
+            RETURNING id, fullname, email, is_bot, created_at
             "#,
         )
-        .bind(1_i64)
         .bind(&input.email)
         .bind(&input.fullname)
         .bind(password_hash)
@@ -102,7 +101,7 @@ impl AppState {
     /// Verify email and password
     pub async fn verify_user(&self, input: &SigninUser) -> Result<Option<User>, AppError> {
         let user: Option<User> = sqlx::query_as(
-            "SELECT id, ws_id, fullname, COALESCE(email, '') AS email, phone_e164, phone_verified_at, phone_bind_required, password_hash, created_at FROM users WHERE email = $1",
+            "SELECT id, fullname, COALESCE(email, '') AS email, phone_e164, phone_verified_at, phone_bind_required, password_hash, created_at FROM users WHERE email = $1",
         )
         .bind(&input.email)
         .fetch_optional(&self.pool)
@@ -128,7 +127,7 @@ impl AppState {
         password: &str,
     ) -> Result<Option<User>, AppError> {
         let user: Option<User> = sqlx::query_as(
-            "SELECT id, ws_id, fullname, COALESCE(email, '') AS email, phone_e164, phone_verified_at, phone_bind_required, password_hash, created_at FROM users WHERE phone_e164 = $1",
+            "SELECT id, fullname, COALESCE(email, '') AS email, phone_e164, phone_verified_at, phone_bind_required, password_hash, created_at FROM users WHERE phone_e164 = $1",
         )
         .bind(phone_e164)
         .fetch_optional(&self.pool)
@@ -183,17 +182,16 @@ impl AppState {
         let user: User = sqlx::query_as(
             r#"
             INSERT INTO users (
-                ws_id, email, phone_e164, phone_verified_at, phone_bind_required,
+                email, phone_e164, phone_verified_at, phone_bind_required,
                 fullname, password_hash, is_bot
             )
-            VALUES ($1, $2, $3, NOW(), $4, $5, $6, $7)
+            VALUES ($1, $2, NOW(), $3, $4, $5, $6)
             RETURNING
-                id, ws_id, COALESCE('default', '') AS ws_name, fullname, COALESCE(email, '') AS email,
+                id, fullname, COALESCE(email, '') AS email,
                 phone_e164, phone_verified_at, phone_bind_required,
                 is_bot, created_at
             "#,
         )
-        .bind(1_i64)
         .bind(input.email.as_deref())
         .bind(&input.phone_e164)
         .bind(input.phone_bind_required)
@@ -231,7 +229,7 @@ impl AppState {
                 phone_bind_required = false
             WHERE id = $1
             RETURNING
-                id, ws_id, COALESCE('default', '') AS ws_name, fullname, COALESCE(email, '') AS email,
+                id, fullname, COALESCE(email, '') AS email,
                 phone_e164, phone_verified_at, phone_bind_required,
                 is_bot, created_at
             "#,
@@ -384,8 +382,7 @@ mod tests {
     async fn create_user_should_set_platform_scope_default() -> Result<()> {
         let (_tdb, state) = AppState::new_for_test().await?;
         let input = CreateUser::new("Txn Owner", "txn-owner@acme.org", "hunter42");
-        let user = state.create_user(&input).await?;
-        assert_eq!(user.ws_id, 1);
+        let _user = state.create_user(&input).await?;
         Ok(())
     }
 

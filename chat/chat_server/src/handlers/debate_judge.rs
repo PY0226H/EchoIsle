@@ -44,7 +44,7 @@ pub(crate) async fn request_judge_job_handler(
     headers: HeaderMap,
     Json(input): Json<RequestJudgeJobInput>,
 ) -> Result<impl IntoResponse, AppError> {
-    let limiter_key = format!("ws:{}:user:{}:session:{}", user.ws_id, user.id, id);
+    let limiter_key = format!("ws:{}:user:{}:session:{}", 1_i64, user.id, id);
     let decision = enforce_rate_limit(
         &state,
         "judge_job_request",

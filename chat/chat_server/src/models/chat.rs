@@ -23,12 +23,7 @@ pub struct UpdateChatMembers {
 
 #[allow(dead_code)]
 impl AppState {
-    pub async fn create_chat(
-        &self,
-        input: CreateChat,
-        user_id: u64,
-        ws_id: u64,
-    ) -> Result<Chat, AppError> {
+    pub async fn create_chat(&self, input: CreateChat, user_id: u64) -> Result<Chat, AppError> {
         let members = normalize_member_ids(input.members)?;
         let len = members.len();
         if len < 2 {
@@ -59,8 +54,7 @@ impl AppState {
         }
 
         // verify if all members exist
-        self.ensure_users_exist_in_platform_scope(ws_id, &members)
-            .await?;
+        self.ensure_users_exist_in_platform_scope(&members).await?;
 
         let chat_type = match (&input.name, len) {
             (None, 2) => ChatType::Single,
@@ -76,12 +70,11 @@ impl AppState {
 
         let chat = sqlx::query_as(
             r#"
-            INSERT INTO chats (ws_id, name, type, members)
-            VALUES ($1, $2, $3, $4)
-            RETURNING id, ws_id, name, type, members, agents, created_at
+            INSERT INTO chats (name, type, members)
+            VALUES ($1, $2, $3)
+            RETURNING id, name, type, members, agents, created_at
             "#,
         )
-        .bind(ws_id as i64)
         .bind(input.name)
         .bind(chat_type)
         .bind(members)
@@ -91,15 +84,14 @@ impl AppState {
         Ok(chat)
     }
 
-    pub async fn fetch_chats(&self, user_id: u64, ws_id: u64) -> Result<Vec<Chat>, AppError> {
+    pub async fn fetch_chats(&self, user_id: u64) -> Result<Vec<Chat>, AppError> {
         let chats = sqlx::query_as(
             r#"
-            SELECT id, ws_id, name, type, members, agents, created_at
+            SELECT id, name, type, members, agents, created_at
             FROM chats
-            WHERE ws_id = $1 AND $2 = ANY(members)
+            WHERE $1 = ANY(members)
             "#,
         )
-        .bind(ws_id as i64)
         .bind(user_id as i64)
         .fetch_all(&self.pool)
         .await?;
@@ -110,7 +102,7 @@ impl AppState {
     pub async fn get_chat_by_id(&self, id: u64) -> Result<Option<Chat>, AppError> {
         let chat = sqlx::query_as(
             r#"
-            SELECT id, ws_id, name, type, members, agents, created_at
+            SELECT id, name, type, members, agents, created_at
             FROM chats
             WHERE id = $1
             "#,
@@ -122,23 +114,22 @@ impl AppState {
         Ok(chat)
     }
 
-    pub async fn join_chat(&self, id: u64, ws_id: u64, user_id: u64) -> Result<Chat, AppError> {
-        self.ensure_users_exist_in_platform_scope(ws_id, &[user_id as i64])
+    pub async fn join_chat(&self, id: u64, user_id: u64) -> Result<Chat, AppError> {
+        self.ensure_users_exist_in_platform_scope(&[user_id as i64])
             .await?;
 
         let chat = sqlx::query_as(
             r#"
             UPDATE chats
             SET members = CASE
-                WHEN $3 = ANY(members) THEN members
-                ELSE array_append(members, $3)
+                WHEN $2 = ANY(members) THEN members
+                ELSE array_append(members, $2)
             END
-            WHERE id = $1 AND ws_id = $2 AND type = 'public_channel'::chat_type
-            RETURNING id, ws_id, name, type, members, agents, created_at
+            WHERE id = $1 AND type = 'public_channel'::chat_type
+            RETURNING id, name, type, members, agents, created_at
             "#,
         )
         .bind(id as i64)
-        .bind(ws_id as i64)
         .bind(user_id as i64)
         .fetch_optional(&self.pool)
         .await?;
@@ -146,7 +137,7 @@ impl AppState {
             return Ok(chat);
         }
 
-        let Some(chat) = self.get_chat_by_id_and_ws(id, ws_id).await? else {
+        let Some(chat) = self.get_chat_by_id_in_platform(id).await? else {
             return Err(AppError::NotFound(format!("chat id {id}")));
         };
         if chat.r#type != ChatType::PublicChannel {
@@ -160,8 +151,8 @@ impl AppState {
         )))
     }
 
-    pub async fn leave_chat(&self, id: u64, ws_id: u64, user_id: u64) -> Result<Chat, AppError> {
-        let Some(chat) = self.get_chat_by_id_and_ws(id, ws_id).await? else {
+    pub async fn leave_chat(&self, id: u64, user_id: u64) -> Result<Chat, AppError> {
+        let Some(chat) = self.get_chat_by_id_in_platform(id).await? else {
             return Err(AppError::NotFound(format!("chat id {id}")));
         };
         if chat.r#type == ChatType::Single {
@@ -185,13 +176,12 @@ impl AppState {
             r#"
             UPDATE chats
             SET members = array_remove(members, $1)
-            WHERE id = $2 AND ws_id = $3
-            RETURNING id, ws_id, name, type, members, agents, created_at
+            WHERE id = $2
+            RETURNING id, name, type, members, agents, created_at
             "#,
         )
         .bind(user_id as i64)
         .bind(id as i64)
-        .bind(ws_id as i64)
         .fetch_optional(&self.pool)
         .await?;
 
@@ -204,7 +194,6 @@ impl AppState {
     pub async fn add_chat_members(
         &self,
         id: u64,
-        ws_id: u64,
         actor_id: u64,
         input: UpdateChatMembers,
     ) -> Result<Chat, AppError> {
@@ -215,7 +204,7 @@ impl AppState {
             ));
         }
 
-        let Some(chat) = self.get_chat_by_id_and_ws(id, ws_id).await? else {
+        let Some(chat) = self.get_chat_by_id_in_platform(id).await? else {
             return Err(AppError::NotFound(format!("chat id {id}")));
         };
         if chat.r#type == ChatType::Single {
@@ -229,7 +218,7 @@ impl AppState {
                 chat_id: id,
             });
         }
-        self.ensure_users_exist_in_platform_scope(ws_id, &member_ids)
+        self.ensure_users_exist_in_platform_scope(&member_ids)
             .await?;
 
         let updated = sqlx::query_as(
@@ -240,13 +229,12 @@ impl AppState {
                 FROM unnest(chats.members || $1::bigint[]) AS member_id
                 ORDER BY member_id
             )
-            WHERE id = $2 AND ws_id = $3
-            RETURNING id, ws_id, name, type, members, agents, created_at
+            WHERE id = $2
+            RETURNING id, name, type, members, agents, created_at
             "#,
         )
         .bind(&member_ids)
         .bind(id as i64)
-        .bind(ws_id as i64)
         .fetch_optional(&self.pool)
         .await?;
 
@@ -259,7 +247,6 @@ impl AppState {
     pub async fn remove_chat_members(
         &self,
         id: u64,
-        ws_id: u64,
         actor_id: u64,
         input: UpdateChatMembers,
     ) -> Result<Chat, AppError> {
@@ -270,7 +257,7 @@ impl AppState {
             ));
         }
 
-        let Some(chat) = self.get_chat_by_id_and_ws(id, ws_id).await? else {
+        let Some(chat) = self.get_chat_by_id_in_platform(id).await? else {
             return Err(AppError::NotFound(format!("chat id {id}")));
         };
         if chat.r#type == ChatType::Single {
@@ -311,13 +298,12 @@ impl AppState {
                     ORDER BY member_id
                 )
             ), '{}'::bigint[])
-            WHERE id = $2 AND ws_id = $3
-            RETURNING id, ws_id, name, type, members, agents, created_at
+            WHERE id = $2
+            RETURNING id, name, type, members, agents, created_at
             "#,
         )
         .bind(&member_ids)
         .bind(id as i64)
-        .bind(ws_id as i64)
         .fetch_optional(&self.pool)
         .await?;
 
@@ -327,12 +313,7 @@ impl AppState {
         }
     }
 
-    pub async fn update_chat(
-        &self,
-        id: u64,
-        ws_id: u64,
-        input: UpdateChat,
-    ) -> Result<Chat, AppError> {
+    pub async fn update_chat(&self, id: u64, input: UpdateChat) -> Result<Chat, AppError> {
         let name = input.name.trim();
         if name.len() < 3 {
             return Err(AppError::CreateChatError(
@@ -349,13 +330,12 @@ impl AppState {
             r#"
             UPDATE chats
             SET name = $1
-            WHERE id = $2 AND ws_id = $3
-            RETURNING id, ws_id, name, type, members, agents, created_at
+            WHERE id = $2
+            RETURNING id, name, type, members, agents, created_at
             "#,
         )
         .bind(name)
         .bind(id as i64)
-        .bind(ws_id as i64)
         .fetch_optional(&self.pool)
         .await?;
 
@@ -365,17 +345,16 @@ impl AppState {
         }
     }
 
-    pub async fn delete_chat(&self, id: u64, ws_id: u64) -> Result<(), AppError> {
+    pub async fn delete_chat(&self, id: u64) -> Result<(), AppError> {
         let mut tx = self.pool.begin().await?;
         let existed = sqlx::query_scalar::<_, i64>(
             r#"
             SELECT id
             FROM chats
-            WHERE id = $1 AND ws_id = $2
+            WHERE id = $1
             "#,
         )
         .bind(id as i64)
-        .bind(ws_id as i64)
         .fetch_optional(&mut *tx)
         .await?;
         if existed.is_none() {
@@ -390,9 +369,8 @@ impl AppState {
             .bind(id as i64)
             .execute(&mut *tx)
             .await?;
-        sqlx::query("DELETE FROM chats WHERE id = $1 AND ws_id = $2")
+        sqlx::query("DELETE FROM chats WHERE id = $1")
             .bind(id as i64)
-            .bind(ws_id as i64)
             .execute(&mut *tx)
             .await?;
         tx.commit().await?;
@@ -400,21 +378,15 @@ impl AppState {
         Ok(())
     }
 
-    pub async fn is_chat_member(
-        &self,
-        chat_id: u64,
-        user_id: u64,
-        ws_id: u64,
-    ) -> Result<bool, AppError> {
+    pub async fn is_chat_member(&self, chat_id: u64, user_id: u64) -> Result<bool, AppError> {
         let is_member = sqlx::query(
             r#"
             SELECT 1
             FROM chats
-            WHERE id = $1 AND ws_id = $2 AND $3 = ANY(members)
+            WHERE id = $1 AND $2 = ANY(members)
             "#,
         )
         .bind(chat_id as i64)
-        .bind(ws_id as i64)
         .bind(user_id as i64)
         .fetch_optional(&self.pool)
         .await?;
@@ -422,16 +394,15 @@ impl AppState {
         Ok(is_member.is_some())
     }
 
-    async fn get_chat_by_id_and_ws(&self, id: u64, ws_id: u64) -> Result<Option<Chat>, AppError> {
+    async fn get_chat_by_id_in_platform(&self, id: u64) -> Result<Option<Chat>, AppError> {
         let chat = sqlx::query_as(
             r#"
-            SELECT id, ws_id, name, type, members, agents, created_at
+            SELECT id, name, type, members, agents, created_at
             FROM chats
-            WHERE id = $1 AND ws_id = $2
+            WHERE id = $1
             "#,
         )
         .bind(id as i64)
-        .bind(ws_id as i64)
         .fetch_optional(&self.pool)
         .await?;
         Ok(chat)
@@ -439,7 +410,6 @@ impl AppState {
 
     async fn ensure_users_exist_in_platform_scope(
         &self,
-        ws_id: u64,
         member_ids: &[i64],
     ) -> Result<(), AppError> {
         if member_ids.is_empty() {
@@ -449,16 +419,15 @@ impl AppState {
             r#"
             SELECT COUNT(*)
             FROM users
-            WHERE ws_id = $1 AND id = ANY($2)
+            WHERE id = ANY($1)
             "#,
         )
-        .bind(ws_id as i64)
         .bind(member_ids)
         .fetch_one(&self.pool)
         .await?;
         if count != member_ids.len() as i64 {
             return Err(AppError::CreateChatError(
-                "Some members do not exist in platform scope".to_string(),
+                "Some members do not exist".to_string(),
             ));
         }
         Ok(())
@@ -524,10 +493,9 @@ mod tests {
         let (_tdb, state) = AppState::new_for_test().await?;
         let input = CreateChat::new("", &[1, 2], false);
         let chat = state
-            .create_chat(input, 1, 1)
+            .create_chat(input, 1)
             .await
             .expect("create chat failed");
-        assert_eq!(chat.ws_id, 1);
         assert_eq!(chat.members.len(), 2);
         assert_eq!(chat.r#type, ChatType::Single);
         Ok(())
@@ -538,10 +506,9 @@ mod tests {
         let (_tdb, state) = AppState::new_for_test().await?;
         let input = CreateChat::new("general1", &[1, 2, 3], true);
         let chat = state
-            .create_chat(input, 1, 1)
+            .create_chat(input, 1)
             .await
             .expect("create chat failed");
-        assert_eq!(chat.ws_id, 1);
         assert_eq!(chat.members.len(), 3);
         assert_eq!(chat.r#type, ChatType::PublicChannel);
         Ok(())
@@ -558,7 +525,6 @@ mod tests {
 
         assert_eq!(chat.id, 1);
         assert_eq!(chat.name.unwrap(), "general");
-        assert_eq!(chat.ws_id, 1);
         assert_eq!(chat.members.len(), 5);
 
         Ok(())
@@ -567,10 +533,7 @@ mod tests {
     #[tokio::test]
     async fn chat_fetch_all_should_work() -> Result<()> {
         let (_tdb, state) = AppState::new_for_test().await?;
-        let chats = state
-            .fetch_chats(1, 1)
-            .await
-            .expect("fetch all chats failed");
+        let chats = state.fetch_chats(1).await.expect("fetch all chats failed");
 
         assert_eq!(chats.len(), 4);
 
@@ -580,31 +543,19 @@ mod tests {
     #[tokio::test]
     async fn chat_is_member_should_work() -> Result<()> {
         let (_tdb, state) = AppState::new_for_test().await?;
-        let is_member = state
-            .is_chat_member(1, 1, 1)
-            .await
-            .expect("is member failed");
+        let is_member = state.is_chat_member(1, 1).await.expect("is member failed");
         assert!(is_member);
 
         // user 6 doesn't exist
-        let is_member = state
-            .is_chat_member(1, 6, 1)
-            .await
-            .expect("is member failed");
+        let is_member = state.is_chat_member(1, 6).await.expect("is member failed");
         assert!(!is_member);
 
         // chat 10 doesn't exist
-        let is_member = state
-            .is_chat_member(10, 1, 1)
-            .await
-            .expect("is member failed");
+        let is_member = state.is_chat_member(10, 1).await.expect("is member failed");
         assert!(!is_member);
 
         // user 4 is not a member of chat 2
-        let is_member = state
-            .is_chat_member(2, 4, 1)
-            .await
-            .expect("is member failed");
+        let is_member = state.is_chat_member(2, 4).await.expect("is member failed");
         assert!(!is_member);
 
         Ok(())
@@ -621,10 +572,10 @@ mod tests {
             ))
             .await?;
 
-        let chat = state.join_chat(1, 1, new_user.id as u64).await?;
+        let chat = state.join_chat(1, new_user.id as u64).await?;
         assert!(chat.members.contains(&new_user.id));
 
-        let chat_again = state.join_chat(1, 1, new_user.id as u64).await?;
+        let chat_again = state.join_chat(1, new_user.id as u64).await?;
         let count = chat_again
             .members
             .iter()
@@ -637,7 +588,7 @@ mod tests {
     #[tokio::test]
     async fn chat_join_private_channel_should_fail() -> Result<()> {
         let (_tdb, state) = AppState::new_for_test().await?;
-        let ret = state.join_chat(2, 1, 4).await;
+        let ret = state.join_chat(2, 4).await;
         assert!(matches!(ret, Err(AppError::CreateChatError(_))));
         Ok(())
     }
@@ -645,7 +596,7 @@ mod tests {
     #[tokio::test]
     async fn chat_leave_single_should_fail() -> Result<()> {
         let (_tdb, state) = AppState::new_for_test().await?;
-        let ret = state.leave_chat(3, 1, 1).await;
+        let ret = state.leave_chat(3, 1).await;
         assert!(matches!(ret, Err(AppError::CreateChatError(_))));
         Ok(())
     }
@@ -662,12 +613,12 @@ mod tests {
             .await?;
 
         let added = state
-            .add_chat_members(2, 1, 1, UpdateChatMembers::new(&[new_user.id]))
+            .add_chat_members(2, 1, UpdateChatMembers::new(&[new_user.id]))
             .await?;
         assert!(added.members.contains(&new_user.id));
 
         let removed = state
-            .remove_chat_members(2, 1, 1, UpdateChatMembers::new(&[new_user.id]))
+            .remove_chat_members(2, 1, UpdateChatMembers::new(&[new_user.id]))
             .await?;
         assert!(!removed.members.contains(&new_user.id));
         Ok(())
@@ -677,7 +628,7 @@ mod tests {
     async fn chat_add_members_should_require_actor_membership() -> Result<()> {
         let (_tdb, state) = AppState::new_for_test().await?;
         let ret = state
-            .add_chat_members(2, 1, 4, UpdateChatMembers::new(&[5]))
+            .add_chat_members(2, 4, UpdateChatMembers::new(&[5]))
             .await;
         assert!(matches!(ret, Err(AppError::NotChatMemberError { .. })));
         Ok(())
@@ -687,7 +638,7 @@ mod tests {
     async fn chat_remove_members_should_not_allow_empty_chat() -> Result<()> {
         let (_tdb, state) = AppState::new_for_test().await?;
         let ret = state
-            .remove_chat_members(4, 1, 1, UpdateChatMembers::new(&[1, 3, 4]))
+            .remove_chat_members(4, 1, UpdateChatMembers::new(&[1, 3, 4]))
             .await;
         assert!(matches!(ret, Err(AppError::CreateChatError(_))));
         Ok(())
@@ -697,9 +648,9 @@ mod tests {
     async fn chat_update_should_work() -> Result<()> {
         let (_tdb, state) = AppState::new_for_test().await?;
         let input = CreateChat::new("origin-name", &[1, 2], false);
-        let chat = state.create_chat(input, 1, 1).await?;
+        let chat = state.create_chat(input, 1).await?;
         let updated = state
-            .update_chat(chat.id as u64, 1, UpdateChat::new("renamed-chat"))
+            .update_chat(chat.id as u64, UpdateChat::new("renamed-chat"))
             .await?;
         assert_eq!(updated.name.as_deref(), Some("renamed-chat"));
         Ok(())
@@ -709,7 +660,7 @@ mod tests {
     async fn chat_delete_should_remove_chat_messages_and_agents() -> Result<()> {
         let (_tdb, state) = AppState::new_for_test().await?;
         let input = CreateChat::new("to-delete", &[1, 2], false);
-        let chat = state.create_chat(input, 1, 1).await?;
+        let chat = state.create_chat(input, 1).await?;
 
         let agent = CreateAgent::new(
             "cleanup-agent",
@@ -727,7 +678,7 @@ mod tests {
         };
         state.create_message(message, chat.id as u64, 1).await?;
 
-        state.delete_chat(chat.id as u64, 1).await?;
+        state.delete_chat(chat.id as u64).await?;
 
         assert!(state.get_chat_by_id(chat.id as u64).await?.is_none());
         let messages = state

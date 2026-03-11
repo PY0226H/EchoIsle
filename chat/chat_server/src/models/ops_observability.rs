@@ -121,7 +121,6 @@ pub struct ApplyOpsObservabilityAnomalyActionInput {
 #[derive(Debug, Clone, ToSchema, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GetOpsObservabilityConfigOutput {
-    pub ws_id: u64,
     pub thresholds: OpsObservabilityThresholds,
     #[serde(default)]
     pub anomaly_state: HashMap<String, OpsObservabilityAnomalyStateValue>,
@@ -186,7 +185,6 @@ pub struct ListOpsServiceSplitReviewAuditsQuery {
 #[serde(rename_all = "camelCase")]
 pub struct OpsAlertNotificationItem {
     pub id: u64,
-    pub ws_id: u64,
     pub alert_key: String,
     pub rule_type: String,
     pub severity: String,
@@ -261,7 +259,6 @@ pub struct OpsSloRuleSnapshotItem {
 #[derive(Debug, Clone, ToSchema, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GetOpsSloSnapshotOutput {
-    pub ws_id: u64,
     pub window_minutes: i64,
     pub generated_at_ms: i64,
     pub thresholds: OpsObservabilityThresholds,
@@ -283,7 +280,6 @@ pub struct OpsServiceSplitThresholdItem {
 #[derive(Debug, Clone, ToSchema, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GetOpsServiceSplitReadinessOutput {
-    pub ws_id: u64,
     pub generated_at_ms: i64,
     pub overall_status: String,
     pub next_step: String,
@@ -294,7 +290,6 @@ pub struct GetOpsServiceSplitReadinessOutput {
 #[serde(rename_all = "camelCase")]
 pub struct OpsServiceSplitReviewAuditItem {
     pub id: u64,
-    pub ws_id: u64,
     pub payment_compliance_required: Option<bool>,
     pub review_note: String,
     pub updated_by: u64,
@@ -313,7 +308,7 @@ pub struct ListOpsServiceSplitReviewAuditsOutput {
 #[derive(Debug, Clone, Default, ToSchema, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct OpsAlertEvalReport {
-    pub workspaces_scanned: u64,
+    pub scopes_scanned: u64,
     pub alerts_raised: u64,
     pub alerts_cleared: u64,
     pub alerts_suppressed: u64,
@@ -332,7 +327,6 @@ pub(crate) struct AiJudgeAlertOutboxBridgeReport {
 #[derive(Debug, Clone, FromRow)]
 struct OpsAlertNotificationRow {
     id: i64,
-    ws_id: i64,
     alert_key: String,
     rule_type: String,
     severity: String,
@@ -647,13 +641,11 @@ fn apply_anomaly_action(
 }
 
 fn build_output(
-    ws_id: u64,
     row: Option<OpsObservabilityConfigRow>,
     now_ms: i64,
 ) -> GetOpsObservabilityConfigOutput {
     let Some(row) = row else {
         return GetOpsObservabilityConfigOutput {
-            ws_id,
             thresholds: OpsObservabilityThresholds::default(),
             anomaly_state: HashMap::new(),
             updated_by: None,
@@ -661,7 +653,6 @@ fn build_output(
         };
     };
     GetOpsObservabilityConfigOutput {
-        ws_id,
         thresholds: parse_thresholds(row.thresholds_json),
         anomaly_state: parse_anomaly_state(row.anomaly_state_json, now_ms),
         updated_by: Some(row.updated_by as u64),
@@ -874,7 +865,6 @@ fn map_split_review_audit_row(
 ) -> OpsServiceSplitReviewAuditItem {
     OpsServiceSplitReviewAuditItem {
         id: row.id as u64,
-        ws_id: PLATFORM_SCOPE_ID as u64,
         payment_compliance_required: row.payment_compliance_required,
         review_note: row.review_note,
         updated_by: row.updated_by as u64,
@@ -1007,7 +997,6 @@ fn normalize_ai_judge_outbox_event(
 fn map_alert_notification_row(row: OpsAlertNotificationRow) -> OpsAlertNotificationItem {
     OpsAlertNotificationItem {
         id: row.id as u64,
-        ws_id: row.ws_id as u64,
         alert_key: row.alert_key,
         rule_type: row.rule_type,
         severity: row.severity,
@@ -1543,7 +1532,6 @@ impl AppState {
         };
 
         Ok(GetOpsServiceSplitReadinessOutput {
-            ws_id: PLATFORM_SCOPE_ID as u64,
             generated_at_ms,
             overall_status: overall_status.to_string(),
             next_step: next_step.to_string(),
@@ -1632,7 +1620,6 @@ impl AppState {
         }
 
         Ok(GetOpsSloSnapshotOutput {
-            ws_id: PLATFORM_SCOPE_ID as u64,
             window_minutes: OPS_ALERT_EVAL_WINDOW_MINUTES,
             generated_at_ms: now_ms,
             thresholds,
@@ -1656,7 +1643,7 @@ impl AppState {
         )
         .fetch_optional(&self.pool)
         .await?;
-        Ok(build_output(PLATFORM_SCOPE_ID as u64, row, now_millis()))
+        Ok(build_output(row, now_millis()))
     }
 
     pub async fn upsert_ops_observability_thresholds(
@@ -1804,7 +1791,7 @@ impl AppState {
         let rows: Vec<OpsAlertNotificationRow> = sqlx::query_as(
             r#"
             SELECT
-                id, 1::bigint AS ws_id, alert_key, rule_type, severity, alert_status,
+                id, alert_key, rule_type, severity, alert_status,
                 title, message, metrics_json, recipients_json,
                 delivery_status, error_message, delivered_at, created_at, updated_at
             FROM ops_alert_notifications
@@ -2244,7 +2231,7 @@ impl AppState {
         let now_ms = now_millis();
         let mut report = OpsAlertEvalReport::default();
         let rows = self.list_observability_eval_workspaces().await?;
-        report.workspaces_scanned = rows.len() as u64;
+        report.scopes_scanned = rows.len() as u64;
         for row in rows {
             let _scope_id = row.ws_id;
             let thresholds = parse_thresholds(row.thresholds_json.clone());
@@ -2291,7 +2278,7 @@ impl AppState {
             (OpsObservabilityThresholds::default(), HashMap::new())
         };
         let mut report = OpsAlertEvalReport {
-            workspaces_scanned: 1,
+            scopes_scanned: 1,
             ..OpsAlertEvalReport::default()
         };
         let signal = self.load_recent_judge_signal().await?;
@@ -2335,7 +2322,7 @@ impl AppState {
             (OpsObservabilityThresholds::default(), HashMap::new())
         };
         let mut report = OpsAlertEvalReport {
-            workspaces_scanned: 1,
+            scopes_scanned: 1,
             ..OpsAlertEvalReport::default()
         };
         let signal = self.load_recent_judge_signal().await?;
@@ -2608,7 +2595,6 @@ mod tests {
         state.grant_platform_admin(1).await?;
         let owner = state.find_user_by_id(1).await?.expect("owner should exist");
         let ret = state.get_ops_observability_config(&owner).await?;
-        assert_eq!(ret.ws_id, 1);
         assert_eq!(ret.thresholds.low_success_rate_threshold, 80.0);
         assert!(ret.anomaly_state.is_empty());
         assert!(ret.updated_by.is_none());

@@ -19,7 +19,7 @@ pub async fn verify_chat(State(state): State<AppState>, req: Request, next: Next
     };
 
     if !state
-        .is_chat_member(chat_id, user.id as _, user.ws_id as _)
+        .is_chat_member(chat_id, user.id as _)
         .await
         .unwrap_or_default()
     {
@@ -72,7 +72,7 @@ mod tests {
                 updated_at = NOW()
             "#,
         )
-        .bind(user.ws_id)
+        .bind(1_i64)
         .bind(user.id)
         .bind(sid)
         .bind(family_id)

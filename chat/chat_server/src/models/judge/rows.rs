@@ -19,7 +19,6 @@ pub(super) struct JudgeJobRow {
 
 #[derive(Debug, Clone, FromRow)]
 pub(super) struct AutoJudgeRequesterRow {
-    pub ws_id: i64,
     pub requester_id: Option<i64>,
 }
 

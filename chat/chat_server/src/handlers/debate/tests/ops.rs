@@ -669,7 +669,7 @@ async fn run_ops_observability_evaluation_once_handler_should_return_report() ->
     .await?
     .into_response();
     let ret = json_body_with_status(response, StatusCode::OK).await?;
-    assert_eq!(ret["workspacesScanned"], 1);
+    assert_eq!(ret["scopesScanned"], 1);
     assert!(ret.get("alertsRaised").is_some());
     assert!(ret.get("alertsCleared").is_some());
     assert!(ret.get("alertsSuppressed").is_some());
@@ -738,7 +738,7 @@ async fn run_ops_observability_evaluation_once_handler_with_dry_run_should_not_e
     .await?
     .into_response();
     let ret = json_body_with_status(response, StatusCode::OK).await?;
-    assert_eq!(ret["workspacesScanned"], 1);
+    assert_eq!(ret["scopesScanned"], 1);
     assert_eq!(ret["alertsRaised"], 1);
 
     let after_count: i64 = sqlx::query_scalar(

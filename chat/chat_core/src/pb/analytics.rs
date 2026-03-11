@@ -99,17 +99,10 @@ pub struct UserRegisterEvent {
     /// / 用户邮箱(Email 是 PII，需要脱敏)
     #[prost(string, tag = "1")]
     pub email: ::prost::alloc::string::String,
-    /// / 工作空间 ID
-    #[prost(string, tag = "2")]
-    pub workspace_id: ::prost::alloc::string::String,
 }
 /// / chat 创建事件
 #[derive(Clone, PartialEq, ::prost::Message)]
-pub struct ChatCreatedEvent {
-    /// / 工作空间 ID
-    #[prost(string, tag = "1")]
-    pub workspace_id: ::prost::alloc::string::String,
-}
+pub struct ChatCreatedEvent {}
 /// / 消息发送事件
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct MessageSentEvent {

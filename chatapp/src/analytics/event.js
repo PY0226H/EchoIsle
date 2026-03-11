@@ -54,28 +54,25 @@ export async function sendUserLogoutEvent(context, token, email) {
     await sendEvent(event, token);
 }
 
-export async function sendUserRegisterEvent(context, token, email, workspaceId) {
+export async function sendUserRegisterEvent(context, token, email) {
     const event = create(AnalyticsEventSchema, {
         context,
         eventType: {
             case: "userRegister",
             value: {
                 email,
-                workspaceId,
             }
         }
     });
     await sendEvent(event, token);
 }
 
-export async function sendChatCreatedEvent(context, token, workspaceId) {
+export async function sendChatCreatedEvent(context, token) {
     const event = create(AnalyticsEventSchema, {
         context,
         eventType: {
             case: "chatCreated",
-            value: {
-                workspaceId,
-            }
+            value: {}
         }
     });
     await sendEvent(event, token);

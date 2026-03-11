@@ -36,7 +36,7 @@ impl AppState {
                 context_seed, is_active, created_by, created_at, updated_at
             "#,
         )
-        .bind(user.ws_id)
+        .bind(1_i64)
         .bind(title)
         .bind(description)
         .bind(category)
@@ -93,7 +93,7 @@ impl AppState {
             "#,
         )
         .bind(input.topic_id as i64)
-        .bind(user.ws_id)
+        .bind(1_i64)
         .fetch_optional(&self.pool)
         .await?;
 
@@ -120,7 +120,7 @@ impl AppState {
                 ) AS joinable
             "#,
         )
-        .bind(user.ws_id)
+        .bind(1_i64)
         .bind(input.topic_id as i64)
         .bind(status)
         .bind(input.scheduled_start_at)
@@ -173,7 +173,7 @@ impl AppState {
             "#,
         )
         .bind(topic_id as i64)
-        .bind(user.ws_id)
+        .bind(1_i64)
         .bind(title)
         .bind(description)
         .bind(category)
@@ -208,7 +208,7 @@ impl AppState {
             "#,
         )
         .bind(session_id as i64)
-        .bind(user.ws_id)
+        .bind(1_i64)
         .fetch_optional(&mut *tx)
         .await?
         .ok_or_else(|| AppError::NotFound(format!("debate session id {session_id}")))?;
@@ -273,7 +273,7 @@ impl AppState {
             "#,
         )
         .bind(session_id as i64)
-        .bind(user.ws_id)
+        .bind(1_i64)
         .bind(next_status)
         .bind(next_scheduled_start)
         .bind(next_end_at)

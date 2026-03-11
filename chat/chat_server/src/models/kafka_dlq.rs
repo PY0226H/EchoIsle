@@ -186,7 +186,7 @@ impl AppState {
               AND ($3::text IS NULL OR event_type = $3)
             "#,
         )
-        .bind(user.ws_id)
+        .bind(1_i64)
         .bind(status.as_deref())
         .bind(event_type.as_deref())
         .fetch_one(&self.pool)
@@ -206,7 +206,7 @@ impl AppState {
             LIMIT $4 OFFSET $5
             "#,
         )
-        .bind(user.ws_id)
+        .bind(1_i64)
         .bind(status.as_deref())
         .bind(event_type.as_deref())
         .bind(limit)
@@ -238,7 +238,7 @@ impl AppState {
             "#,
         )
         .bind(id as i64)
-        .bind(user.ws_id)
+        .bind(1_i64)
         .fetch_optional(&self.pool)
         .await?;
         let Some((consumer_group, topic, partition, message_offset, payload, status)) = row else {
@@ -274,7 +274,7 @@ impl AppState {
                 )
                 .bind(id as i64)
                 .bind(DLQ_STATUS_REPLAYED)
-                .bind(user.ws_id)
+                .bind(1_i64)
                 .fetch_one(&self.pool)
                 .await?;
                 Ok(map_dlq_action_row(row))
@@ -295,7 +295,7 @@ impl AppState {
                 .bind(id as i64)
                 .bind(DLQ_STATUS_PENDING)
                 .bind(error_message)
-                .bind(user.ws_id)
+                .bind(1_i64)
                 .fetch_one(&self.pool)
                 .await?;
                 Ok(map_dlq_action_row(row))
@@ -316,7 +316,7 @@ impl AppState {
                 .bind(id as i64)
                 .bind(DLQ_STATUS_PENDING)
                 .bind(format!("replay retryable error: {}", err))
-                .bind(user.ws_id)
+                .bind(1_i64)
                 .fetch_one(&self.pool)
                 .await?;
                 Ok(map_dlq_action_row(row))
@@ -343,7 +343,7 @@ impl AppState {
         )
         .bind(id as i64)
         .bind(DLQ_STATUS_DISCARDED)
-        .bind(user.ws_id)
+        .bind(1_i64)
         .fetch_optional(&self.pool)
         .await?;
         let Some(row) = row else {

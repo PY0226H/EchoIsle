@@ -78,9 +78,7 @@ mod tests {
     #[tokio::test]
     async fn verify_file_ticket_middleware_should_only_accept_file_ticket_query() -> Result<()> {
         let state = test_state()?;
-        let mut user = chat_core::User::new(1, "Tyr Chen", "tchen@acme.org");
-        user.ws_id = 1;
-        user.ws_name = "acme".to_string();
+        let user = chat_core::User::new(1, "Tyr Chen", "tchen@acme.org");
         let user_token = state
             .ek
             .sign_access_token(user.id, "sid-file-ticket-test", 0)?;

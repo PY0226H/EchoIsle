@@ -123,7 +123,7 @@ async fn create_debate_topic_by_owner_should_work_and_reject_non_owner() -> Resu
             },
         )
         .await?;
-    assert_eq!(topic.ws_id, owner.ws_id);
+    assert_eq!(topic.ws_id, 1);
     assert_eq!(topic.created_by, owner.id);
 
     let err = state
@@ -206,7 +206,7 @@ async fn create_debate_session_by_owner_should_validate_status_and_topic() -> Re
             },
         )
         .await?;
-    assert_eq!(session.ws_id, owner.ws_id);
+    assert_eq!(session.ws_id, 1);
     assert_eq!(session.topic_id, topic_id);
     assert_eq!(session.status, "open");
     assert!(session.joinable);

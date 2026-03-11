@@ -386,7 +386,7 @@ pub(crate) async fn run_ops_observability_evaluation_once_handler(
     State(state): State<AppState>,
     Query(query): Query<RunOpsObservabilityEvaluationQuery>,
 ) -> Result<impl IntoResponse, AppError> {
-    let limiter_key = format!("ws:{}:user:{}", user.ws_id, user.id);
+    let limiter_key = format!("ws:{}:user:{}", 1_i64, user.id);
     let decision = enforce_rate_limit(
         &state,
         "ops_observability_evaluate_once",

@@ -1073,10 +1073,10 @@ export default createStore({
       await sendUserLogoutEvent(state.context, state.token, state.user.email);
     },
     async userRegister({ state }, { email }) {
-      await sendUserRegisterEvent(state.context, state.token, email, null);
+      await sendUserRegisterEvent(state.context, state.token, email);
     },
     async chatCreated({ state }) {
-      await sendChatCreatedEvent(state.context, state.token, null);
+      await sendChatCreatedEvent(state.context, state.token);
     },
     async messageSent({ state }, { chatId, type, size, totalFiles }) {
       await sendMessageSentEvent(state.context, state.token, chatId, type, size, totalFiles);

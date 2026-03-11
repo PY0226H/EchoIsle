@@ -9,7 +9,6 @@ impl AppState {
         let requester: Option<AutoJudgeRequesterRow> = sqlx::query_as(
             r#"
             SELECT
-                s.ws_id,
                 COALESCE(
                     (
                         SELECT sp.user_id
@@ -41,15 +40,13 @@ impl AppState {
         let Some(requester_id) = requester.requester_id else {
             warn!(
                 session_id,
-                ws_id = requester.ws_id,
+                ws_id = 1_i64,
                 "auto judge trigger skipped: no available requester in platform scope"
             );
             return Ok(None);
         };
 
-        let mut auto_user = User::new(requester_id, "__auto_judge__", "auto_judge@system.local");
-        auto_user.ws_id = requester.ws_id;
-        auto_user.ws_name = "__auto_judge__".to_string();
+        let auto_user = User::new(requester_id, "__auto_judge__", "auto_judge@system.local");
 
         let ret = self
             .request_judge_job_internal(
@@ -108,7 +105,7 @@ impl AppState {
             )));
         };
 
-        if session.ws_id != user.ws_id {
+        if session.ws_id != 1_i64 {
             return Err(AppError::NotFound(format!(
                 "debate session id {session_id}"
             )));
@@ -209,7 +206,7 @@ impl AppState {
             RETURNING id, status, style_mode, rejudge_triggered, requested_at
             "#,
         )
-        .bind(user.ws_id)
+        .bind(1_i64)
         .bind(session_id as i64)
         .bind(user.id)
         .bind(&style_mode)
@@ -222,7 +219,7 @@ impl AppState {
         if let Err(err) = self
             .event_bus
             .publish_ai_judge_job_created(AiJudgeJobCreatedEvent {
-                ws_id: user.ws_id as u64,
+                ws_id: 1_i64 as u64,
                 session_id,
                 job_id: job.id as u64,
                 requested_by: user.id as u64,

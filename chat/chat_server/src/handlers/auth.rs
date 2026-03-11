@@ -2155,10 +2155,10 @@ async fn find_user_by_wechat_identity(
     state: &AppState,
     identity: &WechatIdentity,
 ) -> Result<Option<User>, AppError> {
-    let mut user: Option<User> = sqlx::query_as(
+    let user: Option<User> = sqlx::query_as(
         r#"
         SELECT
-            u.id, u.ws_id, u.fullname, COALESCE(u.email, '') AS email,
+            u.id, u.fullname, COALESCE(u.email, '') AS email,
             u.phone_e164, u.phone_verified_at, u.phone_bind_required, u.is_bot, u.created_at
         FROM auth_external_identities i
         JOIN users u ON u.id = i.user_id
@@ -2176,9 +2176,6 @@ async fn find_user_by_wechat_identity(
     .bind(identity.provider_unionid.as_deref())
     .fetch_optional(&state.pool)
     .await?;
-    if let Some(ref mut user_item) = user {
-        user_item.ws_name = "default".to_string();
-    }
     Ok(user)
 }
 

@@ -31,11 +31,11 @@ const DEBATE_MESSAGE_RATE_LIMIT_WINDOW_SECS: u64 = 60;
     )
 )]
 pub(crate) async fn list_debate_sessions_handler(
-    Extension(user): Extension<User>,
+    Extension(_user): Extension<User>,
     State(state): State<AppState>,
     Query(input): Query<ListDebateSessions>,
 ) -> Result<impl IntoResponse, AppError> {
-    let sessions = state.list_debate_sessions(user.ws_id as _, input).await?;
+    let sessions = state.list_debate_sessions(1_i64 as _, input).await?;
     Ok((StatusCode::OK, Json(sessions)))
 }
 
@@ -91,7 +91,7 @@ pub(crate) async fn create_debate_message_handler(
     Path(id): Path<u64>,
     Json(input): Json<CreateDebateMessageInput>,
 ) -> Result<impl IntoResponse, AppError> {
-    let limiter_key = format!("ws:{}:user:{}:session:{}", user.ws_id, user.id, id);
+    let limiter_key = format!("ws:{}:user:{}:session:{}", 1_i64, user.id, id);
     let decision = enforce_rate_limit(
         &state,
         "debate_message_create",

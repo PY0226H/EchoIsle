@@ -40,9 +40,6 @@ pub struct AnalyticsEventRow {
     pub logout_email: Option<String>,
     // UserRegisterEvent
     pub register_email: Option<String>,
-    pub register_workspace_id: Option<String>,
-    // ChatCreatedEvent
-    pub chat_created_workspace_id: Option<String>,
     // MessageSentEvent
     pub message_chat_id: Option<String>,
     pub message_type: Option<String>,
@@ -236,7 +233,6 @@ impl EventConsume for UserRegisterEvent {
     fn consume(self, row: &mut AnalyticsEventRow) -> Result<(), AppError> {
         row.event_type = "user_register".to_string();
         row.register_email = Some(self.email);
-        row.register_workspace_id = Some(self.workspace_id);
         Ok(())
     }
 }
@@ -244,7 +240,6 @@ impl EventConsume for UserRegisterEvent {
 impl EventConsume for ChatCreatedEvent {
     fn consume(self, row: &mut AnalyticsEventRow) -> Result<(), AppError> {
         row.event_type = "chat_created".to_string();
-        row.chat_created_workspace_id = Some(self.workspace_id);
         Ok(())
     }
 }

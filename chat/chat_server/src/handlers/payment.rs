@@ -63,7 +63,7 @@ pub(crate) async fn verify_iap_order_handler(
 ) -> Result<impl IntoResponse, AppError> {
     let limiter_key = format!(
         "ws:{}:user:{}:tx:{}",
-        user.ws_id,
+        1_i64,
         user.id,
         input.transaction_id.trim()
     );
@@ -153,7 +153,7 @@ pub(crate) async fn get_wallet_balance_handler(
     State(state): State<AppState>,
 ) -> Result<impl IntoResponse, AppError> {
     let ret = state
-        .get_wallet_balance(user.ws_id as u64, user.id as u64)
+        .get_wallet_balance(1_i64 as u64, user.id as u64)
         .await?;
     Ok((StatusCode::OK, Json(ret)))
 }
@@ -178,7 +178,7 @@ pub(crate) async fn list_wallet_ledger_handler(
     Query(input): Query<ListWalletLedger>,
 ) -> Result<impl IntoResponse, AppError> {
     let rows = state
-        .list_wallet_ledger(user.ws_id as u64, user.id as u64, input)
+        .list_wallet_ledger(1_i64 as u64, user.id as u64, input)
         .await?;
     Ok((StatusCode::OK, Json(rows)))
 }

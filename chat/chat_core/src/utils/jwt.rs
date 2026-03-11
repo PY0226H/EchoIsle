@@ -407,8 +407,6 @@ impl From<TicketClaims> for User {
     fn from(value: TicketClaims) -> Self {
         Self {
             id: value.id,
-            ws_id: 1,
-            ws_name: "default".to_string(),
             fullname: value.fullname,
             email: value.email,
             phone_e164: None,
@@ -633,8 +631,6 @@ impl DecodingKey {
         Ok(DecodedAccessToken {
             user: User {
                 id: user_id,
-                ws_id: 1,
-                ws_name: "default".to_string(),
                 fullname: String::new(),
                 email: String::new(),
                 phone_e164: None,

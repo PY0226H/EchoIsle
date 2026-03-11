@@ -139,7 +139,7 @@ fn spawn_ops_observability_alert_worker(state: AppState) {
             match state.evaluate_ops_observability_alerts_once().await {
                 Ok(report) => {
                     debug!(
-                        workspaces_scanned = report.workspaces_scanned,
+                        scopes_scanned = report.scopes_scanned,
                         alerts_raised = report.alerts_raised,
                         alerts_cleared = report.alerts_cleared,
                         alerts_suppressed = report.alerts_suppressed,

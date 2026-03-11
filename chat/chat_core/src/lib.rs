@@ -44,12 +44,6 @@ pub enum AgentError {
 #[serde(rename_all = "camelCase")]
 pub struct User {
     pub id: i64,
-    #[sqlx(default)]
-    #[serde(skip)]
-    pub ws_id: i64,
-    #[sqlx(default)]
-    #[serde(skip)]
-    pub ws_name: String,
     pub fullname: String,
     pub email: String,
     #[sqlx(default)]
@@ -95,8 +89,6 @@ pub enum ChatType {
 #[serde(rename_all(serialize = "camelCase"))]
 pub struct Chat {
     pub id: i64,
-    #[serde(skip)]
-    pub ws_id: i64,
     pub name: Option<String>,
     pub r#type: ChatType,
     pub members: Vec<i64>,
@@ -204,8 +196,6 @@ impl User {
     pub fn new(id: i64, fullname: &str, email: &str) -> Self {
         Self {
             id,
-            ws_id: 1,
-            ws_name: "default".to_string(),
             fullname: fullname.to_string(),
             email: email.to_string(),
             phone_e164: None,

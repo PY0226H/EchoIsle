@@ -88,7 +88,7 @@ impl AppState {
 
         if let Some(order) = existing_order {
             order_flow::validate_order_reuse_constraints(&order, user, &product.product_id)?;
-            let wallet_balance = wallet_balance_in_tx(&mut tx, user.ws_id, user.id).await?;
+            let wallet_balance = wallet_balance_in_tx(&mut tx, 1_i64, user.id).await?;
             tx.commit().await?;
             return Ok(order_flow::build_order_output_without_credit(
                 order,
@@ -125,7 +125,7 @@ impl AppState {
             RETURNING id, ws_id, user_id, product_id, status, verify_mode, verify_reason, coins
             "#,
         )
-        .bind(user.ws_id)
+        .bind(1_i64)
         .bind(user.id)
         .bind(&product.product_id)
         .bind(transaction_id)
@@ -152,7 +152,7 @@ impl AppState {
             .fetch_one(&mut *tx)
             .await?;
             order_flow::validate_order_reuse_constraints(&order, user, &product.product_id)?;
-            let wallet_balance = wallet_balance_in_tx(&mut tx, user.ws_id, user.id).await?;
+            let wallet_balance = wallet_balance_in_tx(&mut tx, 1_i64, user.id).await?;
             tx.commit().await?;
             return Ok(order_flow::build_order_output_without_credit(
                 order,

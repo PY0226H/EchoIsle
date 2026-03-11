@@ -389,7 +389,7 @@ impl AppState {
             )));
         };
 
-        if session.ws_id != user.ws_id {
+        if session.ws_id != 1_i64 {
             return Err(AppError::NotFound(format!(
                 "debate session id {session_id}"
             )));
@@ -490,7 +490,7 @@ impl AppState {
         if let Err(err) = self
             .event_bus
             .publish_debate_participant_joined(DebateParticipantJoinedEvent {
-                ws_id: user.ws_id as u64,
+                ws_id: 1_i64 as u64,
                 session_id,
                 user_id: user.id as u64,
                 side: input.side.clone(),
