@@ -87,26 +87,24 @@ impl AppState {
                 r.created_at
             FROM judge_reports r
             JOIN judge_jobs j ON j.id = r.job_id
-            WHERE r.ws_id = $1
-              AND ($2::timestamptz IS NULL OR r.created_at >= $2)
-              AND ($3::timestamptz IS NULL OR r.created_at <= $3)
-              AND ($4::varchar IS NULL OR r.winner = $4)
-              AND ($5::boolean IS NULL OR r.rejudge_triggered = $5)
+            WHERE ($1::timestamptz IS NULL OR r.created_at >= $1)
+              AND ($2::timestamptz IS NULL OR r.created_at <= $2)
+              AND ($3::varchar IS NULL OR r.winner = $3)
+              AND ($4::boolean IS NULL OR r.rejudge_triggered = $4)
               AND (
-                $6::boolean IS NULL
+                $5::boolean IS NULL
                 OR (
                     CASE
                         WHEN jsonb_typeof(r.payload->'verdictEvidenceRefs') = 'array'
                         THEN jsonb_array_length(r.payload->'verdictEvidenceRefs') > 0
                         ELSE FALSE
                     END
-                ) = $6
+                ) = $5
               )
             ORDER BY r.created_at DESC
-            LIMIT $7
+            LIMIT $6
             "#,
         )
-        .bind(1_i64)
         .bind(query.from)
         .bind(query.to)
         .bind(winner_filter)
@@ -167,22 +165,18 @@ impl AppState {
         _user: &User,
         query: GetJudgeReportQuery,
     ) -> Result<GetJudgeReportOutput, AppError> {
-        let session_ws_id: Option<(i64,)> = sqlx::query_as(
+        let session_exists = sqlx::query_scalar::<_, i32>(
             r#"
-            SELECT ws_id
+            SELECT 1
             FROM debate_sessions
             WHERE id = $1
+            LIMIT 1
             "#,
         )
         .bind(session_id as i64)
         .fetch_optional(&self.pool)
         .await?;
-        let Some((session_ws_id,)) = session_ws_id else {
-            return Err(AppError::NotFound(format!(
-                "debate session id {session_id}"
-            )));
-        };
-        if session_ws_id != 1_i64 {
+        if session_exists.is_none() {
             return Err(AppError::NotFound(format!(
                 "debate session id {session_id}"
             )));

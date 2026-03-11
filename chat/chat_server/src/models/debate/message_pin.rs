@@ -15,11 +15,6 @@ impl AppState {
             .load_session_for_action(&mut tx, session_id as i64)
             .await?
             .ok_or_else(|| AppError::NotFound(format!("debate session id {session_id}")))?;
-        if session.ws_id != 1_i64 {
-            return Err(AppError::NotFound(format!(
-                "debate session id {session_id}"
-            )));
-        }
         if !can_join_status(&session.status) || session.end_at <= Utc::now() {
             return Err(AppError::DebateConflict(format!(
                 "session {} is not accepting messages now",
@@ -49,7 +44,7 @@ impl AppState {
             r#"
             INSERT INTO session_messages(ws_id, session_id, user_id, side, content)
             VALUES ($1, $2, $3, $4, $5)
-            RETURNING id, ws_id, session_id, user_id, side, content, created_at
+            RETURNING id, session_id, user_id, side, content, created_at
             "#,
         )
         .bind(1_i64)
@@ -86,17 +81,12 @@ impl AppState {
             .load_session_for_action(&mut tx, session_id as i64)
             .await?
             .ok_or_else(|| AppError::NotFound(format!("debate session id {session_id}")))?;
-        if session.ws_id != 1_i64 {
-            return Err(AppError::NotFound(format!(
-                "debate session id {session_id}"
-            )));
-        }
         self.ensure_debate_session_readable(&mut tx, session_id as i64, user, &session.status)
             .await?;
 
         let mut rows: Vec<DebateMessage> = sqlx::query_as(
             r#"
-            SELECT id, ws_id, session_id, user_id, side, content, created_at
+            SELECT id, session_id, user_id, side, content, created_at
             FROM session_messages
             WHERE session_id = $1
               AND ($2::bigint IS NULL OR id < $2)
@@ -126,11 +116,6 @@ impl AppState {
             .load_session_for_action(&mut tx, session_id as i64)
             .await?
             .ok_or_else(|| AppError::NotFound(format!("debate session id {session_id}")))?;
-        if session.ws_id != 1_i64 {
-            return Err(AppError::NotFound(format!(
-                "debate session id {session_id}"
-            )));
-        }
         self.ensure_debate_session_readable(&mut tx, session_id as i64, user, &session.status)
             .await?;
 
@@ -138,7 +123,6 @@ impl AppState {
             r#"
             SELECT
                 p.id,
-                p.ws_id,
                 p.session_id,
                 p.message_id,
                 p.user_id,
@@ -197,7 +181,7 @@ impl AppState {
 
         let msg = sqlx::query_as::<_, DebateMessageForPin>(
             r#"
-            SELECT id, ws_id, session_id, user_id
+            SELECT id, session_id, user_id
             FROM session_messages
             WHERE id = $1
             "#,
@@ -206,11 +190,6 @@ impl AppState {
         .fetch_optional(&mut *tx)
         .await?
         .ok_or_else(|| AppError::NotFound(format!("debate message id {message_id}")))?;
-        if msg.ws_id != 1_i64 {
-            return Err(AppError::NotFound(format!(
-                "debate message id {message_id}"
-            )));
-        }
         if msg.user_id != user.id {
             return Err(AppError::DebateConflict(format!(
                 "only message sender can pin message {}",
@@ -356,7 +335,6 @@ impl AppState {
         if let Err(err) = self
             .event_bus
             .publish_debate_message_pinned(DebateMessagePinnedEvent {
-                ws_id: 1_i64 as u64,
                 session_id: pin.session_id as u64,
                 message_id: pin.message_id as u64,
                 user_id: user.id as u64,
@@ -396,7 +374,7 @@ impl AppState {
     ) -> Result<Option<DebateSessionForAction>, AppError> {
         let row = sqlx::query_as(
             r#"
-            SELECT ws_id, status, end_at
+            SELECT status, end_at
             FROM debate_sessions
             WHERE id = $1
             "#,

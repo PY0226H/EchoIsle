@@ -41,7 +41,6 @@ impl AppState {
             r#"
             SELECT
                 io.id,
-                io.ws_id,
                 io.user_id,
                 io.product_id,
                 io.status,
@@ -71,7 +70,7 @@ impl AppState {
                 order: None,
             });
         };
-        if row.ws_id != 1_i64 || row.user_id != user.id {
+        if row.user_id != user.id {
             return Err(AppError::PaymentConflict(
                 "transaction_id already belongs to another user".to_string(),
             ));
@@ -91,11 +90,7 @@ impl AppState {
         })
     }
 
-    pub async fn get_wallet_balance(
-        &self,
-        ws_id: u64,
-        user_id: u64,
-    ) -> Result<WalletBalanceOutput, AppError> {
+    pub async fn get_wallet_balance(&self, user_id: u64) -> Result<WalletBalanceOutput, AppError> {
         let row: Option<(i64,)> = sqlx::query_as(
             r#"
             SELECT balance
@@ -108,7 +103,6 @@ impl AppState {
         .await?;
 
         Ok(WalletBalanceOutput {
-            ws_id,
             user_id,
             balance: row.map(|v| v.0).unwrap_or(0),
         })
@@ -116,7 +110,6 @@ impl AppState {
 
     pub async fn list_wallet_ledger(
         &self,
-        _ws_id: u64,
         user_id: u64,
         input: ListWalletLedger,
     ) -> Result<Vec<WalletLedgerItem>, AppError> {

@@ -596,7 +596,7 @@ async fn dispatch_pending_judge_jobs_once_should_keep_running_on_http_429_when_r
 }
 
 #[tokio::test]
-async fn dispatch_pending_judge_jobs_once_should_count_failed_internal_when_payload_loading_fails(
+async fn dispatch_pending_judge_jobs_once_should_count_failed_network_when_dispatch_io_fails(
 ) -> Result<()> {
     let (_tdb, mut state) = AppState::new_for_test().await?;
     let inner = Arc::get_mut(&mut state.inner).expect("state should be unique");
@@ -616,7 +616,7 @@ async fn dispatch_pending_judge_jobs_once_should_count_failed_internal_when_payl
     assert_eq!(tick.failed, 1);
     assert_eq!(tick.marked_failed, 1);
     assert_eq!(tick.retryable_failed, 1);
-    assert_eq!(tick.failed_internal, 1);
+    assert_eq!(tick.failed_network, 1);
 
     let row: (String, Option<String>) = sqlx::query_as(
         r#"
@@ -629,7 +629,7 @@ async fn dispatch_pending_judge_jobs_once_should_count_failed_internal_when_payl
     .fetch_one(&state.pool)
     .await?;
     assert_eq!(row.0, "failed");
-    assert!(row.1.unwrap_or_default().contains("[payload_build_failed]"));
+    assert!(row.1.unwrap_or_default().contains("[network_send_failed]"));
     Ok(())
 }
 

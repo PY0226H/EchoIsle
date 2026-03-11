@@ -26,7 +26,6 @@ pub struct ListKafkaDlqEventsQuery {
 #[serde(rename_all = "camelCase")]
 pub struct KafkaDlqEventItem {
     pub id: u64,
-    pub ws_id: u64,
     pub consumer_group: String,
     pub topic: String,
     pub partition: i32,
@@ -68,7 +67,6 @@ pub struct KafkaDlqActionOutput {
 #[derive(Debug, Clone, FromRow)]
 struct KafkaDlqEventRow {
     id: i64,
-    ws_id: i64,
     consumer_group: String,
     topic: String,
     partition: i32,
@@ -133,7 +131,6 @@ fn normalize_event_type_filter(event_type: Option<String>) -> Option<String> {
 fn map_dlq_row(row: KafkaDlqEventRow) -> KafkaDlqEventItem {
     KafkaDlqEventItem {
         id: row.id as u64,
-        ws_id: row.ws_id as u64,
         consumer_group: row.consumer_group,
         topic: row.topic,
         partition: row.partition,
@@ -181,12 +178,10 @@ impl AppState {
             r#"
             SELECT COUNT(1)
             FROM kafka_dlq_events
-            WHERE ws_id = $1
-              AND ($2::text IS NULL OR status = $2)
-              AND ($3::text IS NULL OR event_type = $3)
+            WHERE ($1::text IS NULL OR status = $1)
+              AND ($2::text IS NULL OR event_type = $2)
             "#,
         )
-        .bind(1_i64)
         .bind(status.as_deref())
         .bind(event_type.as_deref())
         .fetch_one(&self.pool)
@@ -195,18 +190,16 @@ impl AppState {
         let rows: Vec<KafkaDlqEventRow> = sqlx::query_as(
             r#"
             SELECT
-                id, ws_id, consumer_group, topic, partition, message_offset,
+                id, consumer_group, topic, partition, message_offset,
                 event_id, event_type, aggregate_id, status, failure_count, error_message,
                 first_failed_at, last_failed_at, replayed_at, discarded_at, updated_at
             FROM kafka_dlq_events
-            WHERE ws_id = $1
-              AND ($2::text IS NULL OR status = $2)
-              AND ($3::text IS NULL OR event_type = $3)
+            WHERE ($1::text IS NULL OR status = $1)
+              AND ($2::text IS NULL OR event_type = $2)
             ORDER BY updated_at DESC, id DESC
-            LIMIT $4 OFFSET $5
+            LIMIT $3 OFFSET $4
             "#,
         )
-        .bind(1_i64)
         .bind(status.as_deref())
         .bind(event_type.as_deref())
         .bind(limit)
@@ -234,11 +227,10 @@ impl AppState {
             r#"
             SELECT consumer_group, topic, partition, message_offset, payload, status
             FROM kafka_dlq_events
-            WHERE id = $1 AND ws_id = $2
+            WHERE id = $1
             "#,
         )
         .bind(id as i64)
-        .bind(1_i64)
         .fetch_optional(&self.pool)
         .await?;
         let Some((consumer_group, topic, partition, message_offset, payload, status)) = row else {
@@ -268,13 +260,12 @@ impl AppState {
                     SET status = $2,
                         replayed_at = NOW(),
                         updated_at = NOW()
-                    WHERE id = $1 AND ws_id = $3
+                    WHERE id = $1
                     RETURNING id, status, failure_count, error_message, replayed_at, discarded_at, updated_at
                     "#,
                 )
                 .bind(id as i64)
                 .bind(DLQ_STATUS_REPLAYED)
-                .bind(1_i64)
                 .fetch_one(&self.pool)
                 .await?;
                 Ok(map_dlq_action_row(row))
@@ -288,14 +279,13 @@ impl AppState {
                         error_message = $3,
                         last_failed_at = NOW(),
                         updated_at = NOW()
-                    WHERE id = $1 AND ws_id = $4
+                    WHERE id = $1
                     RETURNING id, status, failure_count, error_message, replayed_at, discarded_at, updated_at
                     "#,
                 )
                 .bind(id as i64)
                 .bind(DLQ_STATUS_PENDING)
                 .bind(error_message)
-                .bind(1_i64)
                 .fetch_one(&self.pool)
                 .await?;
                 Ok(map_dlq_action_row(row))
@@ -309,14 +299,13 @@ impl AppState {
                         error_message = $3,
                         last_failed_at = NOW(),
                         updated_at = NOW()
-                    WHERE id = $1 AND ws_id = $4
+                    WHERE id = $1
                     RETURNING id, status, failure_count, error_message, replayed_at, discarded_at, updated_at
                     "#,
                 )
                 .bind(id as i64)
                 .bind(DLQ_STATUS_PENDING)
                 .bind(format!("replay retryable error: {}", err))
-                .bind(1_i64)
                 .fetch_one(&self.pool)
                 .await?;
                 Ok(map_dlq_action_row(row))
@@ -337,13 +326,12 @@ impl AppState {
             SET status = $2,
                 discarded_at = NOW(),
                 updated_at = NOW()
-            WHERE id = $1 AND ws_id = $3
+            WHERE id = $1
             RETURNING id, status, failure_count, error_message, replayed_at, discarded_at, updated_at
             "#,
         )
         .bind(id as i64)
         .bind(DLQ_STATUS_DISCARDED)
-        .bind(1_i64)
         .fetch_optional(&self.pool)
         .await?;
         let Some(row) = row else {

@@ -92,7 +92,6 @@ impl EventEnvelope {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DebateParticipantJoinedEvent {
-    pub ws_id: u64,
     pub session_id: u64,
     pub user_id: u64,
     pub side: String,
@@ -112,7 +111,6 @@ pub struct DebateSessionStatusChangedEvent {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DebateMessagePinnedEvent {
-    pub ws_id: u64,
     pub session_id: u64,
     pub message_id: u64,
     pub user_id: u64,
@@ -126,7 +124,6 @@ pub struct DebateMessagePinnedEvent {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AiJudgeJobCreatedEvent {
-    pub ws_id: u64,
     pub session_id: u64,
     pub job_id: u64,
     pub requested_by: u64,
@@ -493,7 +490,6 @@ async fn consume_worker_message(
         Ok(v) => v,
         Err(err) => {
             let row = FailedConsumeRow {
-                ws_id: None,
                 consumer_group: consumer_group.to_string(),
                 topic: topic.to_string(),
                 partition,
@@ -533,7 +529,6 @@ async fn consume_worker_message(
         }
         Ok(WorkerProcessOutcome::FailedPermanently(error_message)) => {
             let row = FailedConsumeRow {
-                ws_id: extract_ws_id(&envelope.payload),
                 consumer_group: meta.consumer_group.clone(),
                 topic: meta.topic.clone(),
                 partition: meta.partition,
@@ -553,7 +548,6 @@ async fn consume_worker_message(
         }
         Err(err) => {
             let row = FailedConsumeRow {
-                ws_id: extract_ws_id(&envelope.payload),
                 consumer_group: meta.consumer_group.clone(),
                 topic: meta.topic.clone(),
                 partition: meta.partition,
@@ -706,13 +700,11 @@ async fn apply_worker_business_logic(
             SET dispatch_locked_until = NOW() - INTERVAL '1 second',
                 updated_at = NOW()
             WHERE id = $1
-              AND ws_id = $2
-              AND session_id = $3
+              AND session_id = $2
               AND status = 'running'
             "#,
         )
         .bind(payload.job_id as i64)
-        .bind(payload.ws_id as i64)
         .bind(payload.session_id as i64)
         .execute(&mut **tx)
         .await?;
@@ -721,7 +713,6 @@ async fn apply_worker_business_logic(
 }
 
 struct FailedConsumeRow {
-    ws_id: Option<i64>,
     consumer_group: String,
     topic: String,
     partition: i32,
@@ -731,16 +722,6 @@ struct FailedConsumeRow {
     aggregate_id: String,
     payload: Value,
     error_message: String,
-}
-
-fn extract_ws_id(payload: &Value) -> Option<i64> {
-    let ws_id = payload
-        .get("wsId")
-        .or_else(|| payload.get("ws_id"))
-        .or_else(|| payload.get("wsID"))?;
-    ws_id
-        .as_i64()
-        .or_else(|| ws_id.as_u64().and_then(|v| i64::try_from(v).ok()))
 }
 
 async fn persist_failed_ledger_row(pool: &PgPool, row: &FailedConsumeRow) -> anyhow::Result<()> {
@@ -797,19 +778,19 @@ async fn upsert_kafka_dlq_failure(pool: &PgPool, row: &FailedConsumeRow) -> anyh
             updated_at
         )
         VALUES (
-            $1, $2, $3, $4, $5, $6, $7, $8, $9,
-            $10, 1, $11, NOW(), NOW(), NOW(), NOW()
+            1, $1, $2, $3, $4, $5, $6, $7, $8,
+            $9, 1, $10, NOW(), NOW(), NOW(), NOW()
         )
         ON CONFLICT (consumer_group, event_id)
         DO UPDATE SET
-            ws_id = COALESCE(EXCLUDED.ws_id, kafka_dlq_events.ws_id),
+            ws_id = 1,
             topic = EXCLUDED.topic,
             partition = EXCLUDED.partition,
             message_offset = EXCLUDED.message_offset,
             event_type = EXCLUDED.event_type,
             aggregate_id = EXCLUDED.aggregate_id,
             payload = EXCLUDED.payload,
-            status = $10,
+            status = $9,
             failure_count = kafka_dlq_events.failure_count + 1,
             error_message = EXCLUDED.error_message,
             last_failed_at = NOW(),
@@ -819,7 +800,6 @@ async fn upsert_kafka_dlq_failure(pool: &PgPool, row: &FailedConsumeRow) -> anyh
         RETURNING failure_count
         "#,
     )
-    .bind(row.ws_id)
     .bind(&row.consumer_group)
     .bind(&row.topic)
     .bind(row.partition)

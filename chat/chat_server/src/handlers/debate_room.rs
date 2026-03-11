@@ -35,7 +35,7 @@ pub(crate) async fn list_debate_sessions_handler(
     State(state): State<AppState>,
     Query(input): Query<ListDebateSessions>,
 ) -> Result<impl IntoResponse, AppError> {
-    let sessions = state.list_debate_sessions(1_i64 as _, input).await?;
+    let sessions = state.list_debate_sessions(input).await?;
     Ok((StatusCode::OK, Json(sessions)))
 }
 

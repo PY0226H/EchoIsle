@@ -68,7 +68,6 @@ pub struct GetIapOrderByTransactionOutput {
 #[derive(Debug, Clone, ToSchema, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WalletBalanceOutput {
-    pub ws_id: u64,
     pub user_id: u64,
     pub balance: i64,
 }
@@ -96,7 +95,6 @@ pub struct WalletLedgerItem {
 #[derive(Debug, Clone, FromRow)]
 pub(super) struct IapOrderRow {
     pub(super) id: i64,
-    pub(super) ws_id: i64,
     pub(super) user_id: i64,
     pub(super) product_id: String,
     pub(super) status: String,
@@ -108,7 +106,6 @@ pub(super) struct IapOrderRow {
 #[derive(Debug, Clone, FromRow)]
 pub(super) struct IapOrderSnapshotRow {
     pub(super) id: i64,
-    pub(super) ws_id: i64,
     pub(super) user_id: i64,
     pub(super) product_id: String,
     pub(super) status: String,

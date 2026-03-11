@@ -12,7 +12,7 @@ pub(super) fn validate_order_reuse_constraints(
     user: &User,
     product_id: &str,
 ) -> Result<(), AppError> {
-    if order.ws_id != 1_i64 || order.user_id != user.id {
+    if order.user_id != user.id {
         return Err(AppError::PaymentConflict(
             "transaction_id already belongs to another user".to_string(),
         ));
@@ -48,7 +48,7 @@ pub(super) async fn apply_wallet_credit_for_verified_order(
     transaction_id: &str,
 ) -> Result<(bool, i64), AppError> {
     if inserted_order.status != "verified" {
-        let balance = order_ops::wallet_balance_in_tx(tx, 1_i64, user.id).await?;
+        let balance = order_ops::wallet_balance_in_tx(tx, user.id).await?;
         return Ok((false, balance));
     }
 

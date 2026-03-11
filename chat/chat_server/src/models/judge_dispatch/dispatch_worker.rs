@@ -190,19 +190,13 @@ impl AppState {
                 t.context_seed
             FROM debate_sessions s
             JOIN debate_topics t ON t.id = s.topic_id
-            WHERE s.id = $1 AND s.ws_id = $2
+            WHERE s.id = $1
             "#,
         )
         .bind(job.session_id)
-        .bind(job.ws_id)
         .fetch_optional(&self.pool)
         .await?
-        .ok_or_else(|| {
-            AppError::NotFound(format!(
-                "dispatch session {} in platform scope {}",
-                job.session_id, job.ws_id
-            ))
-        })?;
+        .ok_or_else(|| AppError::NotFound(format!("dispatch session {}", job.session_id)))?;
 
         let mut messages: Vec<SessionMessageRow> = sqlx::query_as(
             r#"

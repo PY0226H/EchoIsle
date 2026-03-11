@@ -10,7 +10,6 @@ use sqlx::{Postgres, Transaction};
 
 pub(super) async fn wallet_balance_in_tx(
     tx: &mut Transaction<'_, Postgres>,
-    _ws_id: i64,
     user_id: i64,
 ) -> Result<i64, AppError> {
     let row: Option<(i64,)> = sqlx::query_as(
@@ -77,7 +76,7 @@ impl AppState {
 
         let existing_order: Option<IapOrderRow> = sqlx::query_as(
             r#"
-            SELECT id, ws_id, user_id, product_id, status, verify_mode, verify_reason, coins
+            SELECT id, user_id, product_id, status, verify_mode, verify_reason, coins
             FROM iap_orders
             WHERE platform = 'apple_iap' AND transaction_id = $1
             "#,
@@ -88,7 +87,7 @@ impl AppState {
 
         if let Some(order) = existing_order {
             order_flow::validate_order_reuse_constraints(&order, user, &product.product_id)?;
-            let wallet_balance = wallet_balance_in_tx(&mut tx, 1_i64, user.id).await?;
+            let wallet_balance = wallet_balance_in_tx(&mut tx, user.id).await?;
             tx.commit().await?;
             return Ok(order_flow::build_order_output_without_credit(
                 order,
@@ -122,7 +121,7 @@ impl AppState {
             )
             VALUES ($1, $2, 'apple_iap', $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
             ON CONFLICT (platform, transaction_id) DO NOTHING
-            RETURNING id, ws_id, user_id, product_id, status, verify_mode, verify_reason, coins
+            RETURNING id, user_id, product_id, status, verify_mode, verify_reason, coins
             "#,
         )
         .bind(1_i64)
@@ -143,7 +142,7 @@ impl AppState {
         let Some(inserted_order) = inserted_order else {
             let order: IapOrderRow = sqlx::query_as(
                 r#"
-                SELECT id, ws_id, user_id, product_id, status, verify_mode, verify_reason, coins
+                SELECT id, user_id, product_id, status, verify_mode, verify_reason, coins
                 FROM iap_orders
                 WHERE platform = 'apple_iap' AND transaction_id = $1
                 "#,
@@ -152,7 +151,7 @@ impl AppState {
             .fetch_one(&mut *tx)
             .await?;
             order_flow::validate_order_reuse_constraints(&order, user, &product.product_id)?;
-            let wallet_balance = wallet_balance_in_tx(&mut tx, 1_i64, user.id).await?;
+            let wallet_balance = wallet_balance_in_tx(&mut tx, user.id).await?;
             tx.commit().await?;
             return Ok(order_flow::build_order_output_without_credit(
                 order,

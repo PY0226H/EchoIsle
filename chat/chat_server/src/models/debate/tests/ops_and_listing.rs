@@ -15,14 +15,11 @@ async fn list_debate_topics_should_filter_by_category() -> Result<()> {
         .await?;
 
     let rows = state
-        .list_debate_topics(
-            1,
-            ListDebateTopics {
-                category: Some("game".to_string()),
-                active_only: true,
-                limit: Some(50),
-            },
-        )
+        .list_debate_topics(ListDebateTopics {
+            category: Some("game".to_string()),
+            active_only: true,
+            limit: Some(50),
+        })
         .await?;
     assert!(rows.iter().all(|v| v.category == "game"));
     assert!(!rows.is_empty());
@@ -35,16 +32,13 @@ async fn list_debate_sessions_should_return_joinable_flag() -> Result<()> {
     let (_topic_id, session_id) = seed_topic_and_session(&state, 1, "open", 10).await?;
 
     let rows = state
-        .list_debate_sessions(
-            1,
-            ListDebateSessions {
-                status: Some("open".to_string()),
-                topic_id: None,
-                from: None,
-                to: None,
-                limit: Some(20),
-            },
-        )
+        .list_debate_sessions(ListDebateSessions {
+            status: Some("open".to_string()),
+            topic_id: None,
+            from: None,
+            to: None,
+            limit: Some(20),
+        })
         .await?;
 
     let row = rows
@@ -77,16 +71,13 @@ async fn list_debate_sessions_should_not_mark_future_open_as_joinable() -> Resul
     .await?;
 
     let rows = state
-        .list_debate_sessions(
-            1,
-            ListDebateSessions {
-                status: Some("open".to_string()),
-                topic_id: None,
-                from: None,
-                to: None,
-                limit: Some(50),
-            },
-        )
+        .list_debate_sessions(ListDebateSessions {
+            status: Some("open".to_string()),
+            topic_id: None,
+            from: None,
+            to: None,
+            limit: Some(50),
+        })
         .await?;
     let row = rows
         .into_iter()
@@ -123,7 +114,6 @@ async fn create_debate_topic_by_owner_should_work_and_reject_non_owner() -> Resu
             },
         )
         .await?;
-    assert_eq!(topic.ws_id, 1);
     assert_eq!(topic.created_by, owner.id);
 
     let err = state
@@ -206,7 +196,6 @@ async fn create_debate_session_by_owner_should_validate_status_and_topic() -> Re
             },
         )
         .await?;
-    assert_eq!(session.ws_id, 1);
     assert_eq!(session.topic_id, topic_id);
     assert_eq!(session.status, "open");
     assert!(session.joinable);

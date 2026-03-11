@@ -40,7 +40,6 @@ impl AppState {
         let Some(requester_id) = requester.requester_id else {
             warn!(
                 session_id,
-                ws_id = 1_i64,
                 "auto judge trigger skipped: no available requester in platform scope"
             );
             return Ok(None);
@@ -90,7 +89,7 @@ impl AppState {
 
         let Some(session): Option<DebateSessionForJudge> = sqlx::query_as(
             r#"
-            SELECT ws_id, status
+            SELECT status
             FROM debate_sessions
             WHERE id = $1
             FOR UPDATE
@@ -104,12 +103,6 @@ impl AppState {
                 "debate session id {session_id}"
             )));
         };
-
-        if session.ws_id != 1_i64 {
-            return Err(AppError::NotFound(format!(
-                "debate session id {session_id}"
-            )));
-        }
 
         if !can_request_judge(&session.status) {
             return Err(AppError::DebateConflict(format!(
@@ -219,7 +212,6 @@ impl AppState {
         if let Err(err) = self
             .event_bus
             .publish_ai_judge_job_created(AiJudgeJobCreatedEvent {
-                ws_id: 1_i64 as u64,
                 session_id,
                 job_id: job.id as u64,
                 requested_by: user.id as u64,

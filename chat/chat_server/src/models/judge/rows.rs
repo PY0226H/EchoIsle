@@ -4,7 +4,6 @@ use sqlx::FromRow;
 
 #[derive(Debug, Clone, FromRow)]
 pub(super) struct DebateSessionForJudge {
-    pub ws_id: i64,
     pub status: String,
 }
 
@@ -25,7 +24,6 @@ pub(super) struct AutoJudgeRequesterRow {
 #[derive(Debug, Clone, FromRow)]
 pub(super) struct JudgeJobForUpdate {
     pub id: i64,
-    pub ws_id: i64,
     pub session_id: i64,
     pub status: String,
     pub rejudge_triggered: bool,
@@ -98,7 +96,6 @@ pub(super) struct JudgeReviewOpsRow {
 #[derive(Debug, Clone, FromRow)]
 pub(super) struct DrawVoteRow {
     pub id: i64,
-    pub ws_id: i64,
     pub session_id: i64,
     pub report_id: i64,
     pub threshold_percent: i32,
@@ -121,7 +118,6 @@ pub(super) struct DrawVoteStatsRow {
 #[derive(Debug, Clone, FromRow)]
 pub(super) struct DebateSessionForRematch {
     pub id: i64,
-    pub ws_id: i64,
     pub topic_id: i64,
     pub scheduled_start_at: DateTime<Utc>,
     pub actual_start_at: Option<DateTime<Utc>>,

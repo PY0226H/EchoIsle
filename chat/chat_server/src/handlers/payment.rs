@@ -61,12 +61,7 @@ pub(crate) async fn verify_iap_order_handler(
     headers: HeaderMap,
     Json(input): Json<VerifyIapOrderInput>,
 ) -> Result<impl IntoResponse, AppError> {
-    let limiter_key = format!(
-        "ws:{}:user:{}:tx:{}",
-        1_i64,
-        user.id,
-        input.transaction_id.trim()
-    );
+    let limiter_key = format!("user:{}:tx:{}", user.id, input.transaction_id.trim());
     let decision = enforce_rate_limit(
         &state,
         "iap_verify",
@@ -152,9 +147,7 @@ pub(crate) async fn get_wallet_balance_handler(
     Extension(user): Extension<User>,
     State(state): State<AppState>,
 ) -> Result<impl IntoResponse, AppError> {
-    let ret = state
-        .get_wallet_balance(1_i64 as u64, user.id as u64)
-        .await?;
+    let ret = state.get_wallet_balance(user.id as u64).await?;
     Ok((StatusCode::OK, Json(ret)))
 }
 
@@ -177,8 +170,6 @@ pub(crate) async fn list_wallet_ledger_handler(
     State(state): State<AppState>,
     Query(input): Query<ListWalletLedger>,
 ) -> Result<impl IntoResponse, AppError> {
-    let rows = state
-        .list_wallet_ledger(1_i64 as u64, user.id as u64, input)
-        .await?;
+    let rows = state.list_wallet_ledger(user.id as u64, input).await?;
     Ok((StatusCode::OK, Json(rows)))
 }

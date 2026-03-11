@@ -64,7 +64,7 @@ impl AppState {
                 updated_at = NOW()
             WHERE id = $1
             RETURNING
-                id, ws_id, session_id, report_id, threshold_percent, eligible_voters, required_voters,
+                id, session_id, report_id, threshold_percent, eligible_voters, required_voters,
                 voting_ends_at, status, resolution, decided_at, rematch_session_id
             "#,
         )
@@ -98,7 +98,7 @@ impl AppState {
         let source: DebateSessionForRematch = sqlx::query_as(
             r#"
             SELECT
-                id, ws_id, topic_id, scheduled_start_at, actual_start_at, end_at,
+                id, topic_id, scheduled_start_at, actual_start_at, end_at,
                 max_participants_per_side, rematch_round
             FROM debate_sessions
             WHERE id = $1
@@ -135,14 +135,13 @@ impl AppState {
                     parent_session_id, rematch_round, created_at, updated_at
                 )
                 VALUES (
-                    $1, $2, 'scheduled', $3, NULL, $4,
-                    $5, 0, 0, 0,
-                    $6, $7, NOW(), NOW()
+                    1, $1, 'scheduled', $2, NULL, $3,
+                    $4, 0, 0, 0,
+                    $5, $6, NOW(), NOW()
                 )
                 RETURNING id
                 "#,
             )
-            .bind(source.ws_id)
             .bind(source.topic_id)
             .bind(scheduled_start_at)
             .bind(end_at)
@@ -188,7 +187,7 @@ impl AppState {
                 updated_at = NOW()
             WHERE id = $1
             RETURNING
-                id, ws_id, session_id, report_id, threshold_percent, eligible_voters, required_voters,
+                id, session_id, report_id, threshold_percent, eligible_voters, required_voters,
                 voting_ends_at, status, resolution, decided_at, rematch_session_id
             "#,
         )
@@ -201,7 +200,6 @@ impl AppState {
 
     pub(super) async fn create_draw_vote_for_report(
         tx: &mut Transaction<'_, Postgres>,
-        ws_id: i64,
         session_id: i64,
         report_id: i64,
     ) -> Result<(), AppError> {
@@ -223,14 +221,13 @@ impl AppState {
                 voting_ends_at, status, resolution, created_at, updated_at
             )
             VALUES (
-                $1, $2, $3, $4, $5, $6,
-                NOW() + ($7::bigint * INTERVAL '1 second'),
+                1, $1, $2, $3, $4, $5,
+                NOW() + ($6::bigint * INTERVAL '1 second'),
                 'open', 'pending', NOW(), NOW()
             )
             ON CONFLICT (report_id) DO NOTHING
             "#,
         )
-        .bind(ws_id)
         .bind(session_id)
         .bind(report_id)
         .bind(DRAW_VOTE_THRESHOLD_PERCENT)
@@ -249,22 +246,18 @@ impl AppState {
     ) -> Result<GetDrawVoteOutput, AppError> {
         let mut tx = self.pool.begin().await?;
 
-        let session_ws_id: Option<(i64,)> = sqlx::query_as(
+        let session_exists = sqlx::query_scalar::<_, i32>(
             r#"
-            SELECT ws_id
+            SELECT 1
             FROM debate_sessions
             WHERE id = $1
+            LIMIT 1
             "#,
         )
         .bind(session_id as i64)
         .fetch_optional(&mut *tx)
         .await?;
-        let Some((session_ws_id,)) = session_ws_id else {
-            return Err(AppError::NotFound(format!(
-                "debate session id {session_id}"
-            )));
-        };
-        if session_ws_id != 1_i64 {
+        if session_exists.is_none() {
             return Err(AppError::NotFound(format!(
                 "debate session id {session_id}"
             )));
@@ -292,7 +285,7 @@ impl AppState {
         let vote: Option<DrawVoteRow> = sqlx::query_as(
             r#"
             SELECT
-                id, ws_id, session_id, report_id, threshold_percent, eligible_voters, required_voters,
+                id, session_id, report_id, threshold_percent, eligible_voters, required_voters,
                 voting_ends_at, status, resolution, decided_at, rematch_session_id
             FROM judge_draw_votes
             WHERE session_id = $1
@@ -352,22 +345,18 @@ impl AppState {
     ) -> Result<SubmitDrawVoteOutput, AppError> {
         let mut tx = self.pool.begin().await?;
 
-        let session_ws_id: Option<(i64,)> = sqlx::query_as(
+        let session_exists = sqlx::query_scalar::<_, i32>(
             r#"
-            SELECT ws_id
+            SELECT 1
             FROM debate_sessions
             WHERE id = $1
+            LIMIT 1
             "#,
         )
         .bind(session_id as i64)
         .fetch_optional(&mut *tx)
         .await?;
-        let Some((session_ws_id,)) = session_ws_id else {
-            return Err(AppError::NotFound(format!(
-                "debate session id {session_id}"
-            )));
-        };
-        if session_ws_id != 1_i64 {
+        if session_exists.is_none() {
             return Err(AppError::NotFound(format!(
                 "debate session id {session_id}"
             )));
@@ -395,7 +384,7 @@ impl AppState {
         let vote: Option<DrawVoteRow> = sqlx::query_as(
             r#"
             SELECT
-                id, ws_id, session_id, report_id, threshold_percent, eligible_voters, required_voters,
+                id, session_id, report_id, threshold_percent, eligible_voters, required_voters,
                 voting_ends_at, status, resolution, decided_at, rematch_session_id
             FROM judge_draw_votes
             WHERE session_id = $1
@@ -442,7 +431,7 @@ impl AppState {
             INSERT INTO judge_draw_vote_ballots(
                 vote_id, ws_id, session_id, report_id, user_id, agree_draw, voted_at
             )
-            VALUES ($1, $2, $3, $4, $5, $6, NOW())
+            VALUES ($1, 1, $2, $3, $4, $5, NOW())
             ON CONFLICT (vote_id, user_id)
             DO UPDATE
             SET agree_draw = EXCLUDED.agree_draw,
@@ -450,7 +439,6 @@ impl AppState {
             "#,
         )
         .bind(vote.id)
-        .bind(vote.ws_id)
         .bind(vote.session_id)
         .bind(vote.report_id)
         .bind(user.id)

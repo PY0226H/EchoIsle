@@ -106,14 +106,9 @@ async fn load_two_users(state: &AppState, user1_id: i64, user2_id: i64) -> Resul
     Ok((user1, user2))
 }
 
-async fn query_wallet_ledger(
-    state: &AppState,
-    ws_id: u64,
-    user_id: u64,
-) -> Result<Vec<WalletLedgerItem>> {
+async fn query_wallet_ledger(state: &AppState, user_id: u64) -> Result<Vec<WalletLedgerItem>> {
     state
         .list_wallet_ledger(
-            ws_id,
             user_id,
             ListWalletLedger {
                 last_id: None,
@@ -495,10 +490,10 @@ async fn verify_iap_order_should_credit_wallet_and_create_ledger() -> Result<()>
         .await?;
     assert_order_output(&out, "verified", "mock", true, 60);
 
-    let balance = state.get_wallet_balance(1, 1).await?;
+    let balance = state.get_wallet_balance(1).await?;
     assert_eq!(balance.balance, 60);
 
-    let ledger = query_wallet_ledger(&state, 1, 1).await?;
+    let ledger = query_wallet_ledger(&state, 1).await?;
     assert_single_credit_ledger_entry(&ledger, 60);
     Ok(())
 }
@@ -519,7 +514,7 @@ async fn verify_iap_order_should_be_idempotent_for_same_transaction_id() -> Resu
     assert_order_output(&second, "verified", "mock", false, 60);
     assert_eq!(first.order_id, second.order_id);
 
-    let ledger = query_wallet_ledger(&state, 1, 1).await?;
+    let ledger = query_wallet_ledger(&state, 1).await?;
     assert_single_credit_ledger_entry(&ledger, 60);
     Ok(())
 }
@@ -534,7 +529,7 @@ async fn verify_iap_order_should_create_rejected_order_without_credit() -> Resul
         .await?;
     assert_order_output(&out, "rejected", "mock", false, 0);
 
-    let ledger = query_wallet_ledger(&state, 1, 1).await?;
+    let ledger = query_wallet_ledger(&state, 1).await?;
     assert!(ledger.is_empty());
     Ok(())
 }

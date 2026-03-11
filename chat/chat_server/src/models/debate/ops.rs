@@ -32,7 +32,7 @@ impl AppState {
             )
             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
             RETURNING
-                id, ws_id, title, description, category, stance_pro, stance_con,
+                id, title, description, category, stance_pro, stance_con,
                 context_seed, is_active, created_by, created_at, updated_at
             "#,
         )
@@ -89,11 +89,10 @@ impl AppState {
             r#"
             SELECT id
             FROM debate_topics
-            WHERE id = $1 AND ws_id = $2
+            WHERE id = $1
             "#,
         )
         .bind(input.topic_id as i64)
-        .bind(1_i64)
         .fetch_optional(&self.pool)
         .await?;
 
@@ -111,7 +110,7 @@ impl AppState {
             )
             VALUES ($1, $2, $3, $4, NULL, $5, $6)
             RETURNING
-                id, ws_id, topic_id, status, scheduled_start_at, actual_start_at, end_at,
+                id, topic_id, status, scheduled_start_at, actual_start_at, end_at,
                 max_participants_per_side, pro_count, con_count, hot_score, created_at, updated_at,
                 (
                     (status IN ('open', 'running'))
@@ -158,22 +157,21 @@ impl AppState {
             r#"
             UPDATE debate_topics
             SET
-              title = $3,
-              description = $4,
-              category = $5,
-              stance_pro = $6,
-              stance_con = $7,
-              context_seed = $8,
-              is_active = $9,
+              title = $2,
+              description = $3,
+              category = $4,
+              stance_pro = $5,
+              stance_con = $6,
+              context_seed = $7,
+              is_active = $8,
               updated_at = NOW()
-            WHERE id = $1 AND ws_id = $2
+            WHERE id = $1
             RETURNING
-                id, ws_id, title, description, category, stance_pro, stance_con,
+                id, title, description, category, stance_pro, stance_con,
                 context_seed, is_active, created_by, created_at, updated_at
             "#,
         )
         .bind(topic_id as i64)
-        .bind(1_i64)
         .bind(title)
         .bind(description)
         .bind(category)
@@ -203,12 +201,11 @@ impl AppState {
             r#"
             SELECT status, scheduled_start_at, end_at, max_participants_per_side, pro_count, con_count
             FROM debate_sessions
-            WHERE id = $1 AND ws_id = $2
+            WHERE id = $1
             FOR UPDATE
             "#,
         )
         .bind(session_id as i64)
-        .bind(1_i64)
         .fetch_optional(&mut *tx)
         .await?
         .ok_or_else(|| AppError::NotFound(format!("debate session id {session_id}")))?;
@@ -256,14 +253,14 @@ impl AppState {
             r#"
             UPDATE debate_sessions
             SET
-              status = $3,
-              scheduled_start_at = $4,
-              end_at = $5,
-              max_participants_per_side = $6,
+              status = $2,
+              scheduled_start_at = $3,
+              end_at = $4,
+              max_participants_per_side = $5,
               updated_at = NOW()
-            WHERE id = $1 AND ws_id = $2
+            WHERE id = $1
             RETURNING
-                id, ws_id, topic_id, status, scheduled_start_at, actual_start_at, end_at,
+                id, topic_id, status, scheduled_start_at, actual_start_at, end_at,
                 max_participants_per_side, pro_count, con_count, hot_score, created_at, updated_at,
                 (
                     (status IN ('open', 'running'))
@@ -273,7 +270,6 @@ impl AppState {
             "#,
         )
         .bind(session_id as i64)
-        .bind(1_i64)
         .bind(next_status)
         .bind(next_scheduled_start)
         .bind(next_end_at)

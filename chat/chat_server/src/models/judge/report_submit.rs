@@ -58,7 +58,7 @@ impl AppState {
         let mut tx = self.pool.begin().await?;
         let Some(job): Option<JudgeJobForUpdate> = sqlx::query_as(
             r#"
-            SELECT id, ws_id, session_id, status, rejudge_triggered, error_message
+            SELECT id, session_id, status, rejudge_triggered, error_message
             FROM judge_jobs
             WHERE id = $1
             FOR UPDATE
@@ -147,8 +147,7 @@ impl AppState {
         .await?;
 
         if input.needs_draw_vote {
-            Self::create_draw_vote_for_report(&mut tx, job.ws_id, job.session_id, report_id.0)
-                .await?;
+            Self::create_draw_vote_for_report(&mut tx, job.session_id, report_id.0).await?;
         }
 
         for stage in input.stage_summaries.iter() {
@@ -214,7 +213,7 @@ impl AppState {
         let mut tx = self.pool.begin().await?;
         let Some(job): Option<JudgeJobForUpdate> = sqlx::query_as(
             r#"
-            SELECT id, ws_id, session_id, status, rejudge_triggered, error_message
+            SELECT id, session_id, status, rejudge_triggered, error_message
             FROM judge_jobs
             WHERE id = $1
             FOR UPDATE

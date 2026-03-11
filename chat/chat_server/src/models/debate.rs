@@ -40,7 +40,6 @@ const PIN_COST_PER_UNIT_COINS: i64 = 10;
 #[serde(rename_all = "camelCase")]
 pub struct DebateTopic {
     pub id: i64,
-    pub ws_id: i64,
     pub title: String,
     pub description: String,
     pub category: String,
@@ -57,7 +56,6 @@ pub struct DebateTopic {
 #[serde(rename_all = "camelCase")]
 pub struct DebateSessionSummary {
     pub id: i64,
-    pub ws_id: i64,
     pub topic_id: i64,
     pub status: String,
     pub scheduled_start_at: DateTime<Utc>,
@@ -155,7 +153,6 @@ pub struct JoinDebateSessionOutput {
 #[serde(rename_all = "camelCase")]
 pub struct DebateMessage {
     pub id: i64,
-    pub ws_id: i64,
     pub session_id: i64,
     pub user_id: i64,
     pub side: String,
@@ -188,7 +185,6 @@ pub struct ListDebatePinnedMessages {
 #[serde(rename_all = "camelCase")]
 pub struct DebatePinnedMessage {
     pub id: i64,
-    pub ws_id: i64,
     pub session_id: i64,
     pub message_id: i64,
     pub user_id: i64,
@@ -224,7 +220,6 @@ pub struct PinDebateMessageOutput {
 
 #[derive(Debug, FromRow)]
 struct DebateSessionForJoin {
-    ws_id: i64,
     status: String,
     scheduled_start_at: DateTime<Utc>,
     end_at: DateTime<Utc>,
@@ -235,7 +230,6 @@ struct DebateSessionForJoin {
 
 #[derive(Debug, FromRow)]
 struct DebateSessionForAction {
-    ws_id: i64,
     status: String,
     end_at: DateTime<Utc>,
 }
@@ -253,7 +247,6 @@ struct DebateSessionForOpsUpdate {
 #[derive(Debug, FromRow)]
 struct DebateMessageForPin {
     id: i64,
-    ws_id: i64,
     session_id: i64,
     user_id: i64,
 }
@@ -294,22 +287,19 @@ pub struct DebateSessionAdvanceReport {
 impl AppState {
     pub async fn list_debate_topics(
         &self,
-        ws_id: u64,
         input: ListDebateTopics,
     ) -> Result<Vec<DebateTopic>, AppError> {
         let limit = normalize_limit(input.limit);
         let topics = sqlx::query_as(
             r#"
-            SELECT id, ws_id, title, description, category, stance_pro, stance_con, context_seed, is_active, created_by, created_at, updated_at
+            SELECT id, title, description, category, stance_pro, stance_con, context_seed, is_active, created_by, created_at, updated_at
             FROM debate_topics
-            WHERE ws_id = $1
-              AND ($2::text IS NULL OR category = $2)
-              AND (NOT $3::boolean OR is_active = TRUE)
+            WHERE ($1::text IS NULL OR category = $1)
+              AND (NOT $2::boolean OR is_active = TRUE)
             ORDER BY created_at DESC
-            LIMIT $4
+            LIMIT $3
             "#,
         )
-        .bind(ws_id as i64)
         .bind(input.category)
         .bind(input.active_only)
         .bind(limit)
@@ -321,14 +311,13 @@ impl AppState {
 
     pub async fn list_debate_sessions(
         &self,
-        ws_id: u64,
         input: ListDebateSessions,
     ) -> Result<Vec<DebateSessionSummary>, AppError> {
         let limit = normalize_limit(input.limit);
         let rows = sqlx::query_as(
             r#"
             SELECT
-                id, ws_id, topic_id, status, scheduled_start_at, actual_start_at, end_at,
+                id, topic_id, status, scheduled_start_at, actual_start_at, end_at,
                 max_participants_per_side, pro_count, con_count, hot_score, created_at, updated_at,
                 (
                     (status IN ('open', 'running'))
@@ -336,16 +325,14 @@ impl AppState {
                     AND end_at > NOW()
                 ) AS joinable
             FROM debate_sessions
-            WHERE ws_id = $1
-              AND ($2::text IS NULL OR status = $2)
-              AND ($3::bigint IS NULL OR topic_id = $3)
-              AND ($4::timestamptz IS NULL OR scheduled_start_at >= $4)
-              AND ($5::timestamptz IS NULL OR scheduled_start_at <= $5)
+            WHERE ($1::text IS NULL OR status = $1)
+              AND ($2::bigint IS NULL OR topic_id = $2)
+              AND ($3::timestamptz IS NULL OR scheduled_start_at >= $3)
+              AND ($4::timestamptz IS NULL OR scheduled_start_at <= $4)
             ORDER BY scheduled_start_at DESC
-            LIMIT $6
+            LIMIT $5
             "#,
         )
-        .bind(ws_id as i64)
         .bind(input.status)
         .bind(input.topic_id.map(|v| v as i64))
         .bind(input.from)
@@ -374,7 +361,7 @@ impl AppState {
 
         let Some(session) = sqlx::query_as::<_, DebateSessionForJoin>(
             r#"
-            SELECT ws_id, status, scheduled_start_at, end_at, max_participants_per_side, pro_count, con_count
+            SELECT status, scheduled_start_at, end_at, max_participants_per_side, pro_count, con_count
             FROM debate_sessions
             WHERE id = $1
             FOR UPDATE
@@ -388,12 +375,6 @@ impl AppState {
                 "debate session id {session_id}"
             )));
         };
-
-        if session.ws_id != 1_i64 {
-            return Err(AppError::NotFound(format!(
-                "debate session id {session_id}"
-            )));
-        }
 
         let now = Utc::now();
         if !can_join_status(&session.status)
@@ -490,7 +471,6 @@ impl AppState {
         if let Err(err) = self
             .event_bus
             .publish_debate_participant_joined(DebateParticipantJoinedEvent {
-                ws_id: 1_i64 as u64,
                 session_id,
                 user_id: user.id as u64,
                 side: input.side.clone(),
@@ -715,7 +695,6 @@ impl AppState {
               AND EXISTS(
                 SELECT 1
                 FROM users u
-                WHERE u.ws_id = s.ws_id
               )
               AND NOT EXISTS(
                 SELECT 1

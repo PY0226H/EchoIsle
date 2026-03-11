@@ -97,7 +97,7 @@ pub struct DebateDrawVoteResolved {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct OpsObservabilityAlert {
-    pub ws_id: i64,
+    pub scope_id: i64,
     pub alert_key: String,
     pub rule_type: String,
     pub severity: String,
@@ -202,7 +202,10 @@ struct DebateDrawVoteResolvedPayload {
 
 #[derive(Debug, Serialize, Deserialize)]
 struct OpsObservabilityAlertPayload {
-    ws_id: i64,
+    #[serde(default)]
+    scope_id: Option<i64>,
+    #[serde(default)]
+    ws_id: Option<i64>,
     alert_key: String,
     rule_type: String,
     severity: String,
@@ -399,7 +402,7 @@ impl Notification {
             "ops_observability_alert" => {
                 let payload: OpsObservabilityAlertPayload = serde_json::from_str(payload)?;
                 let event = OpsObservabilityAlert {
-                    ws_id: payload.ws_id,
+                    scope_id: payload.scope_id.or(payload.ws_id).unwrap_or(1),
                     alert_key: payload.alert_key,
                     rule_type: payload.rule_type,
                     severity: payload.severity,
@@ -690,7 +693,7 @@ mod tests {
     #[test]
     fn notification_load_should_parse_ops_observability_alert() {
         let payload = r#"{
-            "ws_id": 1,
+            "scope_id": 1,
             "alert_key": "high_retry",
             "rule_type": "high_retry",
             "severity": "warning",
@@ -704,7 +707,7 @@ mod tests {
         assert_eq!(notif.user_ids, HashSet::from([1_u64, 2_u64, 3_u64]));
         match notif.event.as_ref() {
             AppEvent::OpsObservabilityAlert(v) => {
-                assert_eq!(v.ws_id, 1);
+                assert_eq!(v.scope_id, 1);
                 assert_eq!(v.alert_key, "high_retry");
                 assert_eq!(v.status, "raised");
                 assert_eq!(v.metrics["avgDispatchAttempts"], 2.2);
