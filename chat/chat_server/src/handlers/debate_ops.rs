@@ -27,7 +27,7 @@ const OPS_OBSERVABILITY_EVAL_RATE_LIMIT_WINDOW_SECS: u64 = 60;
     responses(
         (status = 201, description = "Created debate topic", body = crate::DebateTopic),
         (status = 400, description = "Invalid input", body = crate::ErrorOutput),
-        (status = 404, description = "Workspace not found", body = crate::ErrorOutput),
+        (status = 404, description = "Resource not found", body = crate::ErrorOutput),
         (status = 409, description = "Permission conflict", body = crate::ErrorOutput),
     ),
     security(
@@ -54,7 +54,7 @@ pub(crate) async fn create_debate_topic_ops_handler(
     responses(
         (status = 200, description = "Updated debate topic", body = crate::DebateTopic),
         (status = 400, description = "Invalid input", body = crate::ErrorOutput),
-        (status = 404, description = "Topic/workspace not found", body = crate::ErrorOutput),
+        (status = 404, description = "Topic not found", body = crate::ErrorOutput),
         (status = 409, description = "Permission conflict", body = crate::ErrorOutput),
     ),
     security(
@@ -79,7 +79,7 @@ pub(crate) async fn update_debate_topic_ops_handler(
     responses(
         (status = 201, description = "Created debate session", body = crate::DebateSessionSummary),
         (status = 400, description = "Invalid input", body = crate::ErrorOutput),
-        (status = 404, description = "Topic/workspace not found", body = crate::ErrorOutput),
+        (status = 404, description = "Topic not found", body = crate::ErrorOutput),
         (status = 409, description = "Permission conflict", body = crate::ErrorOutput),
     ),
     security(
@@ -106,7 +106,7 @@ pub(crate) async fn create_debate_session_ops_handler(
     responses(
         (status = 200, description = "Updated debate session", body = crate::DebateSessionSummary),
         (status = 400, description = "Invalid input", body = crate::ErrorOutput),
-        (status = 404, description = "Session/workspace not found", body = crate::ErrorOutput),
+        (status = 404, description = "Session not found", body = crate::ErrorOutput),
         (status = 409, description = "Permission conflict", body = crate::ErrorOutput),
     ),
     security(
@@ -125,7 +125,7 @@ pub(crate) async fn update_debate_session_ops_handler(
     Ok((StatusCode::OK, Json(session)))
 }
 
-/// List workspace ops role assignments (owner only).
+/// List platform ops role assignments (platform admin only).
 #[utoipa::path(
     get,
     path = "/api/debate/ops/rbac/roles",
@@ -244,7 +244,7 @@ pub(crate) async fn get_ops_service_split_readiness_handler(
     Ok((StatusCode::OK, Json(ret)))
 }
 
-/// List split-readiness manual review audit history for current workspace.
+/// List split-readiness manual review audit history for platform scope.
 #[utoipa::path(
     get,
     path = "/api/debate/ops/observability/split-readiness/reviews",
@@ -292,7 +292,7 @@ pub(crate) async fn upsert_ops_service_split_review_handler(
     Ok((StatusCode::OK, Json(ret)))
 }
 
-/// Upsert ops observability thresholds for current workspace.
+/// Upsert ops observability thresholds for platform scope.
 #[utoipa::path(
     put,
     path = "/api/debate/ops/observability/thresholds",
@@ -316,7 +316,7 @@ pub(crate) async fn upsert_ops_observability_thresholds_handler(
     Ok((StatusCode::OK, Json(ret)))
 }
 
-/// Upsert ops observability anomaly-state map for current workspace.
+/// Upsert ops observability anomaly-state map for platform scope.
 #[utoipa::path(
     put,
     path = "/api/debate/ops/observability/anomaly-state",
@@ -340,7 +340,7 @@ pub(crate) async fn upsert_ops_observability_anomaly_state_handler(
     Ok((StatusCode::OK, Json(ret)))
 }
 
-/// Apply anomaly-state action for a single alert key in current workspace.
+/// Apply anomaly-state action for a single alert key in platform scope.
 #[utoipa::path(
     post,
     path = "/api/debate/ops/observability/anomaly-state/actions",
@@ -365,7 +365,7 @@ pub(crate) async fn apply_ops_observability_anomaly_action_handler(
     Ok((StatusCode::OK, Json(ret)))
 }
 
-/// Trigger one-shot observability evaluation for current workspace.
+/// Trigger one-shot observability evaluation for platform scope.
 #[utoipa::path(
     post,
     path = "/api/debate/ops/observability/evaluate-once",
@@ -438,7 +438,7 @@ pub(crate) async fn list_ops_alert_notifications_handler(
     Ok((StatusCode::OK, Json(ret)))
 }
 
-/// List Kafka DLQ events for current workspace.
+/// List Kafka DLQ events for platform scope.
 #[utoipa::path(
     get,
     path = "/api/debate/ops/kafka/dlq",

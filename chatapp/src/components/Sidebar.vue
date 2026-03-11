@@ -2,7 +2,7 @@
   <div class="w-64 bg-gray-800 text-white flex flex-col h-screen p-4 text-sm">
     <div class="flex items-center justify-between mb-6">
       <div class="font-bold text-base truncate cursor-pointer" @click="toggleDropdown">
-        <span>{{ workspaceName }}</span>
+        <span>{{ displayName }}</span>
         <button class="text-gray-400 ml-1">&nbsp;▼</button>
       </div>
       <div v-if="dropdownVisible" class="absolute top-12 left-0 w-48 bg-gray-800 border border-gray-700 rounded-md shadow-lg z-10">
@@ -104,8 +104,8 @@ export default {
     };
   },
   computed: {
-    workspaceName() {
-      return this.$store.getters.getWorkspace.name || 'No Workspace';
+    displayName() {
+      return this.$store.getters.getUser?.fullname || 'AIComm';
     },
     channels() {
       return this.$store.getters.getChannels;
@@ -156,7 +156,7 @@ export default {
       const selfId = this.$store.state.user?.id;
       const peerId = pickDefaultPeerUserId(this.$store.state.users, selfId);
       if (!peerId) {
-        alert('当前工作区没有其他用户，无法创建频道。请先注册第二个用户后再创建。');
+        alert('当前没有其他用户，无法创建频道。请先注册第二个用户后再创建。');
         return;
       }
 

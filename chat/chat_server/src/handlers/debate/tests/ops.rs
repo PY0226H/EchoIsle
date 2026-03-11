@@ -32,7 +32,7 @@ use chrono::Utc;
 use std::collections::HashMap;
 
 #[tokio::test]
-async fn list_judge_reviews_ops_handler_should_require_workspace_owner() -> Result<()> {
+async fn list_judge_reviews_ops_handler_should_require_platform_admin() -> Result<()> {
     let (_tdb, state) = AppState::new_for_test().await?;
     let non_owner = state.find_user_by_id(2).await?.expect("user should exist");
 
@@ -57,7 +57,7 @@ async fn list_judge_reviews_ops_handler_should_require_workspace_owner() -> Resu
 #[tokio::test]
 async fn request_judge_rejudge_ops_handler_should_accept_when_report_exists() -> Result<()> {
     let (_tdb, state) = AppState::new_for_test().await?;
-    state.update_workspace_owner(1, 1).await?;
+    state.grant_platform_admin(1).await?;
     let owner = state.find_user_by_id(1).await?.expect("owner should exist");
     let session_id = seed_topic_and_session(&state, 1, "closed").await?;
     let job_id = seed_running_judge_job(&state, session_id).await?;
@@ -103,7 +103,7 @@ async fn request_judge_rejudge_ops_handler_should_accept_when_report_exists() ->
 #[tokio::test]
 async fn ops_rbac_role_handlers_should_upsert_list_and_revoke() -> Result<()> {
     let (_tdb, state) = AppState::new_for_test().await?;
-    state.update_workspace_owner(1, 1).await?;
+    state.grant_platform_admin(1).await?;
     let owner = state.find_user_by_id(1).await?.expect("owner should exist");
 
     let upsert_resp = upsert_ops_role_assignment_handler(
@@ -125,7 +125,11 @@ async fn ops_rbac_role_handlers_should_upsert_list_and_revoke() -> Result<()> {
             .await?
             .into_response();
     let list_json = json_body_with_status(list_resp, StatusCode::OK).await?;
-    assert_eq!(list_json["items"].as_array().map(Vec::len), Some(1));
+    let items = list_json["items"].as_array().cloned().unwrap_or_default();
+    assert!(!items.is_empty());
+    assert!(items.iter().any(|item| {
+        item["userId"].as_u64() == Some(2) && item["role"].as_str() == Some("ops_reviewer")
+    }));
 
     let revoke_resp =
         revoke_ops_role_assignment_handler(Extension(owner), State(state), Path(2_u64))
@@ -139,7 +143,7 @@ async fn ops_rbac_role_handlers_should_upsert_list_and_revoke() -> Result<()> {
 #[tokio::test]
 async fn get_ops_rbac_me_handler_should_return_owner_and_role_snapshot() -> Result<()> {
     let (_tdb, state) = AppState::new_for_test().await?;
-    state.update_workspace_owner(1, 1).await?;
+    state.grant_platform_admin(1).await?;
     let owner = state.find_user_by_id(1).await?.expect("owner should exist");
     let viewer = state
         .find_user_by_id(2)
@@ -183,7 +187,7 @@ async fn get_ops_rbac_me_handler_should_return_owner_and_role_snapshot() -> Resu
 async fn list_ops_role_assignments_handler_should_return_standardized_denied_error_for_non_owner(
 ) -> Result<()> {
     let (_tdb, state) = AppState::new_for_test().await?;
-    state.update_workspace_owner(1, 1).await?;
+    state.grant_platform_admin(1).await?;
     let non_owner = state.find_user_by_id(2).await?.expect("user should exist");
 
     let result = list_ops_role_assignments_handler(Extension(non_owner), State(state)).await;
@@ -194,7 +198,7 @@ async fn list_ops_role_assignments_handler_should_return_standardized_denied_err
 #[tokio::test]
 async fn get_ops_observability_config_handler_should_return_default_snapshot() -> Result<()> {
     let (_tdb, state) = AppState::new_for_test().await?;
-    state.update_workspace_owner(1, 1).await?;
+    state.grant_platform_admin(1).await?;
     let owner = state.find_user_by_id(1).await?.expect("owner should exist");
 
     let response = get_ops_observability_config_handler(Extension(owner), State(state))
@@ -209,7 +213,7 @@ async fn get_ops_observability_config_handler_should_return_default_snapshot() -
 #[tokio::test]
 async fn ops_observability_config_handlers_should_require_judge_review_permission() -> Result<()> {
     let (_tdb, state) = AppState::new_for_test().await?;
-    state.update_workspace_owner(1, 1).await?;
+    state.grant_platform_admin(1).await?;
     let non_owner = state.find_user_by_id(3).await?.expect("user should exist");
 
     let get_result =
@@ -292,7 +296,7 @@ async fn ops_observability_config_handlers_should_require_judge_review_permissio
 async fn get_ops_observability_metrics_dictionary_handler_should_return_canonical_items(
 ) -> Result<()> {
     let (_tdb, state) = AppState::new_for_test().await?;
-    state.update_workspace_owner(1, 1).await?;
+    state.grant_platform_admin(1).await?;
     let owner = state.find_user_by_id(1).await?.expect("owner should exist");
 
     let response = get_ops_observability_metrics_dictionary_handler(Extension(owner), State(state))
@@ -314,7 +318,7 @@ async fn get_ops_observability_metrics_dictionary_handler_should_return_canonica
 #[tokio::test]
 async fn get_ops_observability_slo_snapshot_handler_should_return_signal_and_rules() -> Result<()> {
     let (_tdb, state) = AppState::new_for_test().await?;
-    state.update_workspace_owner(1, 1).await?;
+    state.grant_platform_admin(1).await?;
     let owner = state.find_user_by_id(1).await?.expect("owner should exist");
 
     let response = get_ops_observability_slo_snapshot_handler(Extension(owner), State(state))
@@ -342,7 +346,7 @@ async fn get_ops_observability_slo_snapshot_handler_should_return_signal_and_rul
 #[tokio::test]
 async fn get_ops_service_split_readiness_handler_should_return_thresholds() -> Result<()> {
     let (_tdb, state) = AppState::new_for_test().await?;
-    state.update_workspace_owner(1, 1).await?;
+    state.grant_platform_admin(1).await?;
     let owner = state.find_user_by_id(1).await?.expect("owner should exist");
 
     let response = get_ops_service_split_readiness_handler(Extension(owner), State(state))
@@ -375,7 +379,7 @@ async fn get_ops_service_split_readiness_handler_should_return_thresholds() -> R
 async fn upsert_ops_service_split_review_handler_should_update_compliance_threshold() -> Result<()>
 {
     let (_tdb, state) = AppState::new_for_test().await?;
-    state.update_workspace_owner(1, 1).await?;
+    state.grant_platform_admin(1).await?;
     let owner = state.find_user_by_id(1).await?.expect("owner should exist");
 
     let response = upsert_ops_service_split_review_handler(
@@ -412,7 +416,7 @@ async fn upsert_ops_service_split_review_handler_should_update_compliance_thresh
 #[tokio::test]
 async fn upsert_ops_service_split_review_handler_should_emit_transition_alert_once() -> Result<()> {
     let (_tdb, state) = AppState::new_for_test().await?;
-    state.update_workspace_owner(1, 1).await?;
+    state.grant_platform_admin(1).await?;
     let owner = state.find_user_by_id(1).await?.expect("owner should exist");
 
     let baseline =
@@ -422,7 +426,7 @@ async fn upsert_ops_service_split_review_handler_should_emit_transition_alert_on
     let baseline_json = json_body_with_status(baseline, StatusCode::OK).await?;
     assert_eq!(
         baseline_json["overallStatus"], "hold",
-        "fresh workspace should start from hold status in this test setup"
+        "fresh platform scope should start from hold status in this test setup"
     );
 
     upsert_ops_service_split_review_handler(
@@ -483,7 +487,7 @@ async fn upsert_ops_service_split_review_handler_should_emit_transition_alert_on
 async fn upsert_ops_service_split_review_handler_should_emit_cleared_alert_once_on_review_required_to_hold(
 ) -> Result<()> {
     let (_tdb, state) = AppState::new_for_test().await?;
-    state.update_workspace_owner(1, 1).await?;
+    state.grant_platform_admin(1).await?;
     let owner = state.find_user_by_id(1).await?.expect("owner should exist");
 
     upsert_ops_service_split_review_handler(
@@ -568,7 +572,7 @@ async fn upsert_ops_service_split_review_handler_should_emit_cleared_alert_once_
 #[tokio::test]
 async fn list_ops_service_split_review_audits_handler_should_return_latest_first() -> Result<()> {
     let (_tdb, state) = AppState::new_for_test().await?;
-    state.update_workspace_owner(1, 1).await?;
+    state.grant_platform_admin(1).await?;
     let owner = state.find_user_by_id(1).await?.expect("owner should exist");
 
     upsert_ops_service_split_review_handler(
@@ -615,7 +619,7 @@ async fn list_ops_service_split_review_audits_handler_should_return_latest_first
 async fn apply_ops_observability_anomaly_action_handler_should_update_single_alert_key(
 ) -> Result<()> {
     let (_tdb, state) = AppState::new_for_test().await?;
-    state.update_workspace_owner(1, 1).await?;
+    state.grant_platform_admin(1).await?;
     let owner = state.find_user_by_id(1).await?.expect("owner should exist");
 
     let suppress_response = apply_ops_observability_anomaly_action_handler(
@@ -654,7 +658,7 @@ async fn apply_ops_observability_anomaly_action_handler_should_update_single_ale
 #[tokio::test]
 async fn run_ops_observability_evaluation_once_handler_should_return_report() -> Result<()> {
     let (_tdb, state) = AppState::new_for_test().await?;
-    state.update_workspace_owner(1, 1).await?;
+    state.grant_platform_admin(1).await?;
     let owner = state.find_user_by_id(1).await?.expect("owner should exist");
 
     let response = run_ops_observability_evaluation_once_handler(
@@ -676,7 +680,7 @@ async fn run_ops_observability_evaluation_once_handler_should_return_report() ->
 async fn run_ops_observability_evaluation_once_handler_should_include_rate_limit_headers(
 ) -> Result<()> {
     let (_tdb, state) = AppState::new_for_test().await?;
-    state.update_workspace_owner(1, 1).await?;
+    state.grant_platform_admin(1).await?;
     let owner = state.find_user_by_id(1).await?.expect("owner should exist");
 
     let response = run_ops_observability_evaluation_once_handler(
@@ -697,7 +701,7 @@ async fn run_ops_observability_evaluation_once_handler_should_include_rate_limit
 async fn run_ops_observability_evaluation_once_handler_with_dry_run_should_not_emit_alerts(
 ) -> Result<()> {
     let (_tdb, state) = AppState::new_for_test().await?;
-    state.update_workspace_owner(1, 1).await?;
+    state.grant_platform_admin(1).await?;
     let owner = state.find_user_by_id(1).await?.expect("owner should exist");
     state
         .upsert_ops_observability_thresholds(
@@ -753,7 +757,7 @@ async fn run_ops_observability_evaluation_once_handler_with_dry_run_should_not_e
 #[tokio::test]
 async fn ops_observability_config_handlers_should_allow_ops_viewer_update() -> Result<()> {
     let (_tdb, state) = AppState::new_for_test().await?;
-    state.update_workspace_owner(1, 1).await?;
+    state.grant_platform_admin(1).await?;
     let owner = state.find_user_by_id(1).await?.expect("owner should exist");
     let viewer = state
         .find_user_by_id(2)
@@ -809,7 +813,7 @@ async fn ops_observability_config_handlers_should_allow_ops_viewer_update() -> R
 #[tokio::test]
 async fn list_kafka_dlq_events_handler_should_require_judge_review_permission() -> Result<()> {
     let (_tdb, state) = AppState::new_for_test().await?;
-    state.update_workspace_owner(1, 1).await?;
+    state.grant_platform_admin(1).await?;
     let non_owner = state.find_user_by_id(3).await?.expect("user should exist");
 
     let result = list_kafka_dlq_events_handler(
@@ -831,7 +835,7 @@ async fn list_kafka_dlq_events_handler_should_require_judge_review_permission() 
 #[tokio::test]
 async fn kafka_dlq_handlers_should_list_replay_and_discard() -> Result<()> {
     let (_tdb, state) = AppState::new_for_test().await?;
-    state.update_workspace_owner(1, 1).await?;
+    state.grant_platform_admin(1).await?;
     let owner = state.find_user_by_id(1).await?.expect("owner should exist");
     let viewer = state
         .find_user_by_id(2)
@@ -932,7 +936,7 @@ async fn kafka_dlq_handlers_should_list_replay_and_discard() -> Result<()> {
 #[tokio::test]
 async fn list_ops_alert_notifications_handler_should_return_rows() -> Result<()> {
     let (_tdb, state) = AppState::new_for_test().await?;
-    state.update_workspace_owner(1, 1).await?;
+    state.grant_platform_admin(1).await?;
     let owner = state.find_user_by_id(1).await?.expect("owner should exist");
     insert_ops_alert_notification(&state, 1, "high_retry").await?;
 

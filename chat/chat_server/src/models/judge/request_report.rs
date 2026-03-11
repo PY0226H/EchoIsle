@@ -19,15 +19,8 @@ impl AppState {
                         LIMIT 1
                     ),
                     (
-                        SELECT w.owner_id
-                        FROM workspaces w
-                        WHERE w.id = s.ws_id
-                        LIMIT 1
-                    ),
-                    (
                         SELECT u.id
                         FROM users u
-                        WHERE u.ws_id = s.ws_id
                         ORDER BY u.id ASC
                         LIMIT 1
                     )
@@ -49,7 +42,7 @@ impl AppState {
             warn!(
                 session_id,
                 ws_id = requester.ws_id,
-                "auto judge trigger skipped: no available requester in workspace"
+                "auto judge trigger skipped: no available requester in platform scope"
             );
             return Ok(None);
         };

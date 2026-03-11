@@ -32,7 +32,7 @@ use crate::{
     WechatSigninV2Input, WechatSigninV2Output,
 };
 use axum::Router;
-use chat_core::{AgentType, Chat, ChatAgent, ChatType, ChatUser, Message, User, Workspace};
+use chat_core::{AgentType, Chat, ChatAgent, ChatType, ChatUser, Message, User};
 use utoipa::{
     openapi::security::{HttpAuthScheme, HttpBuilder, SecurityScheme},
     Modify, OpenApi,
@@ -129,7 +129,7 @@ pub(crate) trait OpenApiRouter {
         ),
         components(
             schemas(
-                User, Chat, ChatType, ChatAgent, AgentType, ChatUser, Message, Workspace,
+                User, Chat, ChatType, ChatAgent, AgentType, ChatUser, Message,
                 DebateTopic, DebateSessionSummary, ListDebateTopics, ListDebateSessions,
                 JudgeRefreshSummaryItem, JudgeRefreshSummaryOutput,
                 JudgeRefreshSummaryMetricsOutput,

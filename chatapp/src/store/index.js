@@ -85,10 +85,9 @@ export default createStore({
     context: {},        // Context for analytics events
     user: null,         // User information
     token: null,        // Authentication token
-    workspace: {},      // Current workspace
     channels: [],       // List of channels
     messages: {},       // Messages hashmap, keyed by channel ID
-    users: {},          // Users hashmap under workspace, keyed by user ID
+    users: {},          // Users hashmap keyed by user ID
     activeChannel: null,
     sse: null,
     accessTickets: null,
@@ -126,9 +125,6 @@ export default createStore({
     setOpsRbacMe(state, payload) {
       state.opsRbacMe = payload;
     },
-    setWorkspace(state, workspace) {
-      state.workspace = workspace;
-    },
     setChannels(state, channels) {
       state.channels = channels;
     },
@@ -157,7 +153,6 @@ export default createStore({
       console.log("context:", state.context);
 
       const storedUser = localStorage.getItem('user');
-      const storedWorkspace = localStorage.getItem('workspace');
       const storedChannels = localStorage.getItem('channels');
       // we do not store messages in local storage, so this is always empty
       const storedMessages = localStorage.getItem('messages');
@@ -166,9 +161,6 @@ export default createStore({
 
       if (storedUser) {
         state.user = JSON.parse(storedUser);
-      }
-      if (storedWorkspace) {
-        state.workspace = JSON.parse(storedWorkspace);
       }
       if (storedChannels) {
         state.channels = JSON.parse(storedChannels);
@@ -245,13 +237,12 @@ export default createStore({
       }
       commit('setSSEReconnectAttempts', 0);
     },
-    async signup({ commit }, { email, fullname, password, workspace }) {
+    async signup({ commit }, { email, fullname, password }) {
       try {
         const response = await network(this, 'post', '/signup', {
           email,
           fullname,
           password,
-          workspace
         });
 
         const user = await loadState(response, this, commit);
@@ -404,7 +395,6 @@ export default createStore({
       }
       // Clear local storage and state
       localStorage.removeItem('user');
-      localStorage.removeItem('workspace');
       localStorage.removeItem('channels');
       localStorage.removeItem('messages');
       localStorage.removeItem('activeChannelId');
@@ -412,7 +402,6 @@ export default createStore({
       commit('setUser', null);
       commit('setToken', null);
       commit('setAccessTickets', null);
-      commit('setWorkspace', '');
       commit('setChannels', []);
       commit('setLatestJudgeReportEvent', null);
       commit('setLatestDrawVoteResolvedEvent', null);
@@ -1083,11 +1072,11 @@ export default createStore({
     async userLogout({ state }) {
       await sendUserLogoutEvent(state.context, state.token, state.user.email);
     },
-    async userRegister({ state }, { email, workspaceId }) {
-      await sendUserRegisterEvent(state.context, state.token, email, workspaceId);
+    async userRegister({ state }, { email }) {
+      await sendUserRegisterEvent(state.context, state.token, email, null);
     },
-    async chatCreated({ state }, { workspaceId }) {
-      await sendChatCreatedEvent(state.context, state.token, workspaceId);
+    async chatCreated({ state }) {
+      await sendChatCreatedEvent(state.context, state.token, null);
     },
     async messageSent({ state }, { chatId, type, size, totalFiles }) {
       await sendMessageSentEvent(state.context, state.token, chatId, type, size, totalFiles);
@@ -1207,9 +1196,6 @@ export default createStore({
     getUserById: (state) => (id) => {
       return state.users[id];
     },
-    getWorkspace(state) {
-      return state.workspace;
-    },
     getChannels(state) {
       // filter out channels that type == 'single'
       return state.channels.filter((channel) => channel.type !== 'single');
@@ -1251,10 +1237,9 @@ async function loadState(response, self, commit) {
   if (!token || !user) {
     throw new Error('missing access token or user profile in auth response');
   }
-  const workspace = { id: user.wsId, name: user.wsName };
 
   try {
-    // fetch all workspace users
+    // fetch all platform users
     const usersResp = await network(self, 'get', '/users', null, {
       Authorization: `Bearer ${token}`,
     });
@@ -1286,7 +1271,6 @@ async function loadState(response, self, commit) {
 
     // Store non-sensitive session bootstrap data only.
     localStorage.setItem('user', JSON.stringify(user));
-    localStorage.setItem('workspace', JSON.stringify(workspace));
     localStorage.setItem('users', JSON.stringify(usersMap));
     localStorage.setItem('channels', JSON.stringify(channels));
     if (activeChannelId != null) {
@@ -1299,7 +1283,6 @@ async function loadState(response, self, commit) {
     commit('setUser', user);
     commit('setToken', token);
     commit('setAccessTickets', null);
-    commit('setWorkspace', workspace);
     commit('setChannels', channels);
     commit('setUsers', usersMap);
     if (activeChannelId != null) {

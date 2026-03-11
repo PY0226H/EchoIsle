@@ -50,19 +50,18 @@ async fn session_status(state: &AppState, session_id: i64) -> Result<String> {
 
 async fn set_wallet_balance(
     state: &AppState,
-    ws_id: i64,
+    _ws_id: i64,
     user_id: i64,
     balance: i64,
 ) -> Result<()> {
     sqlx::query(
         r#"
-            INSERT INTO user_wallets(ws_id, user_id, balance)
-            VALUES ($1, $2, $3)
-            ON CONFLICT (ws_id, user_id)
+            INSERT INTO user_wallets(user_id, balance)
+            VALUES ($1, $2)
+            ON CONFLICT (user_id)
             DO UPDATE SET balance = EXCLUDED.balance, updated_at = NOW()
             "#,
     )
-    .bind(ws_id)
     .bind(user_id)
     .bind(balance)
     .execute(&state.pool)

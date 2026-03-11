@@ -82,7 +82,7 @@ mod tests {
 
         let token = state
             .ek
-            .sign_access_token_with_jti(user.id, user.ws_id, sid, 0, access_jti, 900)?;
+            .sign_access_token_with_jti(user.id, sid, 0, access_jti, 900)?;
 
         let app = Router::new()
             .route("/chat/:id/messages", get(handler))

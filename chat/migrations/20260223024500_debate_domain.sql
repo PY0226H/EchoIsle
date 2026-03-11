@@ -2,7 +2,6 @@
 
 CREATE TABLE IF NOT EXISTS debate_topics(
   id bigserial PRIMARY KEY,
-  ws_id bigint NOT NULL REFERENCES workspaces(id),
   title varchar(120) NOT NULL,
   description text NOT NULL,
   category varchar(32) NOT NULL,
@@ -15,14 +14,13 @@ CREATE TABLE IF NOT EXISTS debate_topics(
   updated_at timestamptz DEFAULT CURRENT_TIMESTAMP
 );
 
-CREATE INDEX IF NOT EXISTS idx_topics_ws_category_active
-  ON debate_topics(ws_id, category, is_active);
-CREATE INDEX IF NOT EXISTS idx_topics_ws_created_at
-  ON debate_topics(ws_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_topics_category_active
+  ON debate_topics(category, is_active);
+CREATE INDEX IF NOT EXISTS idx_topics_created_at
+  ON debate_topics(created_at DESC);
 
 CREATE TABLE IF NOT EXISTS debate_sessions(
   id bigserial PRIMARY KEY,
-  ws_id bigint NOT NULL REFERENCES workspaces(id),
   topic_id bigint NOT NULL REFERENCES debate_topics(id) ON DELETE CASCADE,
   status varchar(20) NOT NULL CHECK (status IN ('scheduled', 'open', 'running', 'judging', 'closed', 'canceled')),
   scheduled_start_at timestamptz NOT NULL,
@@ -39,10 +37,10 @@ CREATE TABLE IF NOT EXISTS debate_sessions(
   CHECK (con_count <= max_participants_per_side)
 );
 
-CREATE INDEX IF NOT EXISTS idx_sessions_ws_status_time
-  ON debate_sessions(ws_id, status, scheduled_start_at);
-CREATE INDEX IF NOT EXISTS idx_sessions_ws_topic_time
-  ON debate_sessions(ws_id, topic_id, scheduled_start_at DESC);
+CREATE INDEX IF NOT EXISTS idx_sessions_status_time
+  ON debate_sessions(status, scheduled_start_at);
+CREATE INDEX IF NOT EXISTS idx_sessions_topic_time
+  ON debate_sessions(topic_id, scheduled_start_at DESC);
 
 CREATE TABLE IF NOT EXISTS session_participants(
   session_id bigint NOT NULL REFERENCES debate_sessions(id) ON DELETE CASCADE,

@@ -7,10 +7,9 @@ use crate::{AppError, ChatFile};
 use sha1::{Digest, Sha1};
 
 impl ChatFile {
-    pub fn new(ws_id: u64, filename: &str, data: &[u8]) -> Self {
+    pub fn new(filename: &str, data: &[u8]) -> Self {
         let hash = Sha1::digest(data);
         Self {
-            ws_id,
             ext: filename.rsplit('.').next().unwrap_or("txt").to_string(),
             hash: hex::encode(hash),
         }
@@ -28,14 +27,14 @@ impl ChatFile {
     fn hash_to_path(&self) -> String {
         let (part1, part2) = self.hash.split_at(3);
         let (part2, part3) = part2.split_at(3);
-        format!("{}/{}/{}/{}.{}", self.ws_id, part1, part2, part3, self.ext)
+        format!("{}/{}/{}.{}", part1, part2, part3, self.ext)
     }
 }
 
 impl FromStr for ChatFile {
     type Err = AppError;
 
-    // convert /files/s/339/807/e635afbeab088ce33206fdf4223a6bb156.png to ChatFile
+    // convert /files/339/807/e635afbeab088ce33206fdf4223a6bb156.png to ChatFile
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         let Some(s) = s.strip_prefix("/files/") else {
             return Err(AppError::ChatFileError(format!(
@@ -45,30 +44,22 @@ impl FromStr for ChatFile {
         };
 
         let parts: Vec<&str> = s.split('/').collect();
-        if parts.len() != 4 {
+        if parts.len() != 3 {
             return Err(AppError::ChatFileError(format!(
                 "File path {} does not valid",
                 s
             )));
         }
 
-        let Ok(ws_id) = parts[0].parse::<u64>() else {
-            return Err(AppError::ChatFileError(format!(
-                "Invalid workspace id: {}",
-                parts[1]
-            )));
-        };
-
-        let Some((part3, ext)) = parts[3].split_once('.') else {
+        let Some((part3, ext)) = parts[2].split_once('.') else {
             return Err(AppError::ChatFileError(format!(
                 "Invalid file name: {}",
-                parts[3]
+                parts[2]
             )));
         };
 
-        let hash = format!("{}{}{}", parts[1], parts[2], part3);
+        let hash = format!("{}{}{}", parts[0], parts[1], part3);
         Ok(Self {
-            ws_id,
             ext: ext.to_string(),
             hash,
         })
@@ -81,8 +72,7 @@ mod tests {
 
     #[test]
     fn chat_file_new_should_work() {
-        let file = ChatFile::new(1, "test.txt", b"hello world");
-        assert_eq!(file.ws_id, 1);
+        let file = ChatFile::new("test.txt", b"hello world");
         assert_eq!(file.ext, "txt");
         assert_eq!(file.hash, "2aae6c35c94fcfb415dbe95f408b9ce91ee846ed");
     }

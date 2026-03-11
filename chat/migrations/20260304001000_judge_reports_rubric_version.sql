@@ -15,5 +15,5 @@ SET rubric_version = LEFT(
 )
 WHERE payload ? 'rubricVersion' OR payload ? 'rubric_version';
 
-CREATE INDEX IF NOT EXISTS idx_judge_reports_ws_rubric_created
-  ON judge_reports(ws_id, rubric_version, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_judge_reports_rubric_created
+  ON judge_reports(rubric_version, created_at DESC);

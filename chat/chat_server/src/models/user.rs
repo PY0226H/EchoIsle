@@ -3,11 +3,10 @@ use argon2::{
     password_hash::{rand_core::OsRng, PasswordHash, PasswordHasher, PasswordVerifier, SaltString},
     Argon2,
 };
-use chat_core::{ChatUser, User, Workspace};
+use chat_core::{ChatUser, User};
 use serde::{Deserialize, Serialize};
 use std::mem;
 use utoipa::ToSchema;
-use uuid::Uuid;
 
 /// create a user with email and password
 #[derive(Debug, Clone, ToSchema, Serialize, Deserialize)]
@@ -16,8 +15,6 @@ pub struct CreateUser {
     pub fullname: String,
     /// Email of the user
     pub email: String,
-    /// Workspace name - if not exists, create one
-    pub workspace: String,
     /// Password of the user
     pub password: String,
 }
@@ -29,7 +26,7 @@ pub struct SigninUser {
 }
 
 #[derive(Debug, Clone)]
-pub struct CreateUserAutoWorkspaceInput {
+pub struct CreateUserWithPhoneInput {
     pub fullname: String,
     pub email: Option<String>,
     pub phone_e164: String,
@@ -72,80 +69,33 @@ impl AppState {
     }
 
     /// Create a new user.
-    /// Workspace creation + user creation + owner patch are executed in one transaction.
+    /// Single-tenant user creation path (platform scope only).
     pub async fn create_user(&self, input: &CreateUser) -> Result<User, AppError> {
-        let mut tx = self.pool.begin().await?;
-
         let existing: Option<(i64,)> = sqlx::query_as("SELECT id FROM users WHERE email = $1")
             .bind(&input.email)
-            .fetch_optional(&mut *tx)
+            .fetch_optional(&self.pool)
             .await?;
         if existing.is_some() {
             return Err(AppError::EmailAlreadyExists(input.email.clone()));
         }
 
-        // Workspace may be created on signup when the workspace name doesn't exist.
-        let ws: Workspace = match sqlx::query_as(
-            r#"
-            SELECT id, name, owner_id, created_at
-            FROM workspaces
-            WHERE name = $1
-            "#,
-        )
-        .bind(&input.workspace)
-        .fetch_optional(&mut *tx)
-        .await?
-        {
-            Some(ws) => ws,
-            None => {
-                sqlx::query_as(
-                    r#"
-                    INSERT INTO workspaces (name, owner_id)
-                    VALUES ($1, 0)
-                    RETURNING id, name, owner_id, created_at
-                    "#,
-                )
-                .bind(&input.workspace)
-                .fetch_one(&mut *tx)
-                .await?
-            }
-        };
-
         let password_hash = hash_password(&input.password)?;
         let is_bot = is_bot_email(&input.email);
-        let mut user: User = sqlx::query_as(
+        let user: User = sqlx::query_as(
             r#"
             INSERT INTO users (ws_id, email, fullname, password_hash, is_bot)
             VALUES ($1, $2, $3, $4, $5)
-            RETURNING id, ws_id, fullname, email, is_bot, created_at
+            RETURNING id, ws_id, COALESCE('default', '') AS ws_name, fullname, email, is_bot, created_at
             "#,
         )
-        .bind(ws.id)
+        .bind(1_i64)
         .bind(&input.email)
         .bind(&input.fullname)
         .bind(password_hash)
         .bind(is_bot)
-        .fetch_one(&mut *tx)
+        .fetch_one(&self.pool)
         .await?;
 
-        user.ws_name = ws.name.clone();
-
-        if ws.owner_id == 0 {
-            let _: Workspace = sqlx::query_as(
-                r#"
-                UPDATE workspaces
-                SET owner_id = $1
-                WHERE id = $2 AND owner_id = 0
-                RETURNING id, name, owner_id, created_at
-                "#,
-            )
-            .bind(user.id)
-            .bind(ws.id)
-            .fetch_one(&mut *tx)
-            .await?;
-        }
-
-        tx.commit().await?;
         Ok(user)
     }
 
@@ -163,9 +113,6 @@ impl AppState {
                 let is_valid =
                     verify_password(&input.password, &password_hash.unwrap_or_default())?;
                 if is_valid {
-                    // load ws_name, ws should exist
-                    let ws = self.find_workspace_by_id(user.ws_id as _).await?.unwrap();
-                    user.ws_name = ws.name;
                     Ok(Some(user))
                 } else {
                     Ok(None)
@@ -191,8 +138,6 @@ impl AppState {
                 let password_hash = mem::take(&mut user.password_hash);
                 let is_valid = verify_password(password, &password_hash.unwrap_or_default())?;
                 if is_valid {
-                    let ws = self.find_workspace_by_id(user.ws_id as _).await?.unwrap();
-                    user.ws_name = ws.name;
                     Ok(Some(user))
                 } else {
                     Ok(None)
@@ -202,9 +147,9 @@ impl AppState {
         }
     }
 
-    pub async fn create_user_with_auto_workspace(
+    pub async fn create_user_with_phone(
         &self,
-        input: &CreateUserAutoWorkspaceInput,
+        input: &CreateUserWithPhoneInput,
     ) -> Result<User, AppError> {
         let mut tx = self.pool.begin().await?;
 
@@ -228,7 +173,6 @@ impl AppState {
             return Err(AppError::PhoneAlreadyExists(input.phone_e164.clone()));
         }
 
-        let ws = create_default_workspace_in_tx(&mut tx).await?;
         let password_hash = hash_password(&input.password)?;
         let is_bot = input
             .email
@@ -236,7 +180,7 @@ impl AppState {
             .map(|email| is_bot_email(email))
             .unwrap_or(false);
 
-        let mut user: User = sqlx::query_as(
+        let user: User = sqlx::query_as(
             r#"
             INSERT INTO users (
                 ws_id, email, phone_e164, phone_verified_at, phone_bind_required,
@@ -244,33 +188,18 @@ impl AppState {
             )
             VALUES ($1, $2, $3, NOW(), $4, $5, $6, $7)
             RETURNING
-                id, ws_id, fullname, COALESCE(email, '') AS email,
+                id, ws_id, COALESCE('default', '') AS ws_name, fullname, COALESCE(email, '') AS email,
                 phone_e164, phone_verified_at, phone_bind_required,
                 is_bot, created_at
             "#,
         )
-        .bind(ws.id)
+        .bind(1_i64)
         .bind(input.email.as_deref())
         .bind(&input.phone_e164)
         .bind(input.phone_bind_required)
         .bind(&input.fullname)
         .bind(password_hash)
         .bind(is_bot)
-        .fetch_one(&mut *tx)
-        .await?;
-
-        user.ws_name = ws.name.clone();
-
-        let _: Workspace = sqlx::query_as(
-            r#"
-            UPDATE workspaces
-            SET owner_id = $1
-            WHERE id = $2 AND owner_id = 0
-            RETURNING id, name, owner_id, created_at
-            "#,
-        )
-        .bind(user.id)
-        .bind(ws.id)
         .fetch_one(&mut *tx)
         .await?;
 
@@ -294,7 +223,7 @@ impl AppState {
             }
         }
 
-        let mut user: User = sqlx::query_as(
+        let user: User = sqlx::query_as(
             r#"
             UPDATE users
             SET phone_e164 = $2,
@@ -302,7 +231,7 @@ impl AppState {
                 phone_bind_required = false
             WHERE id = $1
             RETURNING
-                id, ws_id, fullname, COALESCE(email, '') AS email,
+                id, ws_id, COALESCE('default', '') AS ws_name, fullname, COALESCE(email, '') AS email,
                 phone_e164, phone_verified_at, phone_bind_required,
                 is_bot, created_at
             "#,
@@ -312,9 +241,6 @@ impl AppState {
         .fetch_one(&self.pool)
         .await?;
 
-        if let Some(ws) = self.find_workspace_by_id(user.ws_id as u64).await? {
-            user.ws_name = ws.name;
-        }
         Ok(user)
     }
 
@@ -332,15 +258,13 @@ impl AppState {
         Ok(users)
     }
 
-    pub async fn fetch_chat_users(&self, ws_id: u64) -> Result<Vec<ChatUser>, AppError> {
+    pub async fn fetch_chat_users(&self) -> Result<Vec<ChatUser>, AppError> {
         let users = sqlx::query_as(
             r#"
         SELECT id, fullname, COALESCE(email, '') AS email
         FROM users
-        WHERE ws_id = $1
         "#,
         )
-        .bind(ws_id as i64)
         .fetch_all(&self.pool)
         .await?;
         Ok(users)
@@ -377,38 +301,11 @@ fn verify_password(password: &str, password_hash: &str) -> Result<bool, AppError
     Ok(is_valid)
 }
 
-async fn create_default_workspace_in_tx(
-    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-) -> Result<Workspace, AppError> {
-    for _ in 0..5 {
-        let raw = Uuid::now_v7().to_string().replace('-', "");
-        let candidate = format!("ws-{}", &raw[..10]);
-        let inserted = sqlx::query_as(
-            r#"
-            INSERT INTO workspaces (name, owner_id)
-            VALUES ($1, 0)
-            ON CONFLICT (name) DO NOTHING
-            RETURNING id, name, owner_id, created_at
-            "#,
-        )
-        .bind(candidate)
-        .fetch_optional(&mut **tx)
-        .await?;
-        if let Some(ws) = inserted {
-            return Ok(ws);
-        }
-    }
-    Err(AppError::AnyError(anyhow::anyhow!(
-        "failed to allocate default workspace name"
-    )))
-}
-
 #[cfg(test)]
 impl CreateUser {
-    pub fn new(ws: &str, fullname: &str, email: &str, password: &str) -> Self {
+    pub fn new(fullname: &str, email: &str, password: &str) -> Self {
         Self {
             fullname: fullname.to_string(),
-            workspace: ws.to_string(),
             email: email.to_string(),
             password: password.to_string(),
         }
@@ -449,7 +346,7 @@ mod tests {
     async fn create_duplicate_user_should_fail() -> Result<()> {
         let (_tdb, state) = AppState::new_for_test().await?;
 
-        let input = CreateUser::new("acme", "Tyr Chen", "tchen@acme.org", "hunter42");
+        let input = CreateUser::new("Tyr Chen", "tchen@acme.org", "hunter42");
         let ret = state.create_user(&input).await;
         match ret {
             Err(AppError::EmailAlreadyExists(email)) => {
@@ -464,7 +361,7 @@ mod tests {
     async fn create_and_verify_user_should_work() -> Result<()> {
         let (_tdb, state) = AppState::new_for_test().await?;
 
-        let input = CreateUser::new("none", "Tian Chen", "tyr@acme.org", "hunter42");
+        let input = CreateUser::new("Tian Chen", "tyr@acme.org", "hunter42");
         let user = state.create_user(&input).await?;
         assert_eq!(user.email, input.email);
         assert_eq!(user.fullname, input.fullname);
@@ -484,20 +381,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn create_user_should_set_workspace_owner_in_same_transaction() -> Result<()> {
+    async fn create_user_should_set_platform_scope_default() -> Result<()> {
         let (_tdb, state) = AppState::new_for_test().await?;
-        let input = CreateUser::new(
-            "txn-workspace",
-            "Txn Owner",
-            "txn-owner@acme.org",
-            "hunter42",
-        );
+        let input = CreateUser::new("Txn Owner", "txn-owner@acme.org", "hunter42");
         let user = state.create_user(&input).await?;
-        let ws = state
-            .find_workspace_by_name("txn-workspace")
-            .await?
-            .expect("workspace should exist");
-        assert_eq!(ws.owner_id, user.id);
+        assert_eq!(user.ws_id, 1);
         Ok(())
     }
 

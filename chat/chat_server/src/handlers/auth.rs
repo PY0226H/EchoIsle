@@ -2,7 +2,7 @@ use crate::{
     application::request_guard::{
         build_rate_limit_headers, enforce_rate_limit, rate_limit_exceeded_response,
     },
-    models::{CreateUser, CreateUserAutoWorkspaceInput, SigninUser},
+    models::{CreateUser, CreateUserWithPhoneInput, SigninUser},
     redis_store::RedisStore,
     AppError, AppState, ErrorOutput,
 };
@@ -132,7 +132,6 @@ struct AuthRefreshSessionRow {
     sid: String,
     family_id: String,
     user_id: i64,
-    ws_id: i64,
     current_jti: String,
     expires_at: DateTime<Utc>,
     revoked_at: Option<DateTime<Utc>>,
@@ -737,7 +736,7 @@ pub(crate) async fn signup_phone_v2_handler(
         input.fullname.trim().to_string()
     };
     let user = state
-        .create_user_with_auto_workspace(&CreateUserAutoWorkspaceInput {
+        .create_user_with_phone(&CreateUserWithPhoneInput {
             fullname,
             email: None,
             phone_e164: phone_e164.clone(),
@@ -786,7 +785,7 @@ pub(crate) async fn signup_email_v2_handler(
         input.fullname.trim().to_string()
     };
     let user = state
-        .create_user_with_auto_workspace(&CreateUserAutoWorkspaceInput {
+        .create_user_with_phone(&CreateUserWithPhoneInput {
             fullname,
             email: Some(email),
             phone_e164: phone_e164.clone(),
@@ -1032,7 +1031,7 @@ pub(crate) async fn wechat_bind_phone_v2_handler(
             input.fullname.trim().to_string()
         };
         let new_user = state
-            .create_user_with_auto_workspace(&CreateUserAutoWorkspaceInput {
+            .create_user_with_phone(&CreateUserWithPhoneInput {
                 fullname,
                 email: None,
                 phone_e164: phone_e164.clone(),
@@ -1132,7 +1131,7 @@ pub(crate) async fn refresh_handler(
     let row: Option<AuthRefreshSessionRow> = sqlx::query_as(
         r#"
         SELECT
-            sid, family_id, user_id, ws_id, current_jti, expires_at, revoked_at,
+            sid, family_id, user_id, current_jti, expires_at, revoked_at,
             revoke_reason, user_agent, ip_hash, created_at, updated_at
         FROM auth_refresh_sessions
         WHERE sid = $1 AND user_id = $2
@@ -1192,7 +1191,6 @@ pub(crate) async fn refresh_handler(
     let new_access_jti = Uuid::now_v7().to_string();
     let access_token = state.ek.sign_access_token_with_jti(
         session.user_id,
-        session.ws_id,
         &session.sid,
         token_version,
         &new_access_jti,
@@ -1343,7 +1341,7 @@ pub(crate) async fn list_auth_sessions_handler(
     let rows: Vec<AuthRefreshSessionRow> = sqlx::query_as(
         r#"
         SELECT
-            sid, family_id, user_id, ws_id, current_jti, expires_at, revoked_at,
+            sid, family_id, user_id, current_jti, expires_at, revoked_at,
             revoke_reason, user_agent, ip_hash, created_at, updated_at
         FROM auth_refresh_sessions
         WHERE user_id = $1
@@ -1407,7 +1405,6 @@ fn issue_auth_tokens(
     let access_jti = Uuid::now_v7().to_string();
     let access_token = state.ek.sign_access_token_with_jti(
         user.id,
-        user.ws_id,
         &sid,
         token_version,
         access_jti,
@@ -1439,16 +1436,15 @@ async fn persist_refresh_session(
     sqlx::query(
         r#"
         INSERT INTO auth_refresh_sessions(
-            ws_id, user_id, sid, family_id, current_jti, expires_at,
+            user_id, sid, family_id, current_jti, expires_at,
             user_agent, ip_hash, created_at, updated_at
         )
         VALUES (
-            $1, $2, $3, $4, $5, NOW() + ($6 || ' seconds')::interval,
-            $7, $8, NOW(), NOW()
+            $1, $2, $3, $4, NOW() + ($5 || ' seconds')::interval,
+            $6, $7, NOW(), NOW()
         )
         "#,
     )
-    .bind(user.ws_id)
     .bind(user.id)
     .bind(&issued.sid)
     .bind(&issued.family_id)
@@ -2181,9 +2177,7 @@ async fn find_user_by_wechat_identity(
     .fetch_optional(&state.pool)
     .await?;
     if let Some(ref mut user_item) = user {
-        if let Some(ws) = state.find_workspace_by_id(user_item.ws_id as u64).await? {
-            user_item.ws_name = ws.name;
-        }
+        user_item.ws_name = "default".to_string();
     }
     Ok(user)
 }

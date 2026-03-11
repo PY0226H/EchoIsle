@@ -2,7 +2,6 @@
 
 CREATE TABLE IF NOT EXISTS judge_jobs(
   id bigserial PRIMARY KEY,
-  ws_id bigint NOT NULL REFERENCES workspaces(id),
   session_id bigint NOT NULL REFERENCES debate_sessions(id) ON DELETE CASCADE,
   requested_by bigint NOT NULL REFERENCES users(id),
   status varchar(16) NOT NULL CHECK (status IN ('running', 'succeeded', 'failed')),
@@ -18,14 +17,13 @@ CREATE TABLE IF NOT EXISTS judge_jobs(
   updated_at timestamptz DEFAULT CURRENT_TIMESTAMP
 );
 
-CREATE INDEX IF NOT EXISTS idx_judge_jobs_ws_session_requested
-  ON judge_jobs(ws_id, session_id, requested_at DESC);
+CREATE INDEX IF NOT EXISTS idx_judge_jobs_session_requested
+  ON judge_jobs(session_id, requested_at DESC);
 CREATE INDEX IF NOT EXISTS idx_judge_jobs_status_requested
   ON judge_jobs(status, requested_at DESC);
 
 CREATE TABLE IF NOT EXISTS judge_stage_summaries(
   id bigserial PRIMARY KEY,
-  ws_id bigint NOT NULL REFERENCES workspaces(id),
   session_id bigint NOT NULL REFERENCES debate_sessions(id) ON DELETE CASCADE,
   job_id bigint NOT NULL REFERENCES judge_jobs(id) ON DELETE CASCADE,
   stage_no int NOT NULL CHECK (stage_no > 0),
@@ -39,12 +37,11 @@ CREATE TABLE IF NOT EXISTS judge_stage_summaries(
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_judge_stage_unique
   ON judge_stage_summaries(job_id, stage_no);
-CREATE INDEX IF NOT EXISTS idx_judge_stage_ws_session
-  ON judge_stage_summaries(ws_id, session_id, stage_no ASC);
+CREATE INDEX IF NOT EXISTS idx_judge_stage_session
+  ON judge_stage_summaries(session_id, stage_no ASC);
 
 CREATE TABLE IF NOT EXISTS judge_reports(
   id bigserial PRIMARY KEY,
-  ws_id bigint NOT NULL REFERENCES workspaces(id),
   session_id bigint NOT NULL REFERENCES debate_sessions(id) ON DELETE CASCADE,
   job_id bigint NOT NULL UNIQUE REFERENCES judge_jobs(id) ON DELETE CASCADE,
   winner varchar(8) NOT NULL CHECK (winner IN ('pro', 'con', 'draw')),
@@ -69,8 +66,8 @@ CREATE TABLE IF NOT EXISTS judge_reports(
   updated_at timestamptz DEFAULT CURRENT_TIMESTAMP
 );
 
-CREATE INDEX IF NOT EXISTS idx_judge_reports_ws_session_created
-  ON judge_reports(ws_id, session_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_judge_reports_session_created
+  ON judge_reports(session_id, created_at DESC);
 
 CREATE OR REPLACE FUNCTION add_to_debate_judge_report_ready()
 RETURNS trigger

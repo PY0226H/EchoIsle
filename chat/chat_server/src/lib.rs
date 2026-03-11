@@ -247,7 +247,7 @@ pub async fn get_router(state: AppState) -> Result<Router, AppError> {
             verify_token_header_only::<AppState>,
         ));
     let file_api = Router::new()
-        .route("/files/:ws_id/*path", get(file_handler))
+        .route("/files/*path", get(file_handler))
         .layer(from_fn_with_state(state.clone(), verify_file_ticket));
     let api = Router::new()
         .merge(protected_api)

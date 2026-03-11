@@ -52,7 +52,6 @@ impl AppState {
                     SELECT 1
                     FROM wallet_ledger wl
                     WHERE wl.order_id = io.id
-                      AND wl.ws_id = io.ws_id
                       AND wl.user_id = io.user_id
                       AND wl.entry_type = 'iap_credit'
                 ) AS credited
@@ -101,10 +100,9 @@ impl AppState {
             r#"
             SELECT balance
             FROM user_wallets
-            WHERE ws_id = $1 AND user_id = $2
+            WHERE user_id = $1
             "#,
         )
-        .bind(ws_id as i64)
         .bind(user_id as i64)
         .fetch_optional(&self.pool)
         .await?;
@@ -118,7 +116,7 @@ impl AppState {
 
     pub async fn list_wallet_ledger(
         &self,
-        ws_id: u64,
+        _ws_id: u64,
         user_id: u64,
         input: ListWalletLedger,
     ) -> Result<Vec<WalletLedgerItem>, AppError> {
@@ -134,14 +132,12 @@ impl AppState {
                 metadata::text AS metadata,
                 created_at
             FROM wallet_ledger
-            WHERE ws_id = $1
-              AND user_id = $2
-              AND ($3::bigint IS NULL OR id < $3)
+            WHERE user_id = $1
+              AND ($2::bigint IS NULL OR id < $2)
             ORDER BY id DESC
-            LIMIT $4
+            LIMIT $3
             "#,
         )
-        .bind(ws_id as i64)
         .bind(user_id as i64)
         .bind(input.last_id.map(|v| v as i64))
         .bind(helpers::normalize_limit(input.limit))

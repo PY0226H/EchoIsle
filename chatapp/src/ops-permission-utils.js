@@ -2,7 +2,7 @@ const OPS_PERMISSION_HINTS = {
   debate_manage: '当前账号没有“场次管理”权限（需 ops_admin）',
   judge_review: '当前账号没有“判决审阅”权限（需 ops_viewer / ops_reviewer / ops_admin）',
   judge_rejudge: '当前账号没有“复核触发”权限（需 ops_reviewer / ops_admin）',
-  role_manage: '仅 workspace owner 可以管理 Ops 角色',
+  role_manage: '仅 platform admin 可以管理 Ops 角色',
 };
 
 function normalizePermissionKey(permission) {
@@ -28,7 +28,6 @@ function normalizePermissionKey(permission) {
 export function emptyOpsRbacMe() {
   return {
     userId: 0,
-    wsId: 0,
     isOwner: false,
     role: null,
     permissions: {
@@ -45,7 +44,6 @@ export function normalizeOpsRbacMe(payload) {
   const permissions = value.permissions || {};
   return {
     userId: Number(value.userId || 0),
-    wsId: Number(value.wsId || 0),
     isOwner: !!value.isOwner,
     role: value.role == null ? null : String(value.role),
     permissions: {

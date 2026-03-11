@@ -1,9 +1,3 @@
--- insert 3 workspaces
-INSERT INTO workspaces(name, owner_id)
-  VALUES ('acme', 0),
-('foo', 0),
-('bar', 0);
-
 -- insert 5 users, all with hashed password '123456'
 INSERT INTO users(ws_id, email, fullname, password_hash)
   VALUES (1, 'tchen@acme.org', 'Tyr Chen', '$argon2id$v=19$m=19456,t=2,p=1$MxGhY+ib/kplwBPLa7u2ug$c5h9u7Sc8Px8J5+qgNdOjSY7ZJO2QN4rugKpapGW4XU'),

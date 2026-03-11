@@ -31,7 +31,7 @@ pub(crate) use super::debate_ops::{
     upsert_ops_role_assignment_handler, upsert_ops_service_split_review_handler,
 };
 
-/// List debate topics in the current workspace.
+/// List debate topics in the platform scope.
 #[utoipa::path(
     get,
     path = "/api/debate/topics",

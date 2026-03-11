@@ -219,7 +219,7 @@ mod tests {
     }
 
     fn upload_dummy_file(state: &AppState) -> Result<String> {
-        let file = ChatFile::new(1, "test.txt", b"hello world");
+        let file = ChatFile::new("test.txt", b"hello world");
         let path = file.path(&state.config.server.base_dir);
         std::fs::create_dir_all(path.parent().expect("file path parent should exists"))?;
         std::fs::write(&path, b"hello world")?;

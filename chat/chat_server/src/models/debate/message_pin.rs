@@ -255,12 +255,11 @@ impl AppState {
 
         sqlx::query(
             r#"
-            INSERT INTO user_wallets(ws_id, user_id, balance)
-            VALUES ($1, $2, 0)
-            ON CONFLICT (ws_id, user_id) DO NOTHING
+            INSERT INTO user_wallets(user_id, balance)
+            VALUES ($1, 0)
+            ON CONFLICT (user_id) DO NOTHING
             "#,
         )
-        .bind(user.ws_id)
         .bind(user.id)
         .execute(&mut *tx)
         .await?;
@@ -269,11 +268,10 @@ impl AppState {
             r#"
             SELECT balance
             FROM user_wallets
-            WHERE ws_id = $1 AND user_id = $2
+            WHERE user_id = $1
             FOR UPDATE
             "#,
         )
-        .bind(user.ws_id)
         .bind(user.id)
         .fetch_one(&mut *tx)
         .await?;
@@ -288,11 +286,10 @@ impl AppState {
         sqlx::query(
             r#"
             UPDATE user_wallets
-            SET balance = $3, updated_at = NOW()
-            WHERE ws_id = $1 AND user_id = $2
+            SET balance = $2, updated_at = NOW()
+            WHERE user_id = $1
             "#,
         )
-        .bind(user.ws_id)
         .bind(user.id)
         .bind(next_balance)
         .execute(&mut *tx)
@@ -306,13 +303,12 @@ impl AppState {
         let ledger_id: (i64,) = sqlx::query_as(
             r#"
             INSERT INTO wallet_ledger(
-                ws_id, user_id, entry_type, amount_delta, balance_after, idempotency_key, metadata
+                user_id, entry_type, amount_delta, balance_after, idempotency_key, metadata
             )
-            VALUES ($1, $2, 'pin_debit', $3, $4, $5, $6)
+            VALUES ($1, 'pin_debit', $2, $3, $4, $5)
             RETURNING id
             "#,
         )
-        .bind(user.ws_id)
         .bind(user.id)
         .bind(-cost_coins)
         .bind(next_balance)
@@ -450,7 +446,7 @@ impl AppState {
     ) -> Result<Option<PinDebateMessageOutput>, AppError> {
         let row: Option<ExistingPinByIdempotency> = sqlx::query_as(
             r#"
-            SELECT id AS ledger_id, balance_after, ws_id, user_id
+            SELECT id AS ledger_id, balance_after, user_id
             FROM wallet_ledger
             WHERE idempotency_key = $1
               AND entry_type = 'pin_debit'
@@ -462,7 +458,7 @@ impl AppState {
         let Some(row) = row else {
             return Ok(None);
         };
-        if row.ws_id != user.ws_id || row.user_id != user.id {
+        if row.user_id != user.id {
             return Err(AppError::PaymentConflict(
                 "idempotency_key already used by another user".to_string(),
             ));

@@ -31,10 +31,6 @@
             <div class="text-gray-900 font-semibold mt-1">{{ user?.email || '-' }}</div>
           </div>
           <div>
-            <div class="text-xs uppercase text-gray-500">workspace(兼容字段)</div>
-            <div class="text-gray-900 font-semibold mt-1">{{ workspace?.name || '-' }}</div>
-          </div>
-          <div>
             <div class="text-xs uppercase text-gray-500">wallet balance</div>
             <div class="text-gray-900 font-semibold mt-1">{{ walletBalance }}</div>
           </div>
@@ -85,9 +81,6 @@ export default {
   computed: {
     user() {
       return this.$store.getters.getUser || null;
-    },
-    workspace() {
-      return this.$store.getters.getWorkspace || null;
     },
   },
   methods: {

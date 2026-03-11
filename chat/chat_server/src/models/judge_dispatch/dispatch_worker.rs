@@ -199,7 +199,7 @@ impl AppState {
         .await?
         .ok_or_else(|| {
             AppError::NotFound(format!(
-                "dispatch session {} in workspace {}",
+                "dispatch session {} in platform scope {}",
                 job.session_id, job.ws_id
             ))
         })?;

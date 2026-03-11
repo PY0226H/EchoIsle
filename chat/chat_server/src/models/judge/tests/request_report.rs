@@ -625,7 +625,7 @@ async fn get_latest_judge_report_should_resolve_verdict_evidence_refs() -> Resul
 #[tokio::test]
 async fn list_judge_reviews_by_owner_should_filter_anomaly_and_evidence() -> Result<()> {
     let (_tdb, state) = AppState::new_for_test().await?;
-    state.update_workspace_owner(1, 1).await?;
+    state.grant_platform_admin(1).await?;
     let owner = state.find_user_by_id(1).await?.expect("owner should exist");
 
     let normal_session = seed_topic_and_session(&state, 1, "closed").await?;
@@ -732,7 +732,7 @@ async fn list_judge_reviews_by_owner_should_filter_anomaly_and_evidence() -> Res
 async fn request_judge_rejudge_by_owner_should_enforce_owner_and_report_requirements() -> Result<()>
 {
     let (_tdb, state) = AppState::new_for_test().await?;
-    state.update_workspace_owner(1, 1).await?;
+    state.grant_platform_admin(1).await?;
     let owner = state.find_user_by_id(1).await?.expect("owner should exist");
     let non_owner = state
         .find_user_by_id(2)
@@ -802,7 +802,7 @@ async fn request_judge_rejudge_by_owner_should_enforce_owner_and_report_requirem
 #[tokio::test]
 async fn list_judge_reviews_by_owner_should_allow_ops_viewer_but_forbid_rejudge() -> Result<()> {
     let (_tdb, state) = AppState::new_for_test().await?;
-    state.update_workspace_owner(1, 1).await?;
+    state.grant_platform_admin(1).await?;
     let owner = state.find_user_by_id(1).await?.expect("owner should exist");
     let ops_viewer = state
         .find_user_by_id(2)

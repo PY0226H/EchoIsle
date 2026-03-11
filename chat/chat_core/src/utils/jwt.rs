@@ -286,7 +286,6 @@ impl JwtImplementation {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct AccessClaims {
     pub sub: String,
-    pub ws_id: i64,
     pub sid: String,
     pub jti: String,
     pub ver: i64,
@@ -300,7 +299,6 @@ struct AccessClaims {
 impl AccessClaims {
     fn from_parts(
         user_id: i64,
-        ws_id: i64,
         sid: impl Into<String>,
         jti: impl Into<String>,
         ver: i64,
@@ -309,7 +307,6 @@ impl AccessClaims {
         let now = Utc::now().timestamp().max(0) as usize;
         Self {
             sub: user_id.to_string(),
-            ws_id,
             sid: sid.into(),
             jti: jti.into(),
             ver: ver.max(0),
@@ -325,8 +322,6 @@ impl AccessClaims {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct TicketClaims {
     pub id: i64,
-    pub ws_id: i64,
-    pub ws_name: String,
     pub fullname: String,
     pub email: String,
     pub is_bot: bool,
@@ -343,8 +338,6 @@ impl TicketClaims {
         let now = Utc::now().timestamp().max(0) as usize;
         Self {
             id: user.id,
-            ws_id: user.ws_id,
-            ws_name: user.ws_name,
             fullname: user.fullname,
             email: user.email,
             is_bot: user.is_bot,
@@ -414,8 +407,8 @@ impl From<TicketClaims> for User {
     fn from(value: TicketClaims) -> Self {
         Self {
             id: value.id,
-            ws_id: value.ws_id,
-            ws_name: value.ws_name,
+            ws_id: 1,
+            ws_name: "default".to_string(),
             fullname: value.fullname,
             email: value.email,
             phone_e164: None,
@@ -461,13 +454,11 @@ impl EncodingKey {
     pub fn sign_access_token(
         &self,
         user_id: i64,
-        ws_id: i64,
         sid: impl Into<String>,
         token_version: i64,
     ) -> Result<String, JwtError> {
         self.sign_access_token_with_jti(
             user_id,
-            ws_id,
             sid,
             token_version,
             Uuid::now_v7().to_string(),
@@ -478,13 +469,12 @@ impl EncodingKey {
     pub fn sign_access_token_with_jti(
         &self,
         user_id: i64,
-        ws_id: i64,
         sid: impl Into<String>,
         token_version: i64,
         jti: impl Into<String>,
         ttl_secs: u64,
     ) -> Result<String, JwtError> {
-        let claims = AccessClaims::from_parts(user_id, ws_id, sid, jti, token_version, ttl_secs);
+        let claims = AccessClaims::from_parts(user_id, sid, jti, token_version, ttl_secs);
         let header = Header::new(Algorithm::EdDSA);
         Ok(encode(&header, &claims, &self.jsonwebtoken)?)
     }
@@ -553,7 +543,6 @@ impl EncodingKey {
         let user = user.into();
         self.sign_access_token_with_jti(
             user.id,
-            user.ws_id,
             "short-lived",
             0,
             Uuid::now_v7().to_string(),
@@ -629,7 +618,7 @@ impl DecodingKey {
         validation.set_audience(&[JWT_AUD]);
         validation.required_spec_claims = HashSet::from_iter(
             [
-                "iss", "aud", "sub", "ws_id", "sid", "jti", "ver", "exp", "nbf", "iat",
+                "iss", "aud", "sub", "sid", "jti", "ver", "exp", "nbf", "iat",
             ]
             .iter()
             .map(ToString::to_string),
@@ -644,8 +633,8 @@ impl DecodingKey {
         Ok(DecodedAccessToken {
             user: User {
                 id: user_id,
-                ws_id: claims.claims.ws_id,
-                ws_name: String::new(),
+                ws_id: 1,
+                ws_name: "default".to_string(),
                 fullname: String::new(),
                 email: String::new(),
                 phone_e164: None,
@@ -716,7 +705,6 @@ mod tests {
     #[derive(Debug, Serialize)]
     struct MissingIatClaims {
         sub: String,
-        ws_id: i64,
         sid: String,
         jti: String,
         ver: i64,
@@ -729,7 +717,6 @@ mod tests {
     #[derive(Debug, Serialize)]
     struct NumericAudClaims {
         sub: String,
-        ws_id: i64,
         sid: String,
         jti: String,
         ver: i64,
@@ -813,11 +800,10 @@ mod tests {
         let dk = DecodingKey::load(decoding_pem)?;
 
         let user = User::new(1, "Tyr Chen", "tchen@acme.org");
-        let token = ek.sign_access_token(user.id, user.ws_id, "sid-sign-verify", 0)?;
+        let token = ek.sign_access_token(user.id, "sid-sign-verify", 0)?;
         let user2 = dk.verify_access(&token)?.user;
 
         assert_eq!(user.id, user2.id);
-        assert_eq!(user.ws_id, user2.ws_id);
         Ok(())
     }
 
@@ -853,7 +839,6 @@ mod tests {
         let now = now_ts();
         let claims = AccessClaims {
             sub: user.id.to_string(),
-            ws_id: user.ws_id,
             sid: "sid-expired".to_string(),
             jti: "jti-expired".to_string(),
             ver: 0,
@@ -883,7 +868,6 @@ mod tests {
         let now = now_ts();
         let claims = AccessClaims {
             sub: user.id.to_string(),
-            ws_id: user.ws_id,
             sid: "sid-nbf".to_string(),
             jti: "jti-nbf".to_string(),
             ver: 0,
@@ -913,7 +897,6 @@ mod tests {
         let now = now_ts();
         let claims = MissingIatClaims {
             sub: user.id.to_string(),
-            ws_id: user.ws_id,
             sid: "sid-missing-iat".to_string(),
             jti: "jti-missing-iat".to_string(),
             ver: 0,
@@ -942,7 +925,6 @@ mod tests {
         let now = now_ts();
         let claims = NumericAudClaims {
             sub: user.id.to_string(),
-            ws_id: user.ws_id,
             sid: "sid-aud".to_string(),
             jti: "jti-aud".to_string(),
             ver: 0,
@@ -970,7 +952,7 @@ mod tests {
         let ek = EncodingKey::load(encoding_pem)?;
         let dk = DecodingKey::load(decoding_pem)?;
         let user = issue_test_user();
-        let token = ek.sign_access_token(user.id, user.ws_id, "sid-metrics", 0)?;
+        let token = ek.sign_access_token(user.id, "sid-metrics", 0)?;
         let verified = dk.verify_access(&token)?.user;
         assert_eq!(verified.id, 1);
         let snapshot = get_jwt_verify_metrics_snapshot();
@@ -992,7 +974,6 @@ mod tests {
         let now = Utc::now().timestamp() as usize;
         let claims = AccessClaims {
             sub: "1".to_string(),
-            ws_id: 1,
             sid: "sid-invalid-aud".to_string(),
             jti: "jti-invalid-aud".to_string(),
             ver: 0,

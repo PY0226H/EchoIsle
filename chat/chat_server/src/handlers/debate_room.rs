@@ -16,7 +16,7 @@ use chat_core::User;
 const DEBATE_MESSAGE_RATE_LIMIT_PER_WINDOW: u64 = 120;
 const DEBATE_MESSAGE_RATE_LIMIT_WINDOW_SECS: u64 = 60;
 
-/// List debate sessions in the current workspace.
+/// List debate sessions in the platform scope.
 #[utoipa::path(
     get,
     path = "/api/debate/sessions",

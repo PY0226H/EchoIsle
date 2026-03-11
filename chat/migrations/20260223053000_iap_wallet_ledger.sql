@@ -20,7 +20,6 @@ ON CONFLICT (product_id) DO NOTHING;
 
 CREATE TABLE IF NOT EXISTS iap_orders(
   id bigserial PRIMARY KEY,
-  ws_id bigint NOT NULL REFERENCES workspaces(id),
   user_id bigint NOT NULL REFERENCES users(id),
   platform varchar(16) NOT NULL CHECK (platform IN ('apple_iap')),
   product_id varchar(64) NOT NULL REFERENCES iap_products(product_id),
@@ -38,17 +37,16 @@ CREATE TABLE IF NOT EXISTS iap_orders(
   UNIQUE(platform, transaction_id)
 );
 
-CREATE INDEX IF NOT EXISTS idx_iap_orders_ws_user_created
-  ON iap_orders(ws_id, user_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_iap_orders_user_created
+  ON iap_orders(user_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_iap_orders_status_created
   ON iap_orders(status, created_at DESC);
 
 CREATE TABLE IF NOT EXISTS user_wallets(
-  ws_id bigint NOT NULL REFERENCES workspaces(id),
   user_id bigint NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   balance bigint NOT NULL DEFAULT 0 CHECK (balance >= 0),
   updated_at timestamptz DEFAULT CURRENT_TIMESTAMP,
-  PRIMARY KEY (ws_id, user_id)
+  PRIMARY KEY (user_id)
 );
 
 CREATE INDEX IF NOT EXISTS idx_user_wallets_balance
@@ -56,7 +54,6 @@ CREATE INDEX IF NOT EXISTS idx_user_wallets_balance
 
 CREATE TABLE IF NOT EXISTS wallet_ledger(
   id bigserial PRIMARY KEY,
-  ws_id bigint NOT NULL REFERENCES workspaces(id),
   user_id bigint NOT NULL REFERENCES users(id),
   order_id bigint REFERENCES iap_orders(id),
   entry_type varchar(32) NOT NULL CHECK (entry_type IN ('iap_credit', 'pin_debit', 'adjustment')),
@@ -67,5 +64,5 @@ CREATE TABLE IF NOT EXISTS wallet_ledger(
   created_at timestamptz DEFAULT CURRENT_TIMESTAMP
 );
 
-CREATE INDEX IF NOT EXISTS idx_wallet_ledger_ws_user_created
-  ON wallet_ledger(ws_id, user_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_wallet_ledger_user_created
+  ON wallet_ledger(user_id, created_at DESC);

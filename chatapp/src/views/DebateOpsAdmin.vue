@@ -26,7 +26,7 @@
         <div class="bg-slate-50 border border-slate-200 rounded-lg p-3 text-xs text-slate-700 space-y-2">
           <div>
             当前身份：
-            <span v-if="opsRbacMe.isOwner" class="font-semibold text-slate-900">workspace owner</span>
+            <span v-if="opsRbacMe.isOwner" class="font-semibold text-slate-900">platform admin</span>
             <span v-else-if="opsRbacMe.role" class="font-semibold text-slate-900">{{ opsRbacMe.role }}</span>
             <span v-else class="font-semibold text-slate-900">普通成员（未分配 Ops 角色）</span>
           </div>
@@ -50,7 +50,7 @@
           <div class="flex items-start justify-between gap-3">
             <div>
               <div class="text-sm font-semibold text-gray-900">Ops RBAC 角色管理</div>
-              <div class="text-xs text-gray-500 mt-1">仅 workspace owner 可授予/撤销角色。</div>
+              <div class="text-xs text-gray-500 mt-1">仅 platform admin 可授予/撤销角色。</div>
             </div>
             <button
               @click="refreshRoleAssignments"
@@ -68,7 +68,7 @@
           <div class="grid grid-cols-1 md:grid-cols-3 gap-2">
             <select v-model="roleForm.userId" class="border rounded px-3 py-2 text-sm">
               <option value="">选择用户</option>
-              <option v-for="user in workspaceUsers()" :key="user.id" :value="String(user.id)">
+              <option v-for="user in platformUsers()" :key="user.id" :value="String(user.id)">
                 {{ user.fullname }} (#{{ user.id }}) · {{ user.email }}
               </option>
             </select>
@@ -1546,7 +1546,7 @@ export default {
       }
       return date.toISOString();
     },
-    workspaceUsers() {
+    platformUsers() {
       const usersMap = this.$store?.state?.users || {};
       return Object.values(usersMap).sort((a, b) => Number(a.id || 0) - Number(b.id || 0));
     },
@@ -1578,7 +1578,7 @@ export default {
     async refreshRoleAssignments() {
       if (!this.canRoleManage) {
         this.roleAssignments = [];
-        this.roleErrorText = '仅 workspace owner 可管理 Ops 角色';
+        this.roleErrorText = '仅 platform admin 可管理 Ops 角色';
         return;
       }
       this.roleLoading = true;
@@ -1594,7 +1594,7 @@ export default {
     },
     async upsertRoleAssignment() {
       if (!this.canRoleManage) {
-        this.roleErrorText = '仅 workspace owner 可管理 Ops 角色';
+        this.roleErrorText = '仅 platform admin 可管理 Ops 角色';
         return;
       }
       const userId = Number(this.roleForm.userId || 0);
@@ -1617,7 +1617,7 @@ export default {
     },
     async revokeRoleAssignment(userIdRaw) {
       if (!this.canRoleManage) {
-        this.roleErrorText = '仅 workspace owner 可管理 Ops 角色';
+        this.roleErrorText = '仅 platform admin 可管理 Ops 角色';
         return;
       }
       const userId = Number(userIdRaw || 0);
@@ -1907,7 +1907,7 @@ export default {
           returnedCount: Number(reviews?.returnedCount || this.reviewRows.length),
         };
         this.reviewErrorText = this.canJudgeReview ? '' : '当前账号没有判决审阅权限';
-        this.roleErrorText = this.canRoleManage ? '' : '仅 workspace owner 可管理 Ops 角色';
+        this.roleErrorText = this.canRoleManage ? '' : '仅 platform admin 可管理 Ops 角色';
         if (this.canJudgeReview) {
           this.observabilityErrorText = '';
           this.observabilityMetricsErrorText = '';

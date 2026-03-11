@@ -54,12 +54,11 @@ pub(super) async fn apply_wallet_credit_for_verified_order(
 
     sqlx::query(
         r#"
-        INSERT INTO user_wallets(ws_id, user_id, balance)
-        VALUES ($1, $2, 0)
-        ON CONFLICT (ws_id, user_id) DO NOTHING
+        INSERT INTO user_wallets(user_id, balance)
+        VALUES ($1, 0)
+        ON CONFLICT (user_id) DO NOTHING
         "#,
     )
-    .bind(user.ws_id)
     .bind(user.id)
     .execute(&mut **tx)
     .await?;
@@ -68,11 +67,10 @@ pub(super) async fn apply_wallet_credit_for_verified_order(
         r#"
         SELECT balance
         FROM user_wallets
-        WHERE ws_id = $1 AND user_id = $2
+        WHERE user_id = $1
         FOR UPDATE
         "#,
     )
-    .bind(user.ws_id)
     .bind(user.id)
     .fetch_one(&mut **tx)
     .await?;
@@ -81,11 +79,10 @@ pub(super) async fn apply_wallet_credit_for_verified_order(
     sqlx::query(
         r#"
         UPDATE user_wallets
-        SET balance = $3, updated_at = NOW()
-        WHERE ws_id = $1 AND user_id = $2
+        SET balance = $2, updated_at = NOW()
+        WHERE user_id = $1
         "#,
     )
-    .bind(user.ws_id)
     .bind(user.id)
     .bind(next_balance)
     .execute(&mut **tx)
@@ -100,13 +97,12 @@ pub(super) async fn apply_wallet_credit_for_verified_order(
     sqlx::query(
         r#"
         INSERT INTO wallet_ledger(
-            ws_id, user_id, order_id, entry_type, amount_delta, balance_after,
+            user_id, order_id, entry_type, amount_delta, balance_after,
             idempotency_key, metadata
         )
-        VALUES ($1, $2, $3, 'iap_credit', $4, $5, $6, $7)
+        VALUES ($1, $2, 'iap_credit', $3, $4, $5, $6)
         "#,
     )
-    .bind(user.ws_id)
     .bind(user.id)
     .bind(inserted_order.id)
     .bind(inserted_order.coins as i64)

@@ -188,7 +188,7 @@ mod tests {
         let token = state
             .0
             .ek
-            .sign_access_token(user.id, user.ws_id, "sid-auth-test-1", 0)?;
+            .sign_access_token(user.id, "sid-auth-test-1", 0)?;
 
         let app = Router::new()
             .route("/", get(handler))
@@ -245,7 +245,7 @@ mod tests {
         let token = state
             .0
             .ek
-            .sign_access_token(user.id, user.ws_id, "sid-auth-test-2", 0)?;
+            .sign_access_token(user.id, "sid-auth-test-2", 0)?;
 
         let app = Router::new()
             .route("/", get(handler))
@@ -293,7 +293,7 @@ mod tests {
         let token = state
             .0
             .ek
-            .sign_access_token(user.id, user.ws_id, "sid-auth-test-3", 0)?;
+            .sign_access_token(user.id, "sid-auth-test-3", 0)?;
 
         let app = Router::new()
             .route("/", get(auth_state_handler))

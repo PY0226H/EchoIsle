@@ -76,7 +76,6 @@ pub struct OpsPermissionFlags {
 #[serde(rename_all = "camelCase")]
 pub struct GetOpsRbacMeOutput {
     pub user_id: u64,
-    pub ws_id: u64,
     pub is_owner: bool,
     pub role: Option<String>,
     pub permissions: OpsPermissionFlags,
@@ -130,31 +129,19 @@ fn map_assignment_row(row: OpsRoleAssignmentRow) -> OpsRoleAssignment {
 }
 
 impl AppState {
-    async fn get_workspace_owner_id(&self, ws_id: i64) -> Result<i64, AppError> {
-        let owner_row: Option<(i64,)> =
-            sqlx::query_as("SELECT owner_id FROM workspaces WHERE id = $1")
-                .bind(ws_id)
-                .fetch_optional(&self.pool)
-                .await?;
-        let Some((owner_id,)) = owner_row else {
-            return Err(AppError::NotFound(format!("workspace id {ws_id}")));
-        };
-        Ok(owner_id)
+    async fn get_platform_admin_user_id(&self) -> Result<i64, AppError> {
+        let _ = self;
+        Ok(1)
     }
 
-    async fn find_ops_role_for_user(
-        &self,
-        ws_id: i64,
-        user_id: i64,
-    ) -> Result<Option<String>, AppError> {
+    async fn find_ops_role_for_user(&self, user_id: i64) -> Result<Option<String>, AppError> {
         let role_row: Option<(String,)> = sqlx::query_as(
             r#"
             SELECT role
-            FROM workspace_user_roles
-            WHERE ws_id = $1 AND user_id = $2
+            FROM platform_user_roles
+            WHERE user_id = $1
             "#,
         )
-        .bind(ws_id)
         .bind(user_id)
         .fetch_optional(&self.pool)
         .await?;
@@ -162,11 +149,10 @@ impl AppState {
     }
 
     pub async fn get_ops_rbac_me(&self, user: &User) -> Result<GetOpsRbacMeOutput, AppError> {
-        let owner_id = self.get_workspace_owner_id(user.ws_id).await?;
+        let owner_id = self.get_platform_admin_user_id().await?;
         if owner_id == user.id {
             return Ok(GetOpsRbacMeOutput {
                 user_id: user.id as u64,
-                ws_id: user.ws_id as u64,
                 is_owner: true,
                 role: None,
                 permissions: OpsPermissionFlags {
@@ -178,7 +164,7 @@ impl AppState {
             });
         }
 
-        let role = self.find_ops_role_for_user(user.ws_id, user.id).await?;
+        let role = self.find_ops_role_for_user(user.id).await?;
         let permissions = if let Some(role_value) = role.as_deref() {
             OpsPermissionFlags {
                 debate_manage: role_grants_permission(role_value, OpsPermission::DebateManage),
@@ -197,7 +183,6 @@ impl AppState {
 
         Ok(GetOpsRbacMeOutput {
             user_id: user.id as u64,
-            ws_id: user.ws_id as u64,
             is_owner: false,
             role,
             permissions,
@@ -209,12 +194,12 @@ impl AppState {
         user: &User,
         permission: OpsPermission,
     ) -> Result<(), AppError> {
-        let owner_id = self.get_workspace_owner_id(user.ws_id).await?;
+        let owner_id = self.get_platform_admin_user_id().await?;
         if owner_id == user.id {
             return Ok(());
         }
 
-        let role = self.find_ops_role_for_user(user.ws_id, user.id).await?;
+        let role = self.find_ops_role_for_user(user.id).await?;
         let Some(role) = role else {
             return Err(permission_denied(permission, "missing ops role assignment"));
         };
@@ -227,11 +212,11 @@ impl AppState {
         Ok(())
     }
 
-    async fn ensure_workspace_owner_for_ops_rbac(&self, user: &User) -> Result<(), AppError> {
-        let owner_id = self.get_workspace_owner_id(user.ws_id).await?;
+    async fn ensure_platform_admin_for_ops_rbac(&self, user: &User) -> Result<(), AppError> {
+        let owner_id = self.get_platform_admin_user_id().await?;
         if owner_id != user.id {
             return Err(AppError::DebateConflict(
-                "ops_permission_denied:role_manage:only workspace owner can manage ops roles"
+                "ops_permission_denied:role_manage:only platform admin can manage ops roles"
                     .to_string(),
             ));
         }
@@ -242,7 +227,7 @@ impl AppState {
         &self,
         user: &User,
     ) -> Result<ListOpsRoleAssignmentsOutput, AppError> {
-        self.ensure_workspace_owner_for_ops_rbac(user).await?;
+        self.ensure_platform_admin_for_ops_rbac(user).await?;
         let rows: Vec<OpsRoleAssignmentRow> = sqlx::query_as(
             r#"
             SELECT
@@ -253,13 +238,11 @@ impl AppState {
                 r.granted_by,
                 r.created_at,
                 r.updated_at
-            FROM workspace_user_roles r
+            FROM platform_user_roles r
             JOIN users u ON u.id = r.user_id
-            WHERE r.ws_id = $1
             ORDER BY r.updated_at DESC, r.user_id DESC
             "#,
         )
-        .bind(user.ws_id)
         .fetch_all(&self.pool)
         .await?;
         Ok(ListOpsRoleAssignmentsOutput {
@@ -273,18 +256,17 @@ impl AppState {
         target_user_id: u64,
         input: UpsertOpsRoleInput,
     ) -> Result<OpsRoleAssignment, AppError> {
-        self.ensure_workspace_owner_for_ops_rbac(user).await?;
+        self.ensure_platform_admin_for_ops_rbac(user).await?;
         let role = normalize_ops_role(&input.role)?;
 
         let target_exists: Option<(i64,)> = sqlx::query_as(
             r#"
             SELECT id
             FROM users
-            WHERE id = $1 AND ws_id = $2
+            WHERE id = $1
             "#,
         )
         .bind(target_user_id as i64)
-        .bind(user.ws_id)
         .fetch_optional(&self.pool)
         .await?;
         if target_exists.is_none() {
@@ -293,26 +275,25 @@ impl AppState {
 
         let row: OpsRoleAssignmentRow = sqlx::query_as(
             r#"
-            INSERT INTO workspace_user_roles(
-                ws_id, user_id, role, granted_by, created_at, updated_at
+            INSERT INTO platform_user_roles(
+                user_id, role, granted_by, created_at, updated_at
             )
-            VALUES ($1, $2, $3, $4, NOW(), NOW())
-            ON CONFLICT (ws_id, user_id)
+            VALUES ($1, $2, $3, NOW(), NOW())
+            ON CONFLICT (user_id)
             DO UPDATE
             SET role = EXCLUDED.role,
                 granted_by = EXCLUDED.granted_by,
                 updated_at = NOW()
             RETURNING
                 user_id,
-                (SELECT COALESCE(email, '') FROM users WHERE id = workspace_user_roles.user_id) AS user_email,
-                (SELECT fullname FROM users WHERE id = workspace_user_roles.user_id) AS user_fullname,
+                (SELECT COALESCE(email, '') FROM users WHERE id = platform_user_roles.user_id) AS user_email,
+                (SELECT fullname FROM users WHERE id = platform_user_roles.user_id) AS user_fullname,
                 role,
                 granted_by,
                 created_at,
                 updated_at
             "#,
         )
-        .bind(user.ws_id)
         .bind(target_user_id as i64)
         .bind(role)
         .bind(user.id)
@@ -326,15 +307,14 @@ impl AppState {
         user: &User,
         target_user_id: u64,
     ) -> Result<RevokeOpsRoleOutput, AppError> {
-        self.ensure_workspace_owner_for_ops_rbac(user).await?;
+        self.ensure_platform_admin_for_ops_rbac(user).await?;
         let removed = sqlx::query_scalar::<_, i64>(
             r#"
-            DELETE FROM workspace_user_roles
-            WHERE ws_id = $1 AND user_id = $2
+            DELETE FROM platform_user_roles
+            WHERE user_id = $1
             RETURNING user_id
             "#,
         )
-        .bind(user.ws_id)
         .bind(target_user_id as i64)
         .fetch_optional(&self.pool)
         .await?
@@ -344,6 +324,34 @@ impl AppState {
             user_id: target_user_id,
             removed,
         })
+    }
+
+    pub async fn grant_platform_admin(&self, user_id: u64) -> Result<(), AppError> {
+        let user_exists: Option<(i64,)> = sqlx::query_as("SELECT id FROM users WHERE id = $1")
+            .bind(user_id as i64)
+            .fetch_optional(&self.pool)
+            .await?;
+        if user_exists.is_none() {
+            return Err(AppError::NotFound(format!("user id {}", user_id)));
+        }
+
+        sqlx::query(
+            r#"
+            INSERT INTO platform_user_roles(user_id, role, granted_by, created_at, updated_at)
+            VALUES ($1, $2, $3, NOW(), NOW())
+            ON CONFLICT (user_id)
+            DO UPDATE
+            SET role = EXCLUDED.role,
+                granted_by = EXCLUDED.granted_by,
+                updated_at = NOW()
+            "#,
+        )
+        .bind(user_id as i64)
+        .bind(ROLE_OPS_ADMIN)
+        .bind(1_i64)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
     }
 }
 
@@ -355,7 +363,7 @@ mod tests {
     #[tokio::test]
     async fn ensure_ops_permission_should_allow_owner_and_assigned_role() -> Result<()> {
         let (_tdb, state) = AppState::new_for_test().await?;
-        state.update_workspace_owner(1, 1).await?;
+        state.grant_platform_admin(1).await?;
         let owner = state.find_user_by_id(1).await?.expect("owner should exist");
         let user = state.find_user_by_id(2).await?.expect("user should exist");
 
@@ -384,7 +392,7 @@ mod tests {
     #[tokio::test]
     async fn ensure_ops_permission_should_respect_role_matrix() -> Result<()> {
         let (_tdb, state) = AppState::new_for_test().await?;
-        state.update_workspace_owner(1, 1).await?;
+        state.grant_platform_admin(1).await?;
         let owner = state.find_user_by_id(1).await?.expect("owner should exist");
         let user = state.find_user_by_id(2).await?.expect("user should exist");
 
@@ -426,7 +434,7 @@ mod tests {
     #[tokio::test]
     async fn get_ops_rbac_me_should_return_permissions_snapshot() -> Result<()> {
         let (_tdb, state) = AppState::new_for_test().await?;
-        state.update_workspace_owner(1, 1).await?;
+        state.grant_platform_admin(1).await?;
         let owner = state.find_user_by_id(1).await?.expect("owner should exist");
         let viewer = state
             .find_user_by_id(2)
@@ -462,7 +470,7 @@ mod tests {
     #[tokio::test]
     async fn ops_role_assignment_crud_should_work() -> Result<()> {
         let (_tdb, state) = AppState::new_for_test().await?;
-        state.update_workspace_owner(1, 1).await?;
+        state.grant_platform_admin(1).await?;
         let owner = state.find_user_by_id(1).await?.expect("owner should exist");
 
         let created = state
@@ -478,14 +486,17 @@ mod tests {
         assert_eq!(created.role, "ops_reviewer");
 
         let list = state.list_ops_role_assignments_by_owner(&owner).await?;
-        assert_eq!(list.items.len(), 1);
-        assert_eq!(list.items[0].user_id, 2);
+        assert!(!list.items.is_empty());
+        assert!(list
+            .items
+            .iter()
+            .any(|item| item.user_id == 2 && item.role == "ops_reviewer"));
 
         let revoked = state.revoke_ops_role_assignment_by_owner(&owner, 2).await?;
         assert!(revoked.removed);
 
         let list_after = state.list_ops_role_assignments_by_owner(&owner).await?;
-        assert!(list_after.items.is_empty());
+        assert!(list_after.items.iter().all(|item| item.user_id != 2));
         Ok(())
     }
 }

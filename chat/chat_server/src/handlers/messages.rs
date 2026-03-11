@@ -66,16 +66,11 @@ pub(crate) async fn list_message_handler(
 }
 
 pub(crate) async fn file_handler(
-    Extension(user): Extension<User>,
+    Extension(_user): Extension<User>,
     State(state): State<AppState>,
-    Path((ws_id, path)): Path<(i64, String)>,
+    Path(path): Path<String>,
 ) -> Result<impl IntoResponse, AppError> {
-    if user.ws_id != ws_id {
-        return Err(AppError::NotFound(
-            "File doesn't exist or you don't have permission".to_string(),
-        ));
-    }
-    let path = resolve_workspace_file_path(&state.config.server.base_dir, ws_id, &path).await?;
+    let path = resolve_file_path(&state.config.server.base_dir, &path).await?;
 
     let mime = mime_guess::from_path(&path).first_or_octet_stream();
     let file = fs::File::open(path).await?;
@@ -86,11 +81,10 @@ pub(crate) async fn file_handler(
 }
 
 pub(crate) async fn upload_handler(
-    Extension(user): Extension<User>,
+    Extension(_user): Extension<User>,
     State(state): State<AppState>,
     mut multipart: Multipart,
 ) -> Result<impl IntoResponse, AppError> {
-    let ws_id = user.ws_id as u64;
     let base_dir = &state.config.server.base_dir;
     let mut files = vec![];
     while let Some(field) = multipart.next_field().await.unwrap() {
@@ -100,7 +94,7 @@ pub(crate) async fn upload_handler(
             continue;
         };
 
-        let file = ChatFile::new(ws_id, &filename, &data);
+        let file = ChatFile::new(&filename, &data);
         let path = file.path(base_dir);
         if path.exists() {
             info!("File {} already exists: {:?}", filename, path);
@@ -137,21 +131,18 @@ fn sanitize_relative_path(path: &str) -> Result<PathBuf, AppError> {
     Ok(normalized)
 }
 
-async fn resolve_workspace_file_path(
-    base_dir: &StdPath,
-    ws_id: i64,
-    raw_path: &str,
-) -> Result<PathBuf, AppError> {
-    let ws_root = base_dir.join(ws_id.to_string());
+async fn resolve_file_path(base_dir: &StdPath, raw_path: &str) -> Result<PathBuf, AppError> {
     let normalized = sanitize_relative_path(raw_path)?;
-    let requested = ws_root.join(normalized);
+    let requested = base_dir.join(normalized);
 
-    let canonical_ws_root = fs::canonicalize(&ws_root).await.unwrap_or(ws_root);
+    let canonical_base_dir = fs::canonicalize(base_dir)
+        .await
+        .unwrap_or(base_dir.to_path_buf());
     let canonical_requested = fs::canonicalize(&requested)
         .await
         .map_err(|_| AppError::NotFound("File doesn't exist".to_string()))?;
 
-    if !canonical_requested.starts_with(&canonical_ws_root) {
+    if !canonical_requested.starts_with(&canonical_base_dir) {
         return Err(AppError::NotFound(
             "File doesn't exist or you don't have permission".to_string(),
         ));
@@ -175,14 +166,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn resolve_workspace_file_path_should_allow_normalized_valid_path() -> Result<()> {
+    async fn resolve_file_path_should_allow_normalized_valid_path() -> Result<()> {
         let base_dir = temp_base_dir("ok");
-        let ws_root = base_dir.join("1");
-        let file_path = ws_root.join("a/b/file.txt");
+        let file_path = base_dir.join("a/b/file.txt");
         fs::create_dir_all(file_path.parent().expect("parent should exist")).await?;
         fs::write(&file_path, b"hello").await?;
 
-        let resolved = resolve_workspace_file_path(&base_dir, 1, "a/./b/file.txt").await?;
+        let resolved = resolve_file_path(&base_dir, "a/./b/file.txt").await?;
         assert_eq!(resolved, fs::canonicalize(&file_path).await?);
 
         fs::remove_dir_all(base_dir).await?;
@@ -190,11 +180,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn resolve_workspace_file_path_should_reject_parent_dir_traversal() -> Result<()> {
+    async fn resolve_file_path_should_reject_parent_dir_traversal() -> Result<()> {
         let base_dir = temp_base_dir("traversal");
-        fs::create_dir_all(base_dir.join("1")).await?;
+        fs::create_dir_all(&base_dir).await?;
 
-        let result = resolve_workspace_file_path(&base_dir, 1, "../outside.txt").await;
+        let result = resolve_file_path(&base_dir, "../outside.txt").await;
         assert!(matches!(result, Err(AppError::NotFound(_))));
 
         fs::remove_dir_all(base_dir).await?;
@@ -202,11 +192,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn resolve_workspace_file_path_should_reject_missing_file() -> Result<()> {
+    async fn resolve_file_path_should_reject_missing_file() -> Result<()> {
         let base_dir = temp_base_dir("missing");
-        fs::create_dir_all(base_dir.join("1")).await?;
+        fs::create_dir_all(&base_dir).await?;
 
-        let result = resolve_workspace_file_path(&base_dir, 1, "a/b/missing.txt").await;
+        let result = resolve_file_path(&base_dir, "a/b/missing.txt").await;
         assert!(matches!(result, Err(AppError::NotFound(_))));
 
         fs::remove_dir_all(base_dir).await?;
@@ -215,22 +205,22 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
-    async fn resolve_workspace_file_path_should_reject_symlink_escape() -> Result<()> {
+    async fn resolve_file_path_should_reject_symlink_escape() -> Result<()> {
         use std::os::unix::fs::symlink;
 
-        let base_dir = temp_base_dir("symlink");
-        let ws_root = base_dir.join("1");
-        let outside_dir = base_dir.join("outside");
-        fs::create_dir_all(&ws_root).await?;
+        let workspace_dir = temp_base_dir("symlink");
+        let base_dir = workspace_dir.join("base");
+        let outside_dir = workspace_dir.join("outside");
+        fs::create_dir_all(&base_dir).await?;
         fs::create_dir_all(&outside_dir).await?;
         let outside_file = outside_dir.join("secret.txt");
         fs::write(&outside_file, b"secret").await?;
 
-        symlink(&outside_dir, ws_root.join("link"))?;
-        let result = resolve_workspace_file_path(&base_dir, 1, "link/secret.txt").await;
+        symlink(&outside_dir, base_dir.join("link"))?;
+        let result = resolve_file_path(&base_dir, "link/secret.txt").await;
         assert!(matches!(result, Err(AppError::NotFound(_))));
 
-        fs::remove_dir_all(base_dir).await?;
+        fs::remove_dir_all(workspace_dir).await?;
         Ok(())
     }
 }

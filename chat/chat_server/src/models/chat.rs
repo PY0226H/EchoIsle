@@ -59,7 +59,8 @@ impl AppState {
         }
 
         // verify if all members exist
-        self.ensure_workspace_users_exist(ws_id, &members).await?;
+        self.ensure_users_exist_in_platform_scope(ws_id, &members)
+            .await?;
 
         let chat_type = match (&input.name, len) {
             (None, 2) => ChatType::Single,
@@ -122,7 +123,7 @@ impl AppState {
     }
 
     pub async fn join_chat(&self, id: u64, ws_id: u64, user_id: u64) -> Result<Chat, AppError> {
-        self.ensure_workspace_users_exist(ws_id, &[user_id as i64])
+        self.ensure_users_exist_in_platform_scope(ws_id, &[user_id as i64])
             .await?;
 
         let chat = sqlx::query_as(
@@ -228,7 +229,7 @@ impl AppState {
                 chat_id: id,
             });
         }
-        self.ensure_workspace_users_exist(ws_id, &member_ids)
+        self.ensure_users_exist_in_platform_scope(ws_id, &member_ids)
             .await?;
 
         let updated = sqlx::query_as(
@@ -436,7 +437,7 @@ impl AppState {
         Ok(chat)
     }
 
-    async fn ensure_workspace_users_exist(
+    async fn ensure_users_exist_in_platform_scope(
         &self,
         ws_id: u64,
         member_ids: &[i64],
@@ -457,7 +458,7 @@ impl AppState {
         .await?;
         if count != member_ids.len() as i64 {
             return Err(AppError::CreateChatError(
-                "Some members do not exist in workspace".to_string(),
+                "Some members do not exist in platform scope".to_string(),
             ));
         }
         Ok(())
@@ -614,7 +615,6 @@ mod tests {
         let (_tdb, state) = AppState::new_for_test().await?;
         let new_user = state
             .create_user(&crate::CreateUser::new(
-                "acme",
                 "Join User",
                 "join-user@acme.org",
                 "hunter42",
@@ -655,7 +655,6 @@ mod tests {
         let (_tdb, state) = AppState::new_for_test().await?;
         let new_user = state
             .create_user(&crate::CreateUser::new(
-                "acme",
                 "Member User",
                 "member-user@acme.org",
                 "hunter42",

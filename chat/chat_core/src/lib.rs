@@ -44,8 +44,11 @@ pub enum AgentError {
 #[serde(rename_all = "camelCase")]
 pub struct User {
     pub id: i64,
+    #[sqlx(default)]
+    #[serde(skip)]
     pub ws_id: i64,
     #[sqlx(default)]
+    #[serde(skip)]
     pub ws_name: String,
     pub fullname: String,
     pub email: String,
@@ -60,15 +63,6 @@ pub struct User {
     pub password_hash: Option<String>,
     #[sqlx(default)]
     pub is_bot: bool,
-    pub created_at: DateTime<Utc>,
-}
-
-#[derive(Debug, Clone, FromRow, ToSchema, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub struct Workspace {
-    pub id: i64,
-    pub name: String,
-    pub owner_id: i64,
     pub created_at: DateTime<Utc>,
 }
 
@@ -101,7 +95,7 @@ pub enum ChatType {
 #[serde(rename_all(serialize = "camelCase"))]
 pub struct Chat {
     pub id: i64,
-    #[serde(alias = "wsId")]
+    #[serde(skip)]
     pub ws_id: i64,
     pub name: Option<String>,
     pub r#type: ChatType,
@@ -210,8 +204,8 @@ impl User {
     pub fn new(id: i64, fullname: &str, email: &str) -> Self {
         Self {
             id,
-            ws_id: 0,
-            ws_name: "".to_string(),
+            ws_id: 1,
+            ws_name: "default".to_string(),
             fullname: fullname.to_string(),
             email: email.to_string(),
             phone_e164: None,

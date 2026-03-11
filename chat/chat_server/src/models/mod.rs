@@ -10,7 +10,6 @@ mod ops_observability;
 mod payment;
 mod rbac;
 mod user;
-mod workspace;
 
 pub use agent::{CreateAgent, UpdateAgent};
 pub use chat::{CreateChat, UpdateChat, UpdateChatMembers};
@@ -58,11 +57,10 @@ pub use rbac::{
     RevokeOpsRoleOutput, UpsertOpsRoleInput,
 };
 use serde::{Deserialize, Serialize};
-pub use user::{CreateUser, CreateUserAutoWorkspaceInput, SigninUser};
+pub use user::{CreateUser, CreateUserWithPhoneInput, SigninUser};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChatFile {
-    pub ws_id: u64,
     pub ext: String, // extract ext from filename or mime type
     pub hash: String,
 }

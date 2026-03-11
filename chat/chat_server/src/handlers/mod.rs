@@ -10,7 +10,7 @@ pub(crate) mod debate_room;
 mod messages;
 mod payment;
 mod ticket;
-mod workspace;
+mod users;
 
 use axum::response::IntoResponse;
 
@@ -23,7 +23,7 @@ pub(crate) use debate::*;
 pub(crate) use messages::*;
 pub(crate) use payment::*;
 pub(crate) use ticket::*;
-pub(crate) use workspace::*;
+pub(crate) use users::*;
 
 pub(crate) async fn index_handler() -> impl IntoResponse {
     "index"

@@ -37,6 +37,7 @@ const AI_JUDGE_OUTBOX_ALERT_KEY_PREFIX: &str = "ai_judge_outbox";
 const AI_JUDGE_OUTBOX_RULE_TYPE_PREFIX: &str = "ai_judge";
 const AI_JUDGE_OUTBOX_DEFAULT_EVENT_TYPE: &str = "ai_judge.audit_alert.status_changed.v1";
 const AI_JUDGE_OUTBOX_ERROR_MAX_LEN: usize = 500;
+const PLATFORM_SCOPE_ID: i64 = 1;
 const SPLIT_READINESS_PRESSURE_PENDING_RUNNING_THRESHOLD: i64 = 20;
 const SPLIT_READINESS_PRESSURE_PENDING_DLQ_THRESHOLD: i64 = 20;
 const SPLIT_READINESS_PRESSURE_AVG_ATTEMPTS_THRESHOLD: f64 = 2.5;
@@ -147,7 +148,6 @@ struct OpsServiceSplitReviewRow {
 #[derive(Debug, Clone, FromRow)]
 struct OpsServiceSplitReviewAuditRow {
     id: i64,
-    ws_id: i64,
     payment_compliance_required: Option<bool>,
     review_note: String,
     updated_by: i64,
@@ -389,7 +389,6 @@ struct AiJudgeOutboxPayload {
 #[derive(Debug, Clone)]
 struct AiJudgeOutboxNormalizedEvent {
     event_id: String,
-    ws_id: i64,
     alert_type: String,
     severity: String,
     alert_status: String,
@@ -875,7 +874,7 @@ fn map_split_review_audit_row(
 ) -> OpsServiceSplitReviewAuditItem {
     OpsServiceSplitReviewAuditItem {
         id: row.id as u64,
-        ws_id: row.ws_id as u64,
+        ws_id: PLATFORM_SCOPE_ID as u64,
         payment_compliance_required: row.payment_compliance_required,
         review_note: row.review_note,
         updated_by: row.updated_by as u64,
@@ -944,9 +943,11 @@ fn normalize_ai_judge_outbox_event(
 
     let payload: AiJudgeOutboxPayload =
         serde_json::from_value(item.payload.clone()).unwrap_or_default();
-    let ws_id_raw = item.ws_id.or(payload.ws_id);
-    let ws_id_u64 = ws_id_raw.ok_or_else(|| "missing wsId".to_string())?;
-    let ws_id = i64::try_from(ws_id_u64).map_err(|_| "wsId overflow".to_string())?;
+    let ws_id = item
+        .ws_id
+        .or(payload.ws_id)
+        .and_then(|value| i64::try_from(value).ok())
+        .unwrap_or(PLATFORM_SCOPE_ID);
     let status_raw = item
         .status
         .as_deref()
@@ -982,6 +983,7 @@ fn normalize_ai_judge_outbox_event(
         .and_then(|v| i64::try_from(v).ok());
     let metrics = serde_json::json!({
         "eventId": event_id,
+        "wsId": ws_id,
         "eventType": event_type,
         "alertId": alert_id,
         "alertType": alert_type,
@@ -993,7 +995,6 @@ fn normalize_ai_judge_outbox_event(
 
     Ok(AiJudgeOutboxNormalizedEvent {
         event_id,
-        ws_id,
         alert_type,
         severity,
         alert_status: mapped_status,
@@ -1277,10 +1278,10 @@ impl AppState {
         sqlx::query(
             r#"
             INSERT INTO ops_service_split_reviews(
-                ws_id, payment_compliance_required, review_note, updated_by, created_at, updated_at
+                singleton_id, payment_compliance_required, review_note, updated_by, created_at, updated_at
             )
-            VALUES ($1, $2, $3, $4, NOW(), NOW())
-            ON CONFLICT (ws_id)
+            VALUES (1, $1, $2, $3, NOW(), NOW())
+            ON CONFLICT (singleton_id)
             DO UPDATE SET
                 payment_compliance_required = EXCLUDED.payment_compliance_required,
                 review_note = EXCLUDED.review_note,
@@ -1288,7 +1289,6 @@ impl AppState {
                 updated_at = NOW()
             "#,
         )
-        .bind(user.ws_id)
         .bind(input.payment_compliance_required)
         .bind(&review_note)
         .bind(user.id)
@@ -1297,12 +1297,11 @@ impl AppState {
         sqlx::query(
             r#"
             INSERT INTO ops_service_split_review_audits(
-                ws_id, payment_compliance_required, review_note, updated_by, created_at
+                payment_compliance_required, review_note, updated_by, created_at
             )
-            VALUES ($1, $2, $3, $4, NOW())
+            VALUES ($1, $2, $3, NOW())
             "#,
         )
-        .bind(user.ws_id)
         .bind(input.payment_compliance_required)
         .bind(review_note)
         .bind(user.id)
@@ -1313,25 +1312,23 @@ impl AppState {
         if before_snapshot.overall_status != "review_required"
             && after_snapshot.overall_status == "review_required"
         {
-            let recipients = self.list_alert_recipients(user.ws_id).await?;
+            let recipients = self.list_alert_recipients().await?;
             let plan = EmitAlertPlan {
                 status: ALERT_STATUS_RAISED,
                 mark_active: true,
                 evaluated: build_split_review_required_alert(&after_snapshot, user.id),
             };
-            self.emit_observability_alert(user.ws_id, plan, &recipients)
-                .await?;
+            self.emit_observability_alert(plan, &recipients).await?;
         } else if before_snapshot.overall_status == "review_required"
             && after_snapshot.overall_status != "review_required"
         {
-            let recipients = self.list_alert_recipients(user.ws_id).await?;
+            let recipients = self.list_alert_recipients().await?;
             let plan = EmitAlertPlan {
                 status: ALERT_STATUS_CLEARED,
                 mark_active: false,
                 evaluated: build_split_review_cleared_alert(&after_snapshot, user.id),
             };
-            self.emit_observability_alert(user.ws_id, plan, &recipients)
-                .await?;
+            self.emit_observability_alert(plan, &recipients).await?;
         }
         Ok(after_snapshot)
     }
@@ -1349,23 +1346,19 @@ impl AppState {
             r#"
             SELECT COUNT(1)::bigint
             FROM ops_service_split_review_audits
-            WHERE ws_id = $1
             "#,
         )
-        .bind(user.ws_id)
         .fetch_one(&self.pool)
         .await?;
         let rows: Vec<OpsServiceSplitReviewAuditRow> = sqlx::query_as(
             r#"
             SELECT
-                id, ws_id, payment_compliance_required, review_note, updated_by, created_at
+                id, payment_compliance_required, review_note, updated_by, created_at
             FROM ops_service_split_review_audits
-            WHERE ws_id = $1
             ORDER BY created_at DESC, id DESC
-            LIMIT $2 OFFSET $3
+            LIMIT $1 OFFSET $2
             "#,
         )
-        .bind(user.ws_id)
         .bind(limit)
         .bind(offset)
         .fetch_all(&self.pool)
@@ -1385,15 +1378,14 @@ impl AppState {
         self.ensure_ops_permission(user, OpsPermission::JudgeReview)
             .await?;
         let generated_at_ms = now_millis();
-        let signal = self.load_recent_judge_signal(user.ws_id).await?;
+        let signal = self.load_recent_judge_signal().await?;
         let compliance_review: Option<OpsServiceSplitReviewRow> = sqlx::query_as(
             r#"
             SELECT payment_compliance_required, review_note, updated_by, updated_at
             FROM ops_service_split_reviews
-            WHERE ws_id = $1
+            WHERE singleton_id = 1
             "#,
         )
-        .bind(user.ws_id)
         .fetch_optional(&self.pool)
         .await?;
         let dispatch_metrics = self.get_judge_dispatch_metrics();
@@ -1401,8 +1393,7 @@ impl AppState {
             r#"
             SELECT COUNT(1)::bigint
             FROM judge_jobs j
-            WHERE j.ws_id = $1
-              AND j.status = 'running'
+            WHERE j.status = 'running'
               AND NOT EXISTS (
                 SELECT 1
                 FROM judge_reports r
@@ -1410,29 +1401,24 @@ impl AppState {
               )
             "#,
         )
-        .bind(user.ws_id)
         .fetch_one(&self.pool)
         .await?;
         let running_sessions: i64 = sqlx::query_scalar(
             r#"
             SELECT COUNT(1)::bigint
             FROM debate_sessions
-            WHERE ws_id = $1
-              AND status = 'running'
+            WHERE status = 'running'
             "#,
         )
-        .bind(user.ws_id)
         .fetch_one(&self.pool)
         .await?;
         let recent_messages_10m: i64 = sqlx::query_scalar(
             r#"
             SELECT COUNT(1)::bigint
             FROM session_messages
-            WHERE ws_id = $1
-              AND created_at >= NOW() - INTERVAL '10 minutes'
+            WHERE created_at >= NOW() - INTERVAL '10 minutes'
             "#,
         )
-        .bind(user.ws_id)
         .fetch_one(&self.pool)
         .await?;
         let failed_ratio = if dispatch_metrics.dispatched_total == 0 {
@@ -1557,7 +1543,7 @@ impl AppState {
         };
 
         Ok(GetOpsServiceSplitReadinessOutput {
-            ws_id: user.ws_id as u64,
+            ws_id: PLATFORM_SCOPE_ID as u64,
             generated_at_ms,
             overall_status: overall_status.to_string(),
             next_step: next_step.to_string(),
@@ -1589,10 +1575,9 @@ impl AppState {
             r#"
             SELECT thresholds_json, anomaly_state_json, updated_by, updated_at
             FROM ops_observability_configs
-            WHERE ws_id = $1
+            WHERE singleton_id = 1
             "#,
         )
-        .bind(user.ws_id)
         .fetch_optional(&self.pool)
         .await?;
 
@@ -1604,7 +1589,7 @@ impl AppState {
         } else {
             (OpsObservabilityThresholds::default(), HashMap::new())
         };
-        let signal = self.load_recent_judge_signal(user.ws_id).await?;
+        let signal = self.load_recent_judge_signal().await?;
         let signal_snapshot = build_ops_slo_signal_snapshot(signal);
         let mut rules = Vec::with_capacity(rule_specs().len());
         for spec in rule_specs() {
@@ -1613,10 +1598,9 @@ impl AppState {
                 r#"
                 SELECT is_active, last_emitted_status
                 FROM ops_alert_states
-                WHERE ws_id = $1 AND alert_key = $2
+                WHERE alert_key = $1
                 "#,
             )
-            .bind(user.ws_id)
             .bind(spec.alert_key)
             .fetch_optional(&self.pool)
             .await?;
@@ -1648,7 +1632,7 @@ impl AppState {
         }
 
         Ok(GetOpsSloSnapshotOutput {
-            ws_id: user.ws_id as u64,
+            ws_id: PLATFORM_SCOPE_ID as u64,
             window_minutes: OPS_ALERT_EVAL_WINDOW_MINUTES,
             generated_at_ms: now_ms,
             thresholds,
@@ -1667,13 +1651,12 @@ impl AppState {
             r#"
             SELECT thresholds_json, anomaly_state_json, updated_by, updated_at
             FROM ops_observability_configs
-            WHERE ws_id = $1
+            WHERE singleton_id = 1
             "#,
         )
-        .bind(user.ws_id)
         .fetch_optional(&self.pool)
         .await?;
-        Ok(build_output(user.ws_id as u64, row, now_millis()))
+        Ok(build_output(PLATFORM_SCOPE_ID as u64, row, now_millis()))
     }
 
     pub async fn upsert_ops_observability_thresholds(
@@ -1689,17 +1672,16 @@ impl AppState {
         sqlx::query(
             r#"
             INSERT INTO ops_observability_configs(
-                ws_id, thresholds_json, anomaly_state_json, updated_by, created_at, updated_at
+                singleton_id, thresholds_json, anomaly_state_json, updated_by, created_at, updated_at
             )
-            VALUES ($1, $2, '{}'::jsonb, $3, NOW(), NOW())
-            ON CONFLICT (ws_id)
+            VALUES (1, $1, '{}'::jsonb, $2, NOW(), NOW())
+            ON CONFLICT (singleton_id)
             DO UPDATE
             SET thresholds_json = EXCLUDED.thresholds_json,
                 updated_by = EXCLUDED.updated_by,
                 updated_at = NOW()
             "#,
         )
-        .bind(user.ws_id)
         .bind(thresholds_json)
         .bind(user.id)
         .execute(&self.pool)
@@ -1724,17 +1706,16 @@ impl AppState {
         sqlx::query(
             r#"
             INSERT INTO ops_observability_configs(
-                ws_id, thresholds_json, anomaly_state_json, updated_by, created_at, updated_at
+                singleton_id, thresholds_json, anomaly_state_json, updated_by, created_at, updated_at
             )
-            VALUES ($1, $2, $3, $4, NOW(), NOW())
-            ON CONFLICT (ws_id)
+            VALUES (1, $1, $2, $3, NOW(), NOW())
+            ON CONFLICT (singleton_id)
             DO UPDATE
             SET anomaly_state_json = EXCLUDED.anomaly_state_json,
                 updated_by = EXCLUDED.updated_by,
                 updated_at = NOW()
             "#,
         )
-        .bind(user.ws_id)
         .bind(default_thresholds_json)
         .bind(anomaly_state_json)
         .bind(user.id)
@@ -1758,13 +1739,12 @@ impl AppState {
         sqlx::query(
             r#"
             INSERT INTO ops_observability_configs(
-                ws_id, thresholds_json, anomaly_state_json, updated_by, created_at, updated_at
+                singleton_id, thresholds_json, anomaly_state_json, updated_by, created_at, updated_at
             )
-            VALUES ($1, $2, '{}'::jsonb, $3, NOW(), NOW())
-            ON CONFLICT (ws_id) DO NOTHING
+            VALUES (1, $1, '{}'::jsonb, $2, NOW(), NOW())
+            ON CONFLICT (singleton_id) DO NOTHING
             "#,
         )
-        .bind(user.ws_id)
         .bind(default_thresholds_json)
         .bind(user.id)
         .execute(&mut *tx)
@@ -1773,11 +1753,10 @@ impl AppState {
             r#"
             SELECT anomaly_state_json
             FROM ops_observability_configs
-            WHERE ws_id = $1
+            WHERE singleton_id = 1
             FOR UPDATE
             "#,
         )
-        .bind(user.ws_id)
         .fetch_one(&mut *tx)
         .await?;
         let existing = parse_anomaly_state(anomaly_state_json_raw, now_ms);
@@ -1787,13 +1766,12 @@ impl AppState {
         sqlx::query(
             r#"
             UPDATE ops_observability_configs
-            SET anomaly_state_json = $2,
-                updated_by = $3,
+            SET anomaly_state_json = $1,
+                updated_by = $2,
                 updated_at = NOW()
-            WHERE ws_id = $1
+            WHERE singleton_id = 1
             "#,
         )
-        .bind(user.ws_id)
         .bind(anomaly_state_json)
         .bind(user.id)
         .execute(&mut *tx)
@@ -1817,28 +1795,24 @@ impl AppState {
             r#"
             SELECT COUNT(1)
             FROM ops_alert_notifications
-            WHERE ws_id = $1
-              AND ($2::text IS NULL OR alert_status = $2)
+            WHERE ($1::text IS NULL OR alert_status = $1)
             "#,
         )
-        .bind(user.ws_id)
         .bind(status.as_deref())
         .fetch_one(&self.pool)
         .await?;
         let rows: Vec<OpsAlertNotificationRow> = sqlx::query_as(
             r#"
             SELECT
-                id, ws_id, alert_key, rule_type, severity, alert_status,
+                id, 1::bigint AS ws_id, alert_key, rule_type, severity, alert_status,
                 title, message, metrics_json, recipients_json,
                 delivery_status, error_message, delivered_at, created_at, updated_at
             FROM ops_alert_notifications
-            WHERE ws_id = $1
-              AND ($2::text IS NULL OR alert_status = $2)
+            WHERE ($1::text IS NULL OR alert_status = $1)
             ORDER BY created_at DESC, id DESC
-            LIMIT $3 OFFSET $4
+            LIMIT $2 OFFSET $3
             "#,
         )
-        .bind(user.ws_id)
         .bind(status.as_deref())
         .bind(limit)
         .bind(offset)
@@ -1858,12 +1832,11 @@ impl AppState {
         let rows: Vec<OpsObservabilityEvalWorkspaceRow> = sqlx::query_as(
             r#"
             SELECT
-                w.id AS ws_id,
+                1::bigint AS ws_id,
                 COALESCE(c.thresholds_json, '{}'::jsonb) AS thresholds_json,
                 COALESCE(c.anomaly_state_json, '{}'::jsonb) AS anomaly_state_json
-            FROM workspaces w
-            LEFT JOIN ops_observability_configs c ON c.ws_id = w.id
-            ORDER BY w.id ASC
+            FROM (SELECT 1) AS scope
+            LEFT JOIN ops_observability_configs c ON c.singleton_id = 1
             "#,
         )
         .fetch_all(&self.pool)
@@ -1871,31 +1844,29 @@ impl AppState {
         Ok(rows)
     }
 
-    async fn load_recent_judge_signal(&self, ws_id: i64) -> Result<OpsRecentJudgeSignal, AppError> {
+    async fn load_recent_judge_signal(&self) -> Result<OpsRecentJudgeSignal, AppError> {
         let row: OpsRecentJudgeSignalRow = sqlx::query_as(
             r#"
             SELECT
                 COUNT(1) FILTER (
                     WHERE status = 'succeeded'
-                      AND finished_at >= NOW() - ($2::bigint * INTERVAL '1 minute')
+                      AND finished_at >= NOW() - ($1::bigint * INTERVAL '1 minute')
                 )::bigint AS success_count,
                 COUNT(1) FILTER (
                     WHERE status = 'failed'
-                      AND finished_at >= NOW() - ($2::bigint * INTERVAL '1 minute')
+                      AND finished_at >= NOW() - ($1::bigint * INTERVAL '1 minute')
                 )::bigint AS failed_count,
                 COALESCE(AVG(dispatch_attempts::double precision) FILTER (
-                    WHERE requested_at >= NOW() - ($2::bigint * INTERVAL '1 minute')
+                    WHERE requested_at >= NOW() - ($1::bigint * INTERVAL '1 minute')
                 ), 0)::double precision AS avg_dispatch_attempts,
                 COALESCE(PERCENTILE_CONT(0.95) WITHIN GROUP (
                     ORDER BY EXTRACT(EPOCH FROM (COALESCE(finished_at, NOW()) - requested_at)) * 1000
                 ) FILTER (
-                    WHERE requested_at >= NOW() - ($2::bigint * INTERVAL '1 minute')
+                    WHERE requested_at >= NOW() - ($1::bigint * INTERVAL '1 minute')
                 ), 0)::double precision AS p95_latency_ms
             FROM judge_jobs
-            WHERE ws_id = $1
             "#,
         )
-        .bind(ws_id)
         .bind(OPS_ALERT_EVAL_WINDOW_MINUTES)
         .fetch_one(&self.pool)
         .await?;
@@ -1903,11 +1874,9 @@ impl AppState {
             r#"
             SELECT COUNT(1)::bigint
             FROM kafka_dlq_events
-            WHERE ws_id = $1
-              AND status = 'pending'
+            WHERE status = 'pending'
             "#,
         )
-        .bind(ws_id)
         .fetch_one(&self.pool)
         .await?;
         Ok(OpsRecentJudgeSignal {
@@ -1919,26 +1888,23 @@ impl AppState {
         })
     }
 
-    async fn list_alert_recipients(&self, ws_id: i64) -> Result<Vec<u64>, AppError> {
+    async fn list_alert_recipients(&self) -> Result<Vec<u64>, AppError> {
         let owners: Vec<i64> = sqlx::query_scalar(
             r#"
-            SELECT owner_id
-            FROM workspaces
-            WHERE id = $1
+            SELECT id
+            FROM users
+            WHERE id = 1
             "#,
         )
-        .bind(ws_id)
         .fetch_all(&self.pool)
         .await?;
         let role_users: Vec<i64> = sqlx::query_scalar(
             r#"
             SELECT user_id
-            FROM workspace_user_roles
-            WHERE ws_id = $1
-              AND role IN ('ops_admin', 'ops_reviewer', 'ops_viewer')
+            FROM platform_user_roles
+            WHERE role IN ('ops_admin', 'ops_reviewer', 'ops_viewer')
             "#,
         )
-        .bind(ws_id)
         .fetch_all(&self.pool)
         .await?;
         let mut set = HashSet::<u64>::new();
@@ -2035,20 +2001,17 @@ impl AppState {
 
     async fn find_existing_bridge_notification_delivery_status(
         &self,
-        ws_id: i64,
         alert_key: &str,
     ) -> Result<Option<String>, AppError> {
         let row: Option<String> = sqlx::query_scalar(
             r#"
             SELECT delivery_status
             FROM ops_alert_notifications
-            WHERE ws_id = $1
-              AND alert_key = $2
+            WHERE alert_key = $1
             ORDER BY id DESC
             LIMIT 1
             "#,
         )
-        .bind(ws_id)
         .bind(alert_key)
         .fetch_optional(&self.pool)
         .await?;
@@ -2066,15 +2029,14 @@ impl AppState {
         let notification_id: i64 = sqlx::query_scalar(
             r#"
             INSERT INTO ops_alert_notifications(
-                ws_id, alert_key, rule_type, severity, alert_status,
+                alert_key, rule_type, severity, alert_status,
                 title, message, metrics_json, recipients_json,
                 delivery_status, created_at, updated_at
             )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NOW(), NOW())
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NOW(), NOW())
             RETURNING id
             "#,
         )
-        .bind(event.ws_id)
         .bind(alert_key)
         .bind(format!(
             "{AI_JUDGE_OUTBOX_RULE_TYPE_PREFIX}:{}",
@@ -2091,7 +2053,6 @@ impl AppState {
         .await?;
 
         let payload = serde_json::json!({
-            "ws_id": event.ws_id,
             "alert_key": alert_key,
             "rule_type": format!("{AI_JUDGE_OUTBOX_RULE_TYPE_PREFIX}:{}", event.alert_type),
             "severity": event.severity,
@@ -2147,7 +2108,6 @@ impl AppState {
 
     async fn emit_observability_alert(
         &self,
-        ws_id: i64,
         plan: EmitAlertPlan,
         recipients: &[u64],
     ) -> Result<(), AppError> {
@@ -2156,15 +2116,14 @@ impl AppState {
         let notification_id: i64 = sqlx::query_scalar(
             r#"
             INSERT INTO ops_alert_notifications(
-                ws_id, alert_key, rule_type, severity, alert_status,
+                alert_key, rule_type, severity, alert_status,
                 title, message, metrics_json, recipients_json,
                 delivery_status, created_at, updated_at
             )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NOW(), NOW())
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NOW(), NOW())
             RETURNING id
             "#,
         )
-        .bind(ws_id)
         .bind(&plan.evaluated.alert_key)
         .bind(&plan.evaluated.rule_type)
         .bind(&plan.evaluated.severity)
@@ -2178,7 +2137,6 @@ impl AppState {
         .await?;
 
         let payload = serde_json::json!({
-            "ws_id": ws_id,
             "alert_key": plan.evaluated.alert_key,
             "rule_type": plan.evaluated.rule_type,
             "severity": plan.evaluated.severity,
@@ -2229,10 +2187,10 @@ impl AppState {
         sqlx::query(
             r#"
             INSERT INTO ops_alert_states(
-                ws_id, alert_key, is_active, last_emitted_status, last_changed_at, created_at, updated_at
+                alert_key, is_active, last_emitted_status, last_changed_at, created_at, updated_at
             )
-            VALUES ($1, $2, $3, $4, NOW(), NOW(), NOW())
-            ON CONFLICT (ws_id, alert_key)
+            VALUES ($1, $2, $3, NOW(), NOW(), NOW())
+            ON CONFLICT (alert_key)
             DO UPDATE SET
                 is_active = EXCLUDED.is_active,
                 last_emitted_status = EXCLUDED.last_emitted_status,
@@ -2240,7 +2198,6 @@ impl AppState {
                 updated_at = NOW()
             "#,
         )
-        .bind(ws_id)
         .bind(&plan.evaluated.alert_key)
         .bind(plan.mark_active)
         .bind(plan.status)
@@ -2252,7 +2209,6 @@ impl AppState {
 
     async fn process_single_alert_transition(
         &self,
-        ws_id: i64,
         evaluated: EvaluatedAlert,
         anomaly_state: &HashMap<String, OpsObservabilityAnomalyStateValue>,
         now_ms: i64,
@@ -2263,10 +2219,9 @@ impl AppState {
             r#"
             SELECT is_active, last_emitted_status
             FROM ops_alert_states
-            WHERE ws_id = $1 AND alert_key = $2
+            WHERE alert_key = $1
             "#,
         )
-        .bind(ws_id)
         .bind(&evaluated.alert_key)
         .fetch_optional(&self.pool)
         .await?;
@@ -2280,7 +2235,7 @@ impl AppState {
             ALERT_STATUS_SUPPRESSED => report.alerts_suppressed += 1,
             _ => {}
         }
-        self.emit_observability_alert(ws_id, plan, recipients).await
+        self.emit_observability_alert(plan, recipients).await
     }
 
     pub async fn evaluate_ops_observability_alerts_once(
@@ -2291,14 +2246,14 @@ impl AppState {
         let rows = self.list_observability_eval_workspaces().await?;
         report.workspaces_scanned = rows.len() as u64;
         for row in rows {
+            let _scope_id = row.ws_id;
             let thresholds = parse_thresholds(row.thresholds_json.clone());
             let anomaly_state = parse_anomaly_state(row.anomaly_state_json.clone(), now_ms);
-            let signal = self.load_recent_judge_signal(row.ws_id).await?;
-            let recipients = self.list_alert_recipients(row.ws_id).await?;
+            let signal = self.load_recent_judge_signal().await?;
+            let recipients = self.list_alert_recipients().await?;
             for spec in rule_specs() {
                 let evaluated = evaluate_alert_for_rule(spec, &thresholds, signal);
                 self.process_single_alert_transition(
-                    row.ws_id,
                     evaluated,
                     &anomaly_state,
                     now_ms,
@@ -2322,10 +2277,9 @@ impl AppState {
             r#"
             SELECT thresholds_json, anomaly_state_json, updated_by, updated_at
             FROM ops_observability_configs
-            WHERE ws_id = $1
+            WHERE singleton_id = 1
             "#,
         )
-        .bind(user.ws_id)
         .fetch_optional(&self.pool)
         .await?;
         let (thresholds, anomaly_state) = if let Some(row) = row {
@@ -2340,12 +2294,11 @@ impl AppState {
             workspaces_scanned: 1,
             ..OpsAlertEvalReport::default()
         };
-        let signal = self.load_recent_judge_signal(user.ws_id).await?;
-        let recipients = self.list_alert_recipients(user.ws_id).await?;
+        let signal = self.load_recent_judge_signal().await?;
+        let recipients = self.list_alert_recipients().await?;
         for spec in rule_specs() {
             let evaluated = evaluate_alert_for_rule(spec, &thresholds, signal);
             self.process_single_alert_transition(
-                user.ws_id,
                 evaluated,
                 &anomaly_state,
                 now_ms,
@@ -2368,10 +2321,9 @@ impl AppState {
             r#"
             SELECT thresholds_json, anomaly_state_json, updated_by, updated_at
             FROM ops_observability_configs
-            WHERE ws_id = $1
+            WHERE singleton_id = 1
             "#,
         )
-        .bind(user.ws_id)
         .fetch_optional(&self.pool)
         .await?;
         let (thresholds, anomaly_state) = if let Some(row) = row {
@@ -2386,17 +2338,16 @@ impl AppState {
             workspaces_scanned: 1,
             ..OpsAlertEvalReport::default()
         };
-        let signal = self.load_recent_judge_signal(user.ws_id).await?;
+        let signal = self.load_recent_judge_signal().await?;
         for spec in rule_specs() {
             let evaluated = evaluate_alert_for_rule(spec, &thresholds, signal);
             let previous: Option<OpsAlertStateRow> = sqlx::query_as(
                 r#"
                 SELECT is_active, last_emitted_status
                 FROM ops_alert_states
-                WHERE ws_id = $1 AND alert_key = $2
+                WHERE alert_key = $1
                 "#,
             )
-            .bind(user.ws_id)
             .bind(&evaluated.alert_key)
             .fetch_optional(&self.pool)
             .await?;
@@ -2455,7 +2406,7 @@ impl AppState {
             };
             let alert_key = build_ai_judge_outbox_alert_key(&normalized.event_id);
             if let Some(existing_delivery_status) = self
-                .find_existing_bridge_notification_delivery_status(normalized.ws_id, &alert_key)
+                .find_existing_bridge_notification_delivery_status(&alert_key)
                 .await?
             {
                 report.skipped_duplicate += 1;
@@ -2498,7 +2449,7 @@ impl AppState {
                 continue;
             }
 
-            let recipients = self.list_alert_recipients(normalized.ws_id).await?;
+            let recipients = self.list_alert_recipients().await?;
             match self
                 .emit_ai_judge_bridge_notification(&normalized, &alert_key, &recipients)
                 .await?
@@ -2654,7 +2605,7 @@ mod tests {
     #[tokio::test]
     async fn get_ops_observability_config_should_return_defaults_when_missing() -> Result<()> {
         let (_tdb, state) = AppState::new_for_test().await?;
-        state.update_workspace_owner(1, 1).await?;
+        state.grant_platform_admin(1).await?;
         let owner = state.find_user_by_id(1).await?.expect("owner should exist");
         let ret = state.get_ops_observability_config(&owner).await?;
         assert_eq!(ret.ws_id, 1);
@@ -2669,7 +2620,7 @@ mod tests {
     async fn upsert_ops_observability_config_should_allow_ops_viewer_review_permission(
     ) -> Result<()> {
         let (_tdb, state) = AppState::new_for_test().await?;
-        state.update_workspace_owner(1, 1).await?;
+        state.grant_platform_admin(1).await?;
         let owner = state.find_user_by_id(1).await?.expect("owner should exist");
         let viewer = state
             .find_user_by_id(2)
@@ -2730,7 +2681,7 @@ mod tests {
     #[tokio::test]
     async fn upsert_ops_observability_config_should_reject_user_without_ops_role() -> Result<()> {
         let (_tdb, state) = AppState::new_for_test().await?;
-        state.update_workspace_owner(1, 1).await?;
+        state.grant_platform_admin(1).await?;
         let user = state.find_user_by_id(3).await?.expect("user should exist");
         let err = state
             .upsert_ops_observability_thresholds(&user, OpsObservabilityThresholds::default())
@@ -2748,7 +2699,7 @@ mod tests {
     #[tokio::test]
     async fn evaluate_ops_observability_alerts_once_should_raise_and_clear_alerts() -> Result<()> {
         let (_tdb, state) = AppState::new_for_test().await?;
-        state.update_workspace_owner(1, 1).await?;
+        state.grant_platform_admin(1).await?;
         let owner = state.find_user_by_id(1).await?.expect("owner should exist");
 
         state
@@ -2865,7 +2816,7 @@ mod tests {
     #[tokio::test]
     async fn bridge_ai_judge_alert_outbox_once_should_deliver_and_callback_sent() -> Result<()> {
         let (_tdb, mut state) = AppState::new_for_test().await?;
-        state.update_workspace_owner(1, 1).await?;
+        state.grant_platform_admin(1).await?;
         let (service_base_url, callbacks) = spawn_mock_judge_outbox_server(
             vec![serde_json::json!({
                 "eventId": "evt-bridge-ok",
@@ -2929,7 +2880,7 @@ mod tests {
     async fn bridge_ai_judge_alert_outbox_once_should_dedupe_and_only_callback_for_duplicate_sent(
     ) -> Result<()> {
         let (_tdb, mut state) = AppState::new_for_test().await?;
-        state.update_workspace_owner(1, 1).await?;
+        state.grant_platform_admin(1).await?;
         sqlx::query(
             r#"
             INSERT INTO ops_alert_notifications(
@@ -2999,11 +2950,11 @@ mod tests {
     async fn bridge_ai_judge_alert_outbox_once_should_count_callback_failed_when_mark_failed_errors(
     ) -> Result<()> {
         let (_tdb, mut state) = AppState::new_for_test().await?;
-        state.update_workspace_owner(1, 1).await?;
+        state.grant_platform_admin(1).await?;
         let (service_base_url, callbacks) = spawn_mock_judge_outbox_server(
             vec![serde_json::json!({
                 "eventId": "evt-bridge-bad",
-                "status": "raised",
+                "status": "invalid",
                 "payload": {
                     "alertType": "judge_timeout",
                     "severity": "warning",
@@ -3046,7 +2997,7 @@ mod tests {
             .error_message
             .as_deref()
             .unwrap_or_default()
-            .contains("missing wsId"));
+            .contains("unsupported outbox status"));
         Ok(())
     }
 
@@ -3076,7 +3027,7 @@ mod tests {
     #[tokio::test]
     async fn upsert_ops_service_split_review_should_support_set_and_clear_flag() -> Result<()> {
         let (_tdb, state) = AppState::new_for_test().await?;
-        state.update_workspace_owner(1, 1).await?;
+        state.grant_platform_admin(1).await?;
         let owner = state.find_user_by_id(1).await?.expect("owner should exist");
 
         let set_ret = state
@@ -3125,7 +3076,7 @@ mod tests {
     async fn upsert_ops_service_split_review_should_keep_complete_snapshot_under_concurrency(
     ) -> Result<()> {
         let (_tdb, state) = AppState::new_for_test().await?;
-        state.update_workspace_owner(1, 1).await?;
+        state.grant_platform_admin(1).await?;
         let owner = state.find_user_by_id(1).await?.expect("owner should exist");
         let barrier = Arc::new(Barrier::new(3));
 
@@ -3206,7 +3157,7 @@ mod tests {
     async fn apply_ops_observability_anomaly_action_should_support_suppress_ack_and_clear(
     ) -> Result<()> {
         let (_tdb, state) = AppState::new_for_test().await?;
-        state.update_workspace_owner(1, 1).await?;
+        state.grant_platform_admin(1).await?;
         let owner = state.find_user_by_id(1).await?.expect("owner should exist");
         let now_ms = now_millis();
 
@@ -3263,7 +3214,7 @@ mod tests {
     #[tokio::test]
     async fn apply_ops_observability_anomaly_action_should_reject_invalid_action() -> Result<()> {
         let (_tdb, state) = AppState::new_for_test().await?;
-        state.update_workspace_owner(1, 1).await?;
+        state.grant_platform_admin(1).await?;
         let owner = state.find_user_by_id(1).await?.expect("owner should exist");
         let err = state
             .apply_ops_observability_anomaly_action(
@@ -3289,7 +3240,7 @@ mod tests {
     async fn apply_ops_observability_anomaly_action_should_keep_both_keys_under_concurrency(
     ) -> Result<()> {
         let (_tdb, state) = AppState::new_for_test().await?;
-        state.update_workspace_owner(1, 1).await?;
+        state.grant_platform_admin(1).await?;
         let owner = state.find_user_by_id(1).await?.expect("owner should exist");
         let barrier = Arc::new(Barrier::new(3));
 
@@ -3396,7 +3347,7 @@ mod tests {
         };
         let ret = normalize_ai_judge_outbox_event(item).expect("event should be normalized");
         assert_eq!(ret.event_id, "evt-1");
-        assert_eq!(ret.ws_id, 1);
+        assert_eq!(ret.metrics["wsId"], Value::from(1));
         assert_eq!(ret.alert_status, ALERT_STATUS_SUPPRESSED);
         assert_eq!(ret.alert_type, "model_overload");
         assert_eq!(ret.severity, "critical");
@@ -3412,7 +3363,7 @@ mod tests {
     }
 
     #[test]
-    fn normalize_ai_judge_outbox_event_should_require_ws_id() {
+    fn normalize_ai_judge_outbox_event_should_default_ws_id_when_missing() {
         let item = AiJudgeOutboxItem {
             event_id: "evt-2".to_string(),
             ws_id: None,
@@ -3422,7 +3373,7 @@ mod tests {
             status: Some("raised".to_string()),
             payload: Value::Null,
         };
-        let err = normalize_ai_judge_outbox_event(item).expect_err("missing ws id should fail");
-        assert!(err.contains("missing wsId"));
+        let ret = normalize_ai_judge_outbox_event(item).expect("missing ws id should fallback");
+        assert_eq!(ret.metrics["wsId"], Value::from(PLATFORM_SCOPE_ID));
     }
 }

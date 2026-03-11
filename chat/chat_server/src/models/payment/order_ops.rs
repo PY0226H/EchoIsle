@@ -10,17 +10,16 @@ use sqlx::{Postgres, Transaction};
 
 pub(super) async fn wallet_balance_in_tx(
     tx: &mut Transaction<'_, Postgres>,
-    ws_id: i64,
+    _ws_id: i64,
     user_id: i64,
 ) -> Result<i64, AppError> {
     let row: Option<(i64,)> = sqlx::query_as(
         r#"
         SELECT balance
         FROM user_wallets
-        WHERE ws_id = $1 AND user_id = $2
+        WHERE user_id = $1
         "#,
     )
-    .bind(ws_id)
     .bind(user_id)
     .fetch_optional(&mut **tx)
     .await?;

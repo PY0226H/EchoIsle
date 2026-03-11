@@ -3,7 +3,6 @@ ALTER TABLE users
 
 CREATE TABLE IF NOT EXISTS auth_refresh_sessions(
   id bigserial PRIMARY KEY,
-  ws_id bigint NOT NULL REFERENCES workspaces(id),
   user_id bigint NOT NULL REFERENCES users(id),
   sid varchar(64) NOT NULL UNIQUE,
   family_id varchar(64) NOT NULL,

@@ -1,5 +1,5 @@
 CREATE TABLE IF NOT EXISTS ops_service_split_reviews(
-  ws_id bigint PRIMARY KEY REFERENCES workspaces(id) ON DELETE CASCADE,
+  singleton_id smallint PRIMARY KEY DEFAULT 1 CHECK (singleton_id = 1),
   payment_compliance_required boolean,
   review_note text NOT NULL DEFAULT '',
   updated_by bigint NOT NULL REFERENCES users(id),

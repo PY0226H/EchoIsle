@@ -12,7 +12,6 @@ import {
 
 assert.deepEqual(emptyOpsRbacMe(), {
   userId: 0,
-  wsId: 0,
   isOwner: false,
   role: null,
   permissions: {
@@ -26,7 +25,6 @@ assert.deepEqual(emptyOpsRbacMe(), {
 assert.deepEqual(
   normalizeOpsRbacMe({
     userId: 2,
-    wsId: 1,
     isOwner: false,
     role: 'ops_viewer',
     permissions: {
@@ -38,7 +36,6 @@ assert.deepEqual(
   }),
   {
     userId: 2,
-    wsId: 1,
     isOwner: false,
     role: 'ops_viewer',
     permissions: {
@@ -61,7 +58,7 @@ assert.equal(parseOpsPermissionDenied('random_error_text'), null);
 
 assert.equal(
   getOpsPermissionHint('role_manage'),
-  '仅 workspace owner 可以管理 Ops 角色',
+  '仅 platform admin 可以管理 Ops 角色',
 );
 assert.equal(
   getOpsPermissionHint('unknown_permission'),

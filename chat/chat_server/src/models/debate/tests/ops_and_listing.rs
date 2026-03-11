@@ -99,7 +99,7 @@ async fn list_debate_sessions_should_not_mark_future_open_as_joinable() -> Resul
 #[tokio::test]
 async fn create_debate_topic_by_owner_should_work_and_reject_non_owner() -> Result<()> {
     let (_tdb, state) = AppState::new_for_test().await?;
-    state.update_workspace_owner(1, 1).await?;
+    state.grant_platform_admin(1).await?;
     let owner = state
         .find_user_by_id(1)
         .await?
@@ -148,7 +148,7 @@ async fn create_debate_topic_by_owner_should_work_and_reject_non_owner() -> Resu
 #[tokio::test]
 async fn create_debate_topic_by_owner_should_allow_ops_admin_role() -> Result<()> {
     let (_tdb, state) = AppState::new_for_test().await?;
-    state.update_workspace_owner(1, 1).await?;
+    state.grant_platform_admin(1).await?;
     let owner = state.find_user_by_id(1).await?.expect("owner should exist");
     let ops_admin = state
         .find_user_by_id(2)
@@ -186,7 +186,7 @@ async fn create_debate_topic_by_owner_should_allow_ops_admin_role() -> Result<()
 #[tokio::test]
 async fn create_debate_session_by_owner_should_validate_status_and_topic() -> Result<()> {
     let (_tdb, state) = AppState::new_for_test().await?;
-    state.update_workspace_owner(1, 1).await?;
+    state.grant_platform_admin(1).await?;
     let owner = state
         .find_user_by_id(1)
         .await?
@@ -261,7 +261,7 @@ async fn create_debate_session_by_owner_should_validate_status_and_topic() -> Re
 #[tokio::test]
 async fn update_debate_topic_by_owner_should_update_and_reject_non_owner() -> Result<()> {
     let (_tdb, state) = AppState::new_for_test().await?;
-    state.update_workspace_owner(1, 1).await?;
+    state.grant_platform_admin(1).await?;
     let owner = state
         .find_user_by_id(1)
         .await?
@@ -329,7 +329,7 @@ async fn update_debate_topic_by_owner_should_update_and_reject_non_owner() -> Re
 #[tokio::test]
 async fn update_debate_session_by_owner_should_validate_and_update() -> Result<()> {
     let (_tdb, state) = AppState::new_for_test().await?;
-    state.update_workspace_owner(1, 1).await?;
+    state.grant_platform_admin(1).await?;
     let owner = state
         .find_user_by_id(1)
         .await?

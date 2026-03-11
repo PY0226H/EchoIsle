@@ -262,7 +262,6 @@ struct DebateMessageForPin {
 struct ExistingPinByIdempotency {
     ledger_id: i64,
     balance_after: i64,
-    ws_id: i64,
     user_id: i64,
 }
 

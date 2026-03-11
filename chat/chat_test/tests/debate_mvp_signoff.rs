@@ -5,7 +5,8 @@ use chat_server::{
     GetDrawVoteOutput, GetJudgeReportOutput, JoinDebateSessionOutput, OpsCreateDebateSessionInput,
     OpsCreateDebateTopicInput, OpsUpdateDebateSessionInput, PinDebateMessageInput,
     PinDebateMessageOutput, RequestJudgeJobInput, RequestJudgeJobOutput, SubmitDrawVoteInput,
-    SubmitDrawVoteOutput, SubmitJudgeReportInput, VerifyIapOrderInput, VerifyIapOrderOutput,
+    SubmitDrawVoteOutput, SubmitJudgeReportInput, UpsertOpsRoleInput, VerifyIapOrderInput,
+    VerifyIapOrderOutput,
 };
 use reqwest::{Client, StatusCode};
 use serde::de::DeserializeOwned;
@@ -34,22 +35,41 @@ struct ApiSession {
     token: String,
 }
 
+async fn grant_ops_admin_to_email(state: &AppState, target_email: &str) -> Result<()> {
+    let platform_admin = state
+        .find_user_by_id(1)
+        .await?
+        .expect("platform admin user should exist");
+    let target = state
+        .find_user_by_email(target_email)
+        .await?
+        .expect("target user should exist");
+    let _ = state
+        .upsert_ops_role_assignment_by_owner(
+            &platform_admin,
+            target.id as u64,
+            UpsertOpsRoleInput {
+                role: "ops_admin".to_string(),
+            },
+        )
+        .await?;
+    Ok(())
+}
+
 #[tokio::test]
 async fn debate_mvp_signoff_should_cover_core_flow() -> Result<()> {
     let (_tdb, state) = AppState::new_for_test().await?;
     let server = TestServer::new(state.clone()).await?;
 
     let now_ms = SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis();
-    let workspace = format!("mvp-signoff-{now_ms}");
     let owner_email = format!("owner-{now_ms}@acme.org");
     let challenger_email = format!("challenger-{now_ms}@acme.org");
 
-    let owner = server
-        .signup(&workspace, "Owner One", &owner_email, "123456")
-        .await?;
+    let owner = server.signup("Owner One", &owner_email, "123456").await?;
     let challenger = server
-        .signup(&workspace, "Challenger Two", &challenger_email, "123456")
+        .signup("Challenger Two", &challenger_email, "123456")
         .await?;
+    grant_ops_admin_to_email(&state, &owner_email).await?;
 
     let topic: DebateTopic = owner
         .post(
@@ -220,19 +240,11 @@ async fn debate_mvp_signoff_should_cover_draw_vote_and_rematch_flow() -> Result<
     let server = TestServer::new(state.clone()).await?;
 
     let now_ms = SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis();
-    let workspace = format!("mvp-draw-signoff-{now_ms}");
+    let owner_email = format!("owner-draw-{now_ms}@acme.org");
 
-    let owner = server
-        .signup(
-            &workspace,
-            "Owner Draw",
-            &format!("owner-draw-{now_ms}@acme.org"),
-            "123456",
-        )
-        .await?;
+    let owner = server.signup("Owner Draw", &owner_email, "123456").await?;
     let user2 = server
         .signup(
-            &workspace,
             "User Draw 2",
             &format!("u2-draw-{now_ms}@acme.org"),
             "123456",
@@ -240,12 +252,12 @@ async fn debate_mvp_signoff_should_cover_draw_vote_and_rematch_flow() -> Result<
         .await?;
     let user3 = server
         .signup(
-            &workspace,
             "User Draw 3",
             &format!("u3-draw-{now_ms}@acme.org"),
             "123456",
         )
         .await?;
+    grant_ops_admin_to_email(&state, &owner_email).await?;
 
     let topic: DebateTopic = owner
         .post(
@@ -442,19 +454,13 @@ async fn debate_mvp_signoff_should_cover_accept_draw_without_rematch() -> Result
     let server = TestServer::new(state.clone()).await?;
 
     let now_ms = SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis();
-    let workspace = format!("mvp-accept-{now_ms}");
+    let owner_email = format!("owner-accept-{now_ms}@acme.org");
 
     let owner = server
-        .signup(
-            &workspace,
-            "Owner Accept Draw",
-            &format!("owner-accept-{now_ms}@acme.org"),
-            "123456",
-        )
+        .signup("Owner Accept Draw", &owner_email, "123456")
         .await?;
     let user2 = server
         .signup(
-            &workspace,
             "User Accept 2",
             &format!("u2-accept-{now_ms}@acme.org"),
             "123456",
@@ -462,12 +468,12 @@ async fn debate_mvp_signoff_should_cover_accept_draw_without_rematch() -> Result
         .await?;
     let user3 = server
         .signup(
-            &workspace,
             "User Accept 3",
             &format!("u3-accept-{now_ms}@acme.org"),
             "123456",
         )
         .await?;
+    grant_ops_admin_to_email(&state, &owner_email).await?;
 
     let topic: DebateTopic = owner
         .post(
@@ -653,16 +659,12 @@ async fn debate_ops_should_reject_non_owner_management_actions() -> Result<()> {
     let server = TestServer::new(state.clone()).await?;
 
     let now_ms = SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis();
-    let workspace = format!("mvp-ops-perm-{now_ms}");
     let owner_email = format!("owner-ops-{now_ms}@acme.org");
     let member_email = format!("member-ops-{now_ms}@acme.org");
 
-    let owner = server
-        .signup(&workspace, "Owner Ops", &owner_email, "123456")
-        .await?;
-    let member = server
-        .signup(&workspace, "Member Ops", &member_email, "123456")
-        .await?;
+    let owner = server.signup("Owner Ops", &owner_email, "123456").await?;
+    let member = server.signup("Member Ops", &member_email, "123456").await?;
+    grant_ops_admin_to_email(&state, &owner_email).await?;
 
     let topic: DebateTopic = owner
         .post(
@@ -774,19 +776,13 @@ async fn debate_ops_assigned_admin_role_should_allow_management_actions() -> Res
     let server = TestServer::new(state.clone()).await?;
 
     let now_ms = SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis();
-    let workspace = format!("mvp-ops-rbac-{now_ms}");
     let ops_admin_email = format!("ops-admin-{now_ms}@acme.org");
-    let owner = server
-        .signup(
-            &workspace,
-            "Owner RBAC",
-            &format!("owner-rbac-{now_ms}@acme.org"),
-            "123456",
-        )
-        .await?;
+    let owner_email = format!("owner-rbac-{now_ms}@acme.org");
+    let owner = server.signup("Owner RBAC", &owner_email, "123456").await?;
     let ops_admin = server
-        .signup(&workspace, "Ops Admin", &ops_admin_email, "123456")
+        .signup("Ops Admin", &ops_admin_email, "123456")
         .await?;
+    let platform_admin = server.signin("tchen@acme.org", "123456").await?;
 
     let users: Vec<serde_json::Value> = owner.get("/api/users", StatusCode::OK).await?;
     let ops_admin_id = users
@@ -795,7 +791,7 @@ async fn debate_ops_assigned_admin_role_should_allow_management_actions() -> Res
         .and_then(|v| v["id"].as_u64())
         .expect("ops admin id should exist");
 
-    let _: serde_json::Value = owner
+    let _: serde_json::Value = platform_admin
         .put(
             format!("/api/debate/ops/rbac/roles/{ops_admin_id}").as_str(),
             &serde_json::json!({ "role": "ops_admin" }),
@@ -820,7 +816,7 @@ async fn debate_ops_assigned_admin_role_should_allow_management_actions() -> Res
         .await?;
     assert_eq!(topic.created_by as u64, ops_admin_id);
 
-    let _: serde_json::Value = owner
+    let _: serde_json::Value = platform_admin
         .delete(
             format!("/api/debate/ops/rbac/roles/{ops_admin_id}").as_str(),
             StatusCode::OK,
@@ -851,21 +847,15 @@ async fn debate_ops_assigned_admin_role_should_allow_management_actions() -> Res
 #[tokio::test]
 async fn debate_ops_status_updates_should_reflect_in_lobby_and_room() -> Result<()> {
     let (_tdb, state) = AppState::new_for_test().await?;
-    let server = TestServer::new(state).await?;
+    let server = TestServer::new(state.clone()).await?;
 
     let now_ms = SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis();
-    let workspace = format!("mvp-ops-reflect-{now_ms}");
+    let owner_email = format!("owner-reflect-{now_ms}@acme.org");
     let owner = server
-        .signup(
-            &workspace,
-            "Owner Reflect",
-            &format!("owner-reflect-{now_ms}@acme.org"),
-            "123456",
-        )
+        .signup("Owner Reflect", &owner_email, "123456")
         .await?;
     let user = server
         .signup(
-            &workspace,
             "User Reflect",
             &format!("user-reflect-{now_ms}@acme.org"),
             "123456",
@@ -873,12 +863,12 @@ async fn debate_ops_status_updates_should_reflect_in_lobby_and_room() -> Result<
         .await?;
     let spectator = server
         .signup(
-            &workspace,
             "Spectator Reflect",
             &format!("spectator-reflect-{now_ms}@acme.org"),
             "123456",
         )
         .await?;
+    grant_ops_admin_to_email(&state, &owner_email).await?;
 
     let topic: DebateTopic = owner
         .post(
@@ -1102,18 +1092,11 @@ impl TestServer {
         })
     }
 
-    async fn signup(
-        &self,
-        workspace: &str,
-        fullname: &str,
-        email: &str,
-        password: &str,
-    ) -> Result<ApiSession> {
+    async fn signup(&self, fullname: &str, email: &str, password: &str) -> Result<ApiSession> {
         let res = self
             .http
             .post(format!("http://{}{}", self.addr, "/api/signup"))
             .json(&serde_json::json!({
-                "workspace": workspace,
                 "fullname": fullname,
                 "email": email,
                 "password": password,
@@ -1121,6 +1104,25 @@ impl TestServer {
             .send()
             .await?;
         assert_eq!(res.status(), StatusCode::CREATED);
+        let auth: AuthToken = res.json().await?;
+        Ok(ApiSession {
+            addr: self.addr,
+            http: self.http.clone(),
+            token: auth.access_token,
+        })
+    }
+
+    async fn signin(&self, email: &str, password: &str) -> Result<ApiSession> {
+        let res = self
+            .http
+            .post(format!("http://{}{}", self.addr, "/api/signin"))
+            .json(&serde_json::json!({
+                "email": email,
+                "password": password,
+            }))
+            .send()
+            .await?;
+        assert_eq!(res.status(), StatusCode::OK);
         let auth: AuthToken = res.json().await?;
         Ok(ApiSession {
             addr: self.addr,

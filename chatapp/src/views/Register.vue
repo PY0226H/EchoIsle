@@ -130,7 +130,7 @@ export default {
           });
           user = ret?.user;
         } else if (this.mode === 'phone_signup') {
-          this.$store.dispatch('userRegister', { email: this.phone, workspaceId: 'auto' });
+          this.$store.dispatch('userRegister', { email: this.phone });
           user = await this.$store.dispatch('signupPhoneV2', {
             phone: this.phone,
             smsCode: this.smsCode,
@@ -138,7 +138,7 @@ export default {
             fullname: this.fullName,
           });
         } else {
-          this.$store.dispatch('userRegister', { email: this.email, workspaceId: 'auto' });
+          this.$store.dispatch('userRegister', { email: this.email });
           user = await this.$store.dispatch('signupEmailV2', {
             email: this.email,
             phone: this.phone,
