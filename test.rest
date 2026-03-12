@@ -73,6 +73,80 @@ Content-Type: application/json
 
 @token1 = {{signin1.response.body.accessToken}}
 
+### wechat challenge (v2)
+
+# @name wechatChallenge
+POST http://localhost:6688/api/auth/v2/wechat/challenge
+Content-Type: application/json
+
+{}
+
+@wechatState = {{wechatChallenge.response.body.state}}
+
+### wechat signin (bind required)
+
+# @name wechatSignin
+POST http://localhost:6688/api/auth/v2/wechat/signin
+Content-Type: application/json
+
+{
+    "state": "{{wechatState}}",
+    "code": "mock_wechat_setpwd_01:union_setpwd_01:RestUser"
+}
+
+@wechatTicket = {{wechatSignin.response.body.wechatTicket}}
+
+### send sms for wechat bind phone
+
+# @name wechatBindSms
+POST http://localhost:6688/api/auth/v2/sms/send
+Content-Type: application/json
+
+{
+    "phone": "13800138123",
+    "scene": "bind_phone"
+}
+
+@wechatBindSmsCode = {{wechatBindSms.response.body.debugCode}}
+
+### wechat bind phone (no password)
+
+# @name wechatBindNoPassword
+POST http://localhost:6688/api/auth/v2/wechat/bind-phone
+Content-Type: application/json
+
+{
+    "wechatTicket": "{{wechatTicket}}",
+    "phone": "13800138123",
+    "smsCode": "{{wechatBindSmsCode}}",
+    "fullname": "Rest Wechat User"
+}
+
+@wechatAccessToken = {{wechatBindNoPassword.response.body.accessToken}}
+
+### set password after wechat bind
+
+# @name setPasswordAfterWechat
+POST http://localhost:6688/api/auth/v2/password/set
+Authorization: Bearer {{wechatAccessToken}}
+Content-Type: application/json
+
+{
+    "password": "654321"
+}
+
+### signin by phone + password after set password
+
+# @name signinByPhoneAfterSetPassword
+POST http://localhost:6688/api/auth/v2/signin/password
+Content-Type: application/json
+
+{
+    "account": "13800138123",
+    "accountType": "phone",
+    "password": "654321"
+}
+
 ### create chat
 POST http://localhost:6688/api/chats
 Content-Type: application/json
