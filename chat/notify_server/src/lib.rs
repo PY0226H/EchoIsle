@@ -210,14 +210,17 @@ impl AppState {
         session_id: i64,
         last_ack_seq: Option<u64>,
     ) -> DebateReplayWindow {
-        let db_window = self
+        match self
             .replay_debate_events_from_db(session_id, last_ack_seq)
             .await
-            .ok();
-        if let Some(window) = db_window {
-            return window;
+        {
+            // DB has persisted sequence for this session: use DB replay as source of truth.
+            Ok(window) if window.latest_seq > 0 => window,
+            // DB is empty for this session (or unavailable): fallback to in-memory replay window.
+            Ok(_) | Err(_) => {
+                self.replay_debate_events_from_memory(user_id, session_id, last_ack_seq)
+            }
         }
-        self.replay_debate_events_from_memory(user_id, session_id, last_ack_seq)
     }
 
     async fn replay_debate_events_from_db(

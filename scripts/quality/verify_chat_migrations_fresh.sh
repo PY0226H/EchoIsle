@@ -121,6 +121,13 @@ if [[ "$ws_id_count" != "0" ]]; then
   exit 1
 fi
 
+workspace_table_exists="$(psql "$TARGET_URL" -Atqc \
+  "SELECT to_regclass('public.workspaces') IS NOT NULL;")"
+if [[ "$workspace_table_exists" != "f" ]]; then
+  echo "校验失败：仍存在 legacy workspaces 表" >&2
+  exit 1
+fi
+
 required_tables=(
   users
   chats
@@ -139,5 +146,4 @@ for t in "${required_tables[@]}"; do
   fi
 done
 
-echo "迁移回放验收通过：fresh DB 无 ws_id 列且核心表完整。"
-
+echo "迁移回放验收通过：fresh DB 无 ws_id 列、无 workspaces 表且核心表完整。"

@@ -43,11 +43,30 @@ async function bootstrapAuthState(page) {
     localStorage.setItem('user', JSON.stringify({ id: 1001, email: 'e2e@acme.org' }));
     localStorage.setItem('channels', JSON.stringify([]));
     localStorage.setItem('users', JSON.stringify({}));
-    localStorage.setItem('workspace', JSON.stringify({ id: 1, name: 'E2E Workspace' }));
   });
 }
 
 async function mockDebateApis(page) {
+  await page.route('**/api/auth/refresh', async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        accessToken: 'e2e-access-token',
+      }),
+    });
+  });
+  await page.route('**/api/tickets', async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        fileToken: 'e2e-file-ticket',
+        notifyToken: 'e2e-notify-ticket',
+        expiresInSecs: 300,
+      }),
+    });
+  });
   await page.route('**/api/debate/topics**', async (route) => {
     await route.fulfill({
       status: 200,
@@ -74,10 +93,10 @@ async function mockDebateApis(page) {
       }),
     });
   });
-  await page.route('**/api/event', async (route) => {
+  await page.route('**/events**', async (route) => {
     await route.fulfill({
       status: 200,
-      contentType: 'application/octet-stream',
+      contentType: 'text/event-stream',
       body: '',
     });
   });
