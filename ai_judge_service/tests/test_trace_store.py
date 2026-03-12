@@ -241,7 +241,7 @@ class TraceStoreTests(unittest.TestCase):
         self.assertGreaterEqual(len(outbox), 3)
         first_event = outbox[0]
         self.assertIn("scopeId", first_event.payload)
-        self.assertNotIn("wsId", first_event.payload)
+        self.assertNotIn("legacyScopeId", first_event.payload)
         updated = store.mark_alert_outbox_delivery(
             event_id=first_event.event_id,
             delivery_status="sent",
