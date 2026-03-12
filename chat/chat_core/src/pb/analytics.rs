@@ -101,7 +101,7 @@ pub struct UserRegisterEvent {
     pub email: ::prost::alloc::string::String,
 }
 /// / chat 创建事件
-#[derive(Clone, PartialEq, ::prost::Message)]
+#[derive(Clone, Copy, PartialEq, ::prost::Message)]
 pub struct ChatCreatedEvent {}
 /// / 消息发送事件
 #[derive(Clone, PartialEq, ::prost::Message)]

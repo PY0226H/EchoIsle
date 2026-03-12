@@ -26,9 +26,7 @@ CREATE TABLE analytics.analytics_events(
     logout_email Nullable(String),
     -- UserRegisterEvent
     register_email Nullable(String),
-    register_workspace_id Nullable(String),
     -- ChatCreatedEvent
-    chat_created_workspace_id Nullable(String),
     -- MessageSentEvent
     message_chat_id Nullable(String),
     message_type Nullable(String),

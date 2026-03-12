@@ -51,14 +51,12 @@ message UserLogoutEvent {
 message UserRegisterEvent {
   /// 用户邮箱(Email 是 PII，需要脱敏)
   string email = 1;
-  /// 工作空间 ID
-  string workspace_id = 2;
+  reserved 2;
 }
 
 /// chat 创建事件
 message ChatCreatedEvent {
-  /// 工作空间 ID
-  string workspace_id = 1;
+  reserved 1;
 }
 
 /// 消息发送事件
