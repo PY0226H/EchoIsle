@@ -353,7 +353,7 @@ struct AiJudgeOutboxListResponse {
 #[serde(rename_all = "camelCase")]
 struct AiJudgeOutboxItem {
     event_id: String,
-    #[serde(default, alias = "wsId", alias = "ws_id")]
+    #[serde(default)]
     scope_id: Option<u64>,
     job_id: Option<u64>,
     trace_id: Option<String>,
@@ -368,7 +368,7 @@ struct AiJudgeOutboxItem {
 struct AiJudgeOutboxPayload {
     #[serde(default)]
     event_type: String,
-    #[serde(default, alias = "wsId", alias = "ws_id")]
+    #[serde(default)]
     scope_id: Option<u64>,
     job_id: Option<u64>,
     trace_id: Option<String>,
@@ -3356,6 +3356,28 @@ mod tests {
             payload: Value::Null,
         };
         let ret = normalize_ai_judge_outbox_event(item).expect("missing scope id should fallback");
+        assert_eq!(ret.metrics["scopeId"], Value::from(PLATFORM_SCOPE_ID));
+    }
+
+    #[test]
+    fn normalize_ai_judge_outbox_event_should_ignore_legacy_wsid_alias() {
+        let item = AiJudgeOutboxItem {
+            event_id: "evt-3".to_string(),
+            scope_id: None,
+            job_id: Some(3001),
+            trace_id: Some("trace-legacy-wsid".to_string()),
+            alert_id: Some("alert-legacy-wsid".to_string()),
+            status: Some("raised".to_string()),
+            payload: serde_json::json!({
+                "eventType": "ai_judge.audit_alert.status_changed.v1",
+                "wsId": 99,
+                "alertType": "judge_timeout",
+                "severity": "warning",
+                "title": "legacy",
+                "message": "legacy wsid should be ignored"
+            }),
+        };
+        let ret = normalize_ai_judge_outbox_event(item).expect("legacy wsid should not be parsed");
         assert_eq!(ret.metrics["scopeId"], Value::from(PLATFORM_SCOPE_ID));
     }
 }
