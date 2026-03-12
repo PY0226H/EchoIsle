@@ -125,7 +125,7 @@ def _build_request() -> JudgeDispatchRequest:
     return JudgeDispatchRequest(
         job=DispatchJob(
             job_id=1,
-            ws_id=1,
+            scope_id=1,
             session_id=2,
             requested_by=1,
             style_mode="rational",
@@ -704,6 +704,7 @@ class AppFactoryTests(unittest.IsolatedAsyncioTestCase):
         alerts = await alerts_route.endpoint(job_id=1, x_ai_internal_key="k8", status=None, limit=20)
         self.assertEqual(alerts["count"], 1)
         self.assertEqual(alerts["items"][0]["status"], "raised")
+        self.assertEqual(alerts["items"][0]["scopeId"], 1)
 
         acked = await ack_route.endpoint(
             job_id=1,
@@ -729,6 +730,8 @@ class AppFactoryTests(unittest.IsolatedAsyncioTestCase):
             limit=20,
         )
         self.assertGreaterEqual(pending_outbox["count"], 3)
+        self.assertEqual(pending_outbox["items"][0]["scopeId"], 1)
+        self.assertIn("scopeId", pending_outbox["items"][0]["payload"])
         event_id = pending_outbox["items"][0]["eventId"]
 
         marked = await delivery_route.endpoint(

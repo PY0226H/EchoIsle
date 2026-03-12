@@ -85,7 +85,7 @@ class OpenAiJudgeTests(unittest.TestCase):
         request = SimpleNamespace(
             job=SimpleNamespace(
                 job_id=10,
-                ws_id=1,
+                scope_id=1,
                 session_id=99,
                 requested_by=1,
                 style_mode="rational",

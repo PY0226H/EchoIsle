@@ -190,7 +190,7 @@ class TraceStoreTests(unittest.TestCase):
         store = TraceStore(ttl_secs=3600)
         alert = store.upsert_audit_alert(
             job_id=301,
-            ws_id=1,
+            scope_id=1,
             trace_id="trace-301",
             alert_type="compliance_violation",
             severity="warning",
@@ -240,6 +240,8 @@ class TraceStoreTests(unittest.TestCase):
         outbox = store.list_alert_outbox(delivery_status="pending", limit=10)
         self.assertGreaterEqual(len(outbox), 3)
         first_event = outbox[0]
+        self.assertIn("scopeId", first_event.payload)
+        self.assertNotIn("wsId", first_event.payload)
         updated = store.mark_alert_outbox_delivery(
             event_id=first_event.event_id,
             delivery_status="sent",

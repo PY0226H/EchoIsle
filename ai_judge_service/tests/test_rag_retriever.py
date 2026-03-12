@@ -21,7 +21,7 @@ def _build_request():
     return SimpleNamespace(
         job=SimpleNamespace(
             job_id=100,
-            ws_id=1,
+            scope_id=1,
             session_id=2,
             requested_by=3,
             style_mode="rational",

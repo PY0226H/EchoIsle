@@ -133,7 +133,7 @@ class AuditAlertTransition:
 class AuditAlertRecord:
     alert_id: str
     job_id: int
-    ws_id: int
+    scope_id: int
     trace_id: str
     alert_type: str
     severity: str
@@ -152,7 +152,7 @@ class AuditAlertRecord:
 class AlertOutboxEvent:
     event_id: str
     channel: str
-    ws_id: int
+    scope_id: int
     job_id: int
     trace_id: str
     alert_id: str
@@ -305,7 +305,7 @@ class TraceStoreProtocol(Protocol):
         self,
         *,
         job_id: int,
-        ws_id: int,
+        scope_id: int,
         trace_id: str,
         alert_type: str,
         severity: str,
@@ -604,7 +604,7 @@ class TraceStore(TraceStoreProtocol):
         event_id = f"evt-{alert.job_id}-{self._event_seq:06d}"
         payload = {
             "eventType": "ai_judge.audit_alert.status_changed.v1",
-            "wsId": alert.ws_id,
+            "scopeId": alert.scope_id,
             "jobId": alert.job_id,
             "traceId": alert.trace_id,
             "alertId": alert.alert_id,
@@ -619,7 +619,7 @@ class TraceStore(TraceStoreProtocol):
         event = AlertOutboxEvent(
             event_id=event_id,
             channel="ai_judge_audit_alert",
-            ws_id=alert.ws_id,
+            scope_id=alert.scope_id,
             job_id=alert.job_id,
             trace_id=alert.trace_id,
             alert_id=alert.alert_id,
@@ -638,7 +638,7 @@ class TraceStore(TraceStoreProtocol):
         self,
         *,
         job_id: int,
-        ws_id: int,
+        scope_id: int,
         trace_id: str,
         alert_type: str,
         severity: str,
@@ -690,7 +690,7 @@ class TraceStore(TraceStoreProtocol):
             alert = AuditAlertRecord(
                 alert_id=f"al-{job_id}-{self._alert_seq:06d}",
                 job_id=job_id,
-                ws_id=max(0, ws_id),
+                scope_id=max(0, scope_id),
                 trace_id=trace_id,
                 alert_type=norm_type,
                 severity=norm_severity,
@@ -1072,7 +1072,7 @@ class RedisTraceStore(TraceStoreProtocol):
         return {
             "alert_id": row.alert_id,
             "job_id": row.job_id,
-            "ws_id": row.ws_id,
+            "scope_id": row.scope_id,
             "trace_id": row.trace_id,
             "alert_type": row.alert_type,
             "severity": row.severity,
@@ -1098,7 +1098,10 @@ class RedisTraceStore(TraceStoreProtocol):
         return AuditAlertRecord(
             alert_id=str(payload.get("alert_id") or ""),
             job_id=_coerce_int(payload.get("job_id"), default=0),
-            ws_id=_coerce_int(payload.get("ws_id"), default=0),
+            scope_id=_coerce_int(
+                payload.get("scope_id", payload.get("ws_id")),
+                default=0,
+            ),
             trace_id=str(payload.get("trace_id") or ""),
             alert_type=_normalize_token(payload.get("alert_type")) or "unknown",
             severity=_normalize_token(payload.get("severity")) or "warning",
@@ -1148,7 +1151,7 @@ class RedisTraceStore(TraceStoreProtocol):
         return {
             "event_id": row.event_id,
             "channel": row.channel,
-            "ws_id": row.ws_id,
+            "scope_id": row.scope_id,
             "job_id": row.job_id,
             "trace_id": row.trace_id,
             "alert_id": row.alert_id,
@@ -1165,7 +1168,10 @@ class RedisTraceStore(TraceStoreProtocol):
         return AlertOutboxEvent(
             event_id=str(payload.get("event_id") or ""),
             channel=str(payload.get("channel") or "ai_judge_audit_alert"),
-            ws_id=_coerce_int(payload.get("ws_id"), default=0),
+            scope_id=_coerce_int(
+                payload.get("scope_id", payload.get("ws_id")),
+                default=0,
+            ),
             job_id=_coerce_int(payload.get("job_id"), default=0),
             trace_id=str(payload.get("trace_id") or ""),
             alert_id=str(payload.get("alert_id") or ""),
@@ -1212,14 +1218,14 @@ class RedisTraceStore(TraceStoreProtocol):
         event = AlertOutboxEvent(
             event_id=f"evt-{alert.job_id}-{seq}-{abs(hash((alert.alert_id, status))) % 10000}",
             channel="ai_judge_audit_alert",
-            ws_id=alert.ws_id,
+            scope_id=alert.scope_id,
             job_id=alert.job_id,
             trace_id=alert.trace_id,
             alert_id=alert.alert_id,
             status=status,
             payload={
                 "eventType": "ai_judge.audit_alert.status_changed.v1",
-                "wsId": alert.ws_id,
+                "scopeId": alert.scope_id,
                 "jobId": alert.job_id,
                 "traceId": alert.trace_id,
                 "alertId": alert.alert_id,
@@ -1357,7 +1363,7 @@ class RedisTraceStore(TraceStoreProtocol):
         self,
         *,
         job_id: int,
-        ws_id: int,
+        scope_id: int,
         trace_id: str,
         alert_type: str,
         severity: str,
@@ -1408,7 +1414,7 @@ class RedisTraceStore(TraceStoreProtocol):
         alert = AuditAlertRecord(
             alert_id=f"al-{job_id}-{next_seq:06d}",
             job_id=job_id,
-            ws_id=max(0, ws_id),
+            scope_id=max(0, scope_id),
             trace_id=trace_id,
             alert_type=norm_type,
             severity=norm_severity,

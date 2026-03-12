@@ -231,7 +231,7 @@ def _serialize_alert_item(alert: Any) -> dict[str, Any]:
     return {
         "alertId": alert.alert_id,
         "jobId": alert.job_id,
-        "wsId": alert.ws_id,
+        "scopeId": alert.scope_id,
         "traceId": alert.trace_id,
         "type": alert.alert_type,
         "severity": alert.severity,
@@ -260,7 +260,7 @@ def _serialize_outbox_event(item: Any) -> dict[str, Any]:
     return {
         "eventId": item.event_id,
         "channel": item.channel,
-        "wsId": item.ws_id,
+        "scopeId": item.scope_id,
         "jobId": item.job_id,
         "traceId": item.trace_id,
         "alertId": item.alert_id,
@@ -520,7 +520,7 @@ def create_app(runtime: AppRuntime) -> FastAPI:
             normalized = _normalize_runtime_audit_alert(row)
             alert = runtime.trace_store.upsert_audit_alert(
                 job_id=request.job.job_id,
-                ws_id=request.job.ws_id,
+                scope_id=request.job.scope_id,
                 trace_id=request.trace_id or "",
                 alert_type=normalized["alertType"],
                 severity=normalized["severity"],

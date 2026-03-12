@@ -18,7 +18,7 @@ def _build_request(*, user_id: int | None = None, speaker_tag: str | None = "pro
     return JudgeDispatchRequest(
         job=DispatchJob(
             job_id=1,
-            ws_id=1,
+            scope_id=1,
             session_id=2,
             requested_by=1,
             style_mode="rational",
