@@ -137,7 +137,6 @@ impl AiJudgeDispatchMetrics {
 #[derive(Debug, Clone, FromRow)]
 struct PendingDispatchJob {
     id: i64,
-    ws_id: i64,
     session_id: i64,
     requested_by: i64,
     style_mode: String,
@@ -187,7 +186,6 @@ struct AiJudgeDispatchRequest {
 #[derive(Debug, Clone, Serialize)]
 struct AiJudgeDispatchJob {
     job_id: u64,
-    ws_id: u64,
     session_id: u64,
     requested_by: u64,
     style_mode: String,

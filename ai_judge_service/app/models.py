@@ -1,12 +1,15 @@
 from datetime import datetime
 from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import AliasChoices, BaseModel, Field
 
 
 class DispatchJob(BaseModel):
     job_id: int
-    ws_id: int
+    ws_id: int = Field(
+        default=1,
+        validation_alias=AliasChoices("ws_id", "wsId", "scope_id", "scopeId"),
+    )
     session_id: int
     requested_by: int
     style_mode: str

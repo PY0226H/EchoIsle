@@ -154,7 +154,6 @@ impl AppState {
             WHERE j.id = due.id
             RETURNING
                 j.id,
-                j.ws_id,
                 j.session_id,
                 j.requested_by,
                 j.style_mode,
@@ -237,7 +236,6 @@ impl AppState {
         Ok(AiJudgeDispatchRequest {
             job: AiJudgeDispatchJob {
                 job_id: job.id as u64,
-                ws_id: job.ws_id as u64,
                 session_id: job.session_id as u64,
                 requested_by: job.requested_by as u64,
                 style_mode: job.style_mode.clone(),

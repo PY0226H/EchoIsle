@@ -140,7 +140,6 @@ async fn load_dispatch_payload_should_include_recent_messages_ordered_asc() -> R
 
     let job = PendingDispatchJob {
         id: job_id,
-        ws_id: 1,
         session_id,
         requested_by: 1,
         style_mode: "rational".to_string(),
@@ -182,6 +181,13 @@ async fn dispatch_payload_should_blind_user_id_and_use_speaker_tag() -> Result<(
 
     let captured = payloads.lock().expect("capture lock poisoned");
     assert_eq!(captured.len(), 1);
+    assert!(
+        captured[0]
+            .get("job")
+            .and_then(|v| v.get("ws_id"))
+            .is_none(),
+        "dispatch payload should not include legacy ws_id in job"
+    );
     let messages = captured[0]
         .get("messages")
         .and_then(Value::as_array)
