@@ -27,8 +27,9 @@
             <div class="text-gray-900 font-semibold mt-1">{{ user?.id || '-' }}</div>
           </div>
           <div>
-            <div class="text-xs uppercase text-gray-500">email</div>
-            <div class="text-gray-900 font-semibold mt-1">{{ user?.email || '-' }}</div>
+            <div class="text-xs uppercase text-gray-500">account</div>
+            <div class="text-gray-900 font-semibold mt-1">{{ accountIdentifier }}</div>
+            <div v-if="accountHint" class="text-xs text-gray-500 mt-1">{{ accountHint }}</div>
           </div>
           <div>
             <div class="text-xs uppercase text-gray-500">wallet balance</div>
@@ -152,6 +153,19 @@ export default {
     },
     boundPhone() {
       return String(this.user?.phoneE164 || '').trim();
+    },
+    accountIdentifier() {
+      const phone = String(this.user?.phoneE164 || '').trim();
+      const email = String(this.user?.email || '').trim();
+      return phone || email || '-';
+    },
+    accountHint() {
+      const phone = String(this.user?.phoneE164 || '').trim();
+      const email = String(this.user?.email || '').trim();
+      if (phone && email) {
+        return `邮箱：${email}`;
+      }
+      return '';
     },
     hasBoundPhone() {
       return !!this.boundPhone;

@@ -45,6 +45,18 @@ const router = createRouter({
   routes,
 });
 
+function isPhoneBindRequired(user) {
+  if (!user) {
+    return false;
+  }
+  const hasBindFlag = Object.prototype.hasOwnProperty.call(user, 'phoneBindRequired');
+  if (hasBindFlag) {
+    return !!user.phoneBindRequired;
+  }
+  const phone = String(user.phoneE164 || '').trim();
+  return !phone;
+}
+
 async function loadOpsSnapshotForGuard() {
   try {
     const response = await store.dispatch('getOpsRbacMe');
@@ -66,7 +78,7 @@ router.beforeEach(async (to, from, next) => {
   }
 
   const user = store.getters.getUser;
-  const phoneBindRequired = !!user?.phoneBindRequired;
+  const phoneBindRequired = isPhoneBindRequired(user);
   if (isAuthenticated && phoneBindRequired && to.name !== 'PhoneBind') {
     return next({ name: 'PhoneBind' });
   }

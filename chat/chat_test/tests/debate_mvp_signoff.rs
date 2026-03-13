@@ -12,10 +12,12 @@ use reqwest::{Client, StatusCode};
 use serde::de::DeserializeOwned;
 use serde::Deserialize;
 use std::net::SocketAddr;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::net::TcpListener;
 
 const WILD_ADDR: &str = "0.0.0.0:0";
+static PHONE_SEQ: AtomicU64 = AtomicU64::new(13_900_138_000);
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -1093,12 +1095,35 @@ impl TestServer {
     }
 
     async fn signup(&self, fullname: &str, email: &str, password: &str) -> Result<ApiSession> {
+        let phone = next_test_phone();
+        let sms_res = self
+            .http
+            .post(format!("http://{}{}", self.addr, "/api/auth/v2/sms/send"))
+            .json(&serde_json::json!({
+                "phone": phone,
+                "scene": "bind_phone",
+            }))
+            .send()
+            .await?;
+        assert_eq!(sms_res.status(), StatusCode::OK);
+        let sms_body: serde_json::Value = sms_res.json().await?;
+        let sms_code = sms_body
+            .get("debugCode")
+            .and_then(|v| v.as_str())
+            .expect("mock sms debugCode should exist in test")
+            .to_string();
+
         let res = self
             .http
-            .post(format!("http://{}{}", self.addr, "/api/signup"))
+            .post(format!(
+                "http://{}{}",
+                self.addr, "/api/auth/v2/signup/email"
+            ))
             .json(&serde_json::json!({
                 "fullname": fullname,
                 "email": email,
+                "phone": phone,
+                "smsCode": sms_code,
                 "password": password,
             }))
             .send()
@@ -1115,9 +1140,13 @@ impl TestServer {
     async fn signin(&self, email: &str, password: &str) -> Result<ApiSession> {
         let res = self
             .http
-            .post(format!("http://{}{}", self.addr, "/api/signin"))
+            .post(format!(
+                "http://{}{}",
+                self.addr, "/api/auth/v2/signin/password"
+            ))
             .json(&serde_json::json!({
-                "email": email,
+                "account": email,
+                "accountType": "email",
                 "password": password,
             }))
             .send()
@@ -1130,6 +1159,10 @@ impl TestServer {
             token: auth.access_token,
         })
     }
+}
+
+fn next_test_phone() -> String {
+    PHONE_SEQ.fetch_add(1, Ordering::Relaxed).to_string()
 }
 
 impl ApiSession {

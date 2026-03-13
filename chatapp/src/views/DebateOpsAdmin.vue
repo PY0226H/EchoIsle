@@ -69,7 +69,7 @@
             <select v-model="roleForm.userId" class="border rounded px-3 py-2 text-sm">
               <option value="">选择用户</option>
               <option v-for="user in platformUsers()" :key="user.id" :value="String(user.id)">
-                {{ user.fullname }} (#{{ user.id }}) · {{ user.email }}
+                {{ user.fullname }} (#{{ user.id }}) · {{ userAccountIdentifier(user) }}
               </option>
             </select>
             <select v-model="roleForm.role" class="border rounded px-3 py-2 text-sm">
@@ -1573,7 +1573,12 @@ export default {
       if (!user) {
         return `#${id}`;
       }
-      return `${user.fullname || 'unknown'} (#${id})`;
+      return `${user.fullname || 'unknown'} (#${id}) · ${this.userAccountIdentifier(user)}`;
+    },
+    userAccountIdentifier(user) {
+      const phone = String(user?.phoneE164 || '').trim();
+      const email = String(user?.email || '').trim();
+      return phone || email || '-';
     },
     async refreshRoleAssignments() {
       if (!this.canRoleManage) {

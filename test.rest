@@ -1,36 +1,78 @@
-### signup user
+### send sms for tchen signup (email+phone)
 
-POST http://localhost:6688/api/signup
+# @name smsTchen
+POST http://localhost:6688/api/auth/v2/sms/send
 Content-Type: application/json
 
 {
-    "workspace": "acme",
+    "phone": "13800138101",
+    "scene": "bind_phone"
+}
+
+@smsCodeTchen = {{smsTchen.response.body.debugCode}}
+
+### signup user tchen (v2 email)
+
+POST http://localhost:6688/api/auth/v2/signup/email
+Content-Type: application/json
+
+{
     "fullname": "Tyr Chen",
     "email": "tchen@acme.org",
+    "phone": "13800138101",
+    "smsCode": "{{smsCodeTchen}}",
     "password": "123456"
 }
 
-### signup user
+### send sms for alice signup (email+phone)
 
-POST http://localhost:6688/api/signup
+# @name smsAlice
+POST http://localhost:6688/api/auth/v2/sms/send
 Content-Type: application/json
 
 {
-    "workspace": "acme",
+    "phone": "13800138102",
+    "scene": "bind_phone"
+}
+
+@smsCodeAlice = {{smsAlice.response.body.debugCode}}
+
+### signup user alice (v2 email)
+
+POST http://localhost:6688/api/auth/v2/signup/email
+Content-Type: application/json
+
+{
     "fullname": "Alice Chen",
     "email": "alice@acme.org",
+    "phone": "13800138102",
+    "smsCode": "{{smsCodeAlice}}",
     "password": "123456"
 }
 
-### signup user
+### send sms for bob signup (email+phone)
 
-POST http://localhost:6688/api/signup
+# @name smsBob
+POST http://localhost:6688/api/auth/v2/sms/send
 Content-Type: application/json
 
 {
-    "workspace": "acme",
+    "phone": "13800138103",
+    "scene": "bind_phone"
+}
+
+@smsCodeBob = {{smsBob.response.body.debugCode}}
+
+### signup user bob (v2 email)
+
+POST http://localhost:6688/api/auth/v2/signup/email
+Content-Type: application/json
+
+{
     "fullname": "Bob Hua",
     "email": "bob@acme.org",
+    "phone": "13800138103",
+    "smsCode": "{{smsCodeBob}}",
     "password": "123456"
 }
 
@@ -313,15 +355,29 @@ Authorization: Bearer {{token}}
     "files": []
 }
 
-### create a bot
+### send sms for bot signup
 
-POST http://localhost:6688/api/signup
+# @name smsBot
+POST http://localhost:6688/api/auth/v2/sms/send
 Content-Type: application/json
 
 {
-    "workspace": "acme",
+    "phone": "13800138104",
+    "scene": "bind_phone"
+}
+
+@smsCodeBot = {{smsBot.response.body.debugCode}}
+
+### create a bot (v2 email)
+
+POST http://localhost:6688/api/auth/v2/signup/email
+Content-Type: application/json
+
+{
     "fullname": "Her",
     "email": "her@bot.org",
+    "phone": "13800138104",
+    "smsCode": "{{smsCodeBot}}",
     "password": "123456"
 }
 

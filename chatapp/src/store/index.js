@@ -145,7 +145,7 @@ export default createStore({
     },
     setActiveChannel(state, channelId) {
       const channel = state.channels.find((c) => c.id === channelId);
-      state.activeChannel = channel;
+      state.activeChannel = channel || null;
     },
     loadUserState(state) {
       setContext(state);
@@ -1248,9 +1248,21 @@ export default createStore({
 
 async function loadState(response, self, commit) {
   const token = response?.data?.accessToken;
-  const user = response?.data?.user;
-  if (!token || !user) {
+  const rawUser = response?.data?.user;
+  if (!token || !rawUser) {
     throw new Error('missing access token or user profile in auth response');
+  }
+  const user = normalizeUserForPhoneGate(rawUser);
+
+  // Persist auth context first. Unbound-phone users only keep the minimal state.
+  localStorage.setItem('user', JSON.stringify(user));
+  commit('setUser', user);
+  commit('setToken', token);
+  commit('setAccessTickets', null);
+
+  if (user.phoneBindRequired) {
+    applyPhoneBindPendingBootstrap(commit);
+    return user;
   }
 
   try {
@@ -1295,13 +1307,12 @@ async function loadState(response, self, commit) {
     }
 
     // Commit the mutations to update the state
-    commit('setUser', user);
-    commit('setToken', token);
-    commit('setAccessTickets', null);
     commit('setChannels', channels);
     commit('setUsers', usersMap);
     if (activeChannelId != null) {
       commit('setActiveChannel', activeChannelId);
+    } else {
+      commit('setActiveChannel', null);
     }
 
     // call initSSE action
@@ -1309,9 +1320,50 @@ async function loadState(response, self, commit) {
 
     return user;
   } catch (error) {
+    if (isPhoneBindGateError(error)) {
+      const gatedUser = {
+        ...user,
+        phoneBindRequired: true,
+      };
+      localStorage.setItem('user', JSON.stringify(gatedUser));
+      commit('setUser', gatedUser);
+      applyPhoneBindPendingBootstrap(commit);
+      return gatedUser;
+    }
     console.error('Failed to load user state:', error);
     throw error;
   }
+}
+
+function resolvePhoneBindRequired(user) {
+  const phone = String(user?.phoneE164 || '').trim();
+  if (Object.prototype.hasOwnProperty.call(user || {}, 'phoneBindRequired')) {
+    return !!user.phoneBindRequired;
+  }
+  return !phone;
+}
+
+function normalizeUserForPhoneGate(user) {
+  return {
+    ...user,
+    phoneBindRequired: resolvePhoneBindRequired(user),
+  };
+}
+
+function applyPhoneBindPendingBootstrap(commit) {
+  localStorage.setItem('users', JSON.stringify({}));
+  localStorage.setItem('channels', JSON.stringify([]));
+  localStorage.removeItem('messages');
+  localStorage.removeItem('activeChannelId');
+
+  commit('setUsers', {});
+  commit('setChannels', []);
+  commit('setActiveChannel', null);
+}
+
+function isPhoneBindGateError(error) {
+  return error?.response?.status === 403
+    && error?.response?.data?.error === 'auth_phone_bind_required';
 }
 
 async function setContext(state) {

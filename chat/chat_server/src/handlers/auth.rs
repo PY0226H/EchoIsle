@@ -548,37 +548,23 @@ fn resolve_wechat_identity_from_code(code: &str) -> Result<WechatIdentity, AppEr
     post,
     path = "/api/signup",
     responses(
-        (status = 201, description = "User created", body = AuthOutput),
+        (status = 410, description = "Legacy signup disabled", body = ErrorOutput),
         (status = 401, description = "Auth error", body = ErrorOutput),
     )
 )]
 pub(crate) async fn signup_handler(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Json(input): Json<CreateUser>,
+    State(_state): State<AppState>,
+    _headers: HeaderMap,
+    Json(_input): Json<CreateUser>,
 ) -> Result<impl IntoResponse, AppError> {
-    let user = state.create_user(&input).await?;
-    let ctx = session_context_from_headers(&headers);
-    let token_version = load_user_token_version(&state, user.id).await?;
-    let issued = issue_auth_tokens(&state, &user, token_version)?;
-    persist_refresh_session(&state, &user, &issued, &ctx).await?;
-    sync_session_state_to_redis(&state, &issued, user.id, token_version).await?;
-
     let mut resp_headers = HeaderMap::new();
-    set_refresh_cookie_header(
-        &mut resp_headers,
-        &issued.refresh_token,
-        REFRESH_TOKEN_TTL_SECS,
-    )?;
     append_auth_v1_deprecation_headers(&mut resp_headers)?;
-    tracing::info!(api = "/api/signup", "legacy auth v1 signup endpoint called");
-    let body = Json(AuthOutput {
-        access_token: issued.access_token.clone(),
-        token_type: "Bearer".to_string(),
-        expires_in_secs: ACCESS_TOKEN_TTL_SECS,
-        user,
-    });
-    Ok((StatusCode::CREATED, resp_headers, body))
+    tracing::warn!(
+        api = "/api/signup",
+        "legacy auth v1 signup endpoint disabled"
+    );
+    let body = Json(ErrorOutput::new("auth_v1_signup_disabled_use_v2"));
+    Ok((StatusCode::GONE, resp_headers, body))
 }
 
 #[utoipa::path(
@@ -979,18 +965,46 @@ pub(crate) async fn wechat_signin_v2_handler(
     let identity = resolve_wechat_identity_from_code(&input.code)?;
 
     if let Some(user) = find_user_by_wechat_identity(&state, &identity).await? {
-        let (status, resp_headers, body) =
-            issue_auth_success_response(&state, &headers, user, StatusCode::OK).await?;
+        let has_bound_phone = user
+            .phone_e164
+            .as_deref()
+            .map(str::trim)
+            .filter(|phone| !phone.is_empty())
+            .is_some()
+            && !user.phone_bind_required;
+        if has_bound_phone {
+            let (status, resp_headers, body) =
+                issue_auth_success_response(&state, &headers, user, StatusCode::OK).await?;
+            return Ok((
+                status,
+                resp_headers,
+                Json(WechatSigninV2Output {
+                    bind_required: false,
+                    wechat_ticket: None,
+                    access_token: Some(body.access_token),
+                    token_type: Some(body.token_type),
+                    expires_in_secs: Some(body.expires_in_secs),
+                    user: Some(body.user),
+                }),
+            ));
+        }
+        let ticket = Uuid::now_v7().to_string();
+        let payload = WechatBindTicketPayload {
+            provider_user_id: identity.provider_user_id.clone(),
+            provider_unionid: identity.provider_unionid.clone(),
+            nickname: identity.nickname.clone(),
+        };
+        store_wechat_bind_ticket(&state, &ticket, &payload).await?;
         return Ok((
-            status,
-            resp_headers,
+            StatusCode::OK,
+            HeaderMap::new(),
             Json(WechatSigninV2Output {
-                bind_required: false,
-                wechat_ticket: None,
-                access_token: Some(body.access_token),
-                token_type: Some(body.token_type),
-                expires_in_secs: Some(body.expires_in_secs),
-                user: Some(body.user),
+                bind_required: true,
+                wechat_ticket: Some(ticket),
+                access_token: None,
+                token_type: None,
+                expires_in_secs: None,
+                user: None,
             }),
         ));
     }
@@ -1162,12 +1176,19 @@ pub(crate) async fn set_password_v2_handler(
     if password.len() < 6 {
         return Err(AppError::AuthError("auth_password_invalid".to_string()));
     }
-    let phone_e164 = user
+    let current_user = state
+        .find_user_by_id(user.id)
+        .await?
+        .ok_or_else(|| AppError::AuthError("auth_access_invalid".to_string()))?;
+    let phone_e164 = current_user
         .phone_e164
         .as_deref()
         .map(str::trim)
         .filter(|phone| !phone.is_empty())
         .ok_or_else(|| AppError::AuthError("auth_phone_bind_required".to_string()))?;
+    if current_user.phone_bind_required {
+        return Err(AppError::AuthError("auth_phone_bind_required".to_string()));
+    }
     let sms_code = input
         .sms_code
         .as_deref()
@@ -2442,6 +2463,30 @@ mod tests {
     use http_body_util::BodyExt;
 
     #[tokio::test]
+    async fn signup_handler_should_return_gone_after_v1_disabled() -> Result<()> {
+        let (_tdb, state) = AppState::new_for_test().await?;
+        let response = signup_handler(
+            State(state),
+            HeaderMap::new(),
+            Json(CreateUser::new("Legacy", "legacy@acme.org", "123456")),
+        )
+        .await?
+        .into_response();
+        assert_eq!(response.status(), StatusCode::GONE);
+        assert_eq!(
+            response
+                .headers()
+                .get("Deprecation")
+                .and_then(|v| v.to_str().ok()),
+            Some("true")
+        );
+        let body = response.into_body().collect().await?.to_bytes();
+        let err: ErrorOutput = serde_json::from_slice(&body)?;
+        assert_eq!(err.error, "auth_v1_signup_disabled_use_v2");
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn signin_should_return_access_token_and_refresh_cookie() -> Result<()> {
         let (_tdb, state) = AppState::new_for_test().await?;
         let input = SigninUser::new("tchen@acme.org", "123456");
@@ -2814,6 +2859,88 @@ mod tests {
             HeaderMap::new(),
             Json(SigninPasswordV2Input {
                 account: "13800138055".to_string(),
+                account_type: "phone".to_string(),
+                password: "654321".to_string(),
+            }),
+        )
+        .await?
+        .into_response();
+        assert_eq!(signin_with_password_response.status(), StatusCode::OK);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn set_password_v2_should_use_db_phone_even_when_extension_snapshot_is_stale(
+    ) -> Result<()> {
+        let (_tdb, state) = AppState::new_for_test().await?;
+        let signup_sms_response = send_sms_code_v2_handler(
+            State(state.clone()),
+            HeaderMap::new(),
+            Json(SendSmsCodeV2Input {
+                phone: "13800138077".to_string(),
+                scene: "signup_phone".to_string(),
+            }),
+        )
+        .await?
+        .into_response();
+        let signup_sms_body = signup_sms_response.into_body().collect().await?.to_bytes();
+        let signup_sms_ret: SendSmsCodeV2Output = serde_json::from_slice(&signup_sms_body)?;
+        let signup_sms_code = signup_sms_ret.debug_code.expect("debug code");
+
+        let signup_response = signup_phone_v2_handler(
+            State(state.clone()),
+            HeaderMap::new(),
+            Json(SignupPhoneV2Input {
+                phone: "13800138077".to_string(),
+                sms_code: signup_sms_code,
+                password: "123456".to_string(),
+                fullname: "Snapshot Stale".to_string(),
+            }),
+        )
+        .await?
+        .into_response();
+        let signup_body = signup_response.into_body().collect().await?.to_bytes();
+        let signup_ret: AuthOutput = serde_json::from_slice(&signup_body)?;
+
+        let set_password_sms_response = send_sms_code_v2_handler(
+            State(state.clone()),
+            HeaderMap::new(),
+            Json(SendSmsCodeV2Input {
+                phone: "13800138077".to_string(),
+                scene: "bind_phone".to_string(),
+            }),
+        )
+        .await?
+        .into_response();
+        let set_password_sms_body = set_password_sms_response
+            .into_body()
+            .collect()
+            .await?
+            .to_bytes();
+        let set_password_sms_ret: SendSmsCodeV2Output =
+            serde_json::from_slice(&set_password_sms_body)?;
+        let set_password_sms_code = set_password_sms_ret.debug_code.expect("debug code");
+
+        let mut stale_snapshot = signup_ret.user.clone();
+        stale_snapshot.phone_e164 = None;
+        stale_snapshot.phone_bind_required = true;
+        let set_password_response = set_password_v2_handler(
+            Extension(stale_snapshot),
+            State(state.clone()),
+            Json(SetPasswordV2Input {
+                password: "654321".to_string(),
+                sms_code: Some(set_password_sms_code),
+            }),
+        )
+        .await?
+        .into_response();
+        assert_eq!(set_password_response.status(), StatusCode::OK);
+
+        let signin_with_password_response = signin_password_v2_handler(
+            State(state),
+            HeaderMap::new(),
+            Json(SigninPasswordV2Input {
+                account: "13800138077".to_string(),
                 account_type: "phone".to_string(),
                 password: "654321".to_string(),
             }),

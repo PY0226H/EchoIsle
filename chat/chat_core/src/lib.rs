@@ -66,6 +66,8 @@ pub struct ChatUser {
     pub id: i64,
     pub fullname: String,
     pub email: String,
+    #[sqlx(default)]
+    pub phone_e164: Option<String>,
 }
 
 #[derive(

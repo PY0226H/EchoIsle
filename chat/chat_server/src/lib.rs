@@ -17,7 +17,7 @@ use chat_core::{
     DecodingKey, EncodingKey, User,
 };
 use handlers::*;
-use middlewares::{verify_ai_internal_key, verify_chat, verify_file_ticket};
+use middlewares::{require_phone_bound, verify_ai_internal_key, verify_chat, verify_file_ticket};
 use openapi::OpenApiRouter;
 use sqlx::PgPool;
 use std::{fmt, ops::Deref, sync::Arc};
@@ -226,8 +226,7 @@ pub async fn get_router(state: AppState) -> Result<Router, AppError> {
             get(get_judge_dispatch_metrics_handler),
         )
         .layer(from_fn_with_state(state.clone(), verify_ai_internal_key));
-    let protected_api = Router::new()
-        .route("/users", get(list_chat_users_handler))
+    let auth_session_api = Router::new()
         .route("/auth/logout", post(logout_handler))
         .route("/auth/logout-all", post(logout_all_handler))
         .route("/auth/sessions", get(list_auth_sessions_handler))
@@ -237,16 +236,27 @@ pub async fn get_router(state: AppState) -> Result<Router, AppError> {
             "/auth/sessions/:sid",
             axum::routing::delete(revoke_auth_session_handler),
         )
+        .layer(from_fn_with_state(
+            state.clone(),
+            verify_token_header_only::<AppState>,
+        ));
+
+    let phone_required_api = Router::new()
+        .route("/users", get(list_chat_users_handler))
         .nest("/analytics", analytics)
         .nest("/debate", debate)
         .nest("/pay", pay)
         .nest("/chats", chat)
         .route("/upload", post(upload_handler))
         .route("/tickets", post(create_access_tickets_handler))
+        .layer(from_fn_with_state(state.clone(), require_phone_bound))
         .layer(from_fn_with_state(
             state.clone(),
             verify_token_header_only::<AppState>,
         ));
+    let protected_api = Router::new()
+        .merge(auth_session_api)
+        .merge(phone_required_api);
     let file_api = Router::new()
         .route("/files/*path", get(file_handler))
         .layer(from_fn_with_state(state.clone(), verify_file_ticket));
@@ -470,6 +480,96 @@ mod health_tests {
         let trigger = rx.recv().await.expect("should receive trigger");
         assert_eq!(trigger.job_id, 42);
         assert_eq!(trigger.source, "test");
+    }
+}
+
+#[cfg(all(test, feature = "test-util"))]
+mod phone_gate_router_tests {
+    use super::*;
+    use anyhow::Result;
+    use axum::{
+        body::Body,
+        http::{Method, Request, StatusCode},
+    };
+    use http_body_util::BodyExt;
+    use tower::ServiceExt;
+
+    async fn issue_token_for_user(state: &AppState, user_id: i64, sid: &str) -> Result<String> {
+        let family_id = format!("{sid}-family");
+        let refresh_jti = format!("{sid}-refresh-jti");
+        let access_jti = format!("{sid}-access-jti");
+
+        sqlx::query(
+            r#"
+            INSERT INTO auth_refresh_sessions (
+                user_id, sid, family_id, current_jti, expires_at, created_at, updated_at
+            )
+            VALUES ($1, $2, $3, $4, NOW() + interval '1 day', NOW(), NOW())
+            ON CONFLICT (sid) DO UPDATE
+            SET current_jti = EXCLUDED.current_jti,
+                family_id = EXCLUDED.family_id,
+                revoked_at = NULL,
+                revoke_reason = NULL,
+                expires_at = EXCLUDED.expires_at,
+                updated_at = NOW()
+            "#,
+        )
+        .bind(user_id)
+        .bind(sid)
+        .bind(&family_id)
+        .bind(&refresh_jti)
+        .execute(&state.pool)
+        .await?;
+
+        let token = state
+            .ek
+            .sign_access_token_with_jti(user_id, sid, 0, access_jti, 900)?;
+        Ok(token)
+    }
+
+    #[tokio::test]
+    async fn router_should_block_core_api_for_unbound_phone_but_allow_bind_endpoint() -> Result<()>
+    {
+        let (_tdb, state) = AppState::new_for_test().await?;
+        let unbound = state
+            .create_user(&CreateUser {
+                fullname: "No Phone".to_string(),
+                email: "router-gate@acme.org".to_string(),
+                password: "123456".to_string(),
+            })
+            .await?;
+        let token = issue_token_for_user(&state, unbound.id, "router-phone-gate").await?;
+
+        let app = get_router(state).await?;
+        let users_req = Request::builder()
+            .method(Method::GET)
+            .uri("/api/users")
+            .header("Authorization", format!("Bearer {}", token))
+            .body(Body::empty())?;
+        let users_res = app.clone().oneshot(users_req).await?;
+        assert_eq!(users_res.status(), StatusCode::FORBIDDEN);
+        let users_body = users_res.into_body().collect().await?.to_bytes();
+        let users_error: ErrorOutput = serde_json::from_slice(&users_body)?;
+        assert_eq!(users_error.error, "auth_phone_bind_required");
+
+        let bind_req = Request::builder()
+            .method(Method::POST)
+            .uri("/api/auth/v2/phone/bind")
+            .header("Authorization", format!("Bearer {}", token))
+            .header("Content-Type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "phone": "invalid-phone",
+                    "smsCode": "000000",
+                })
+                .to_string(),
+            ))?;
+        let bind_res = app.oneshot(bind_req).await?;
+        assert_eq!(bind_res.status(), StatusCode::UNAUTHORIZED);
+        let bind_body = bind_res.into_body().collect().await?.to_bytes();
+        let bind_error: ErrorOutput = serde_json::from_slice(&bind_body)?;
+        assert_eq!(bind_error.error, "auth_sms_code_invalid");
+        Ok(())
     }
 }
 

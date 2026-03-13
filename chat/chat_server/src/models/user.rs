@@ -38,10 +38,11 @@ pub struct CreateUserWithPhoneInput {
 impl AppState {
     /// Find a user by email
     pub async fn find_user_by_email(&self, email: &str) -> Result<Option<User>, AppError> {
+        let normalized_email = normalize_email_for_query(email);
         let user = sqlx::query_as(
-            "SELECT id, fullname, COALESCE(email, '') AS email, phone_e164, phone_verified_at, phone_bind_required, created_at FROM users WHERE email = $1",
+            "SELECT id, fullname, COALESCE(email, '') AS email, phone_e164, phone_verified_at, phone_bind_required, created_at FROM users WHERE lower(btrim(email)) = $1",
         )
-        .bind(email)
+        .bind(normalized_email)
         .fetch_optional(&self.pool)
         .await?;
         Ok(user)
@@ -71,24 +72,29 @@ impl AppState {
     /// Create a new user.
     /// Single-tenant user creation path (platform scope only).
     pub async fn create_user(&self, input: &CreateUser) -> Result<User, AppError> {
-        let existing: Option<(i64,)> = sqlx::query_as("SELECT id FROM users WHERE email = $1")
-            .bind(&input.email)
-            .fetch_optional(&self.pool)
-            .await?;
+        let normalized_email = normalize_email_for_query(&input.email);
+        let existing: Option<(i64,)> =
+            sqlx::query_as("SELECT id FROM users WHERE lower(btrim(email)) = $1")
+                .bind(&normalized_email)
+                .fetch_optional(&self.pool)
+                .await?;
         if existing.is_some() {
-            return Err(AppError::EmailAlreadyExists(input.email.clone()));
+            return Err(AppError::EmailAlreadyExists(normalized_email.clone()));
         }
 
         let password_hash = hash_password(&input.password)?;
-        let is_bot = is_bot_email(&input.email);
+        let is_bot = is_bot_email(&normalized_email);
         let user: User = sqlx::query_as(
             r#"
             INSERT INTO users (email, fullname, password_hash, is_bot)
             VALUES ($1, $2, $3, $4)
-            RETURNING id, fullname, email, is_bot, created_at
+            RETURNING
+                id, fullname, COALESCE(email, '') AS email,
+                phone_e164, phone_verified_at, phone_bind_required,
+                is_bot, created_at
             "#,
         )
-        .bind(&input.email)
+        .bind(&normalized_email)
         .bind(&input.fullname)
         .bind(password_hash)
         .bind(is_bot)
@@ -100,10 +106,11 @@ impl AppState {
 
     /// Verify email and password
     pub async fn verify_user(&self, input: &SigninUser) -> Result<Option<User>, AppError> {
+        let normalized_email = normalize_email_for_query(&input.email);
         let user: Option<User> = sqlx::query_as(
-            "SELECT id, fullname, COALESCE(email, '') AS email, phone_e164, phone_verified_at, phone_bind_required, password_hash, created_at FROM users WHERE email = $1",
+            "SELECT id, fullname, COALESCE(email, '') AS email, phone_e164, phone_verified_at, phone_bind_required, password_hash, created_at FROM users WHERE lower(btrim(email)) = $1",
         )
-        .bind(&input.email)
+        .bind(&normalized_email)
         .fetch_optional(&self.pool)
         .await?;
         match user {
@@ -151,10 +158,11 @@ impl AppState {
         input: &CreateUserWithPhoneInput,
     ) -> Result<User, AppError> {
         let mut tx = self.pool.begin().await?;
+        let normalized_email = input.email.as_deref().map(normalize_email_for_query);
 
-        if let Some(email) = input.email.as_ref() {
+        if let Some(email) = normalized_email.as_ref() {
             let existing_email: Option<(i64,)> =
-                sqlx::query_as("SELECT id FROM users WHERE email = $1")
+                sqlx::query_as("SELECT id FROM users WHERE lower(btrim(email)) = $1")
                     .bind(email)
                     .fetch_optional(&mut *tx)
                     .await?;
@@ -173,8 +181,7 @@ impl AppState {
         }
 
         let password_hash = hash_password(&input.password)?;
-        let is_bot = input
-            .email
+        let is_bot = normalized_email
             .as_ref()
             .map(|email| is_bot_email(email))
             .unwrap_or(false);
@@ -192,7 +199,7 @@ impl AppState {
                 is_bot, created_at
             "#,
         )
-        .bind(input.email.as_deref())
+        .bind(normalized_email.as_deref())
         .bind(&input.phone_e164)
         .bind(input.phone_bind_required)
         .bind(&input.fullname)
@@ -266,7 +273,7 @@ impl AppState {
     pub async fn fetch_chat_user_by_ids(&self, ids: &[i64]) -> Result<Vec<ChatUser>, AppError> {
         let users = sqlx::query_as(
             r#"
-        SELECT id, fullname, COALESCE(email, '') AS email
+        SELECT id, fullname, COALESCE(email, '') AS email, phone_e164
         FROM users
         WHERE id = ANY($1)
         "#,
@@ -280,7 +287,7 @@ impl AppState {
     pub async fn fetch_chat_users(&self) -> Result<Vec<ChatUser>, AppError> {
         let users = sqlx::query_as(
             r#"
-        SELECT id, fullname, COALESCE(email, '') AS email
+        SELECT id, fullname, COALESCE(email, '') AS email, phone_e164
         FROM users
         "#,
         )
@@ -302,6 +309,10 @@ fn hash_password(password: &str) -> Result<String, AppError> {
         .to_string();
 
     Ok(password_hash)
+}
+
+fn normalize_email_for_query(input: &str) -> String {
+    input.trim().to_ascii_lowercase()
 }
 
 fn is_bot_email(email: &str) -> bool {
@@ -365,11 +376,11 @@ mod tests {
     async fn create_duplicate_user_should_fail() -> Result<()> {
         let (_tdb, state) = AppState::new_for_test().await?;
 
-        let input = CreateUser::new("Tyr Chen", "tchen@acme.org", "hunter42");
+        let input = CreateUser::new("Tyr Chen", "TCHEN@ACME.ORG ", "hunter42");
         let ret = state.create_user(&input).await;
         match ret {
             Err(AppError::EmailAlreadyExists(email)) => {
-                assert_eq!(email, input.email);
+                assert_eq!(email, "tchen@acme.org");
             }
             _ => panic!("Expecting EmailAlreadyExists error"),
         }
@@ -380,19 +391,21 @@ mod tests {
     async fn create_and_verify_user_should_work() -> Result<()> {
         let (_tdb, state) = AppState::new_for_test().await?;
 
-        let input = CreateUser::new("Tian Chen", "tyr@acme.org", "hunter42");
+        let input = CreateUser::new("Tian Chen", "TyR@Acme.org ", "hunter42");
         let user = state.create_user(&input).await?;
-        assert_eq!(user.email, input.email);
+        assert_eq!(user.email, "tyr@acme.org");
         assert_eq!(user.fullname, input.fullname);
+        assert!(user.phone_bind_required);
+        assert!(user.phone_e164.is_none());
         assert!(user.id > 0);
 
-        let user = state.find_user_by_email(&input.email).await?;
+        let user = state.find_user_by_email("  TYR@ACME.ORG").await?;
         assert!(user.is_some());
         let user = user.unwrap();
-        assert_eq!(user.email, input.email);
+        assert_eq!(user.email, "tyr@acme.org");
         assert_eq!(user.fullname, input.fullname);
 
-        let input = SigninUser::new(&input.email, &input.password);
+        let input = SigninUser::new("TYR@ACME.ORG", &input.password);
         let user = state.verify_user(&input).await?;
         assert!(user.is_some());
 
